@@ -1,0 +1,13 @@
+node_modules/
+.next/
+.next-freya-dev/
+.next-freya-build/
+out/
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.env*
+!.env.example
+*.log
+.DS_Store
