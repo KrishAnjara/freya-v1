@@ -8,12 +8,29 @@
 // from. Edit those sources, not the generated Modelfile.
 //
 // Set FREYA_ADAPTER=./path/to/adapter to layer a trained LoRA adapter (see training/README.md).
+import { existsSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import { buildLocalSystemPrompt } from "../lib/personality.ts";
 import { createDefaultCharacterProfile } from "../lib/character-profile.ts";
 
-const BASE = process.env.FREYA_BASE_MODEL || "huihui_ai/qwen2.5-abliterate:3b";
-const ADAPTER = process.env.FREYA_ADAPTER || "";
+/**
+ * Ollama resolves a relative FROM/ADAPTER path against the Modelfile's own folder (ollama/),
+ * not where the command runs, so "./training/x.gguf" was looked up as "ollama/training/x.gguf"
+ * and rejected as an "invalid model name". Local files are made absolute here, and checked.
+ * Library names like "huihui_ai/qwen2.5-abliterate:3b" are passed through unchanged.
+ */
+function localOrLibrary(value) {
+  const isPath = /^(\.{1,2}[\\/]|[a-z]:[\\/]|\/)|\.(gguf|safetensors|bin)$/i.test(value);
+  if (!isPath) return value;
+  const absolute = resolve(process.cwd(), value);
+  if (!existsSync(absolute)) throw new Error(`Model file not found: ${absolute}`);
+  // Forward slashes work for Ollama on Windows too, and avoid backslash escaping.
+  return absolute.replace(/\\/g, "/");
+}
+
+const BASE = localOrLibrary(process.env.FREYA_BASE_MODEL || "huihui_ai/qwen2.5-abliterate:3b");
+const ADAPTER = process.env.FREYA_ADAPTER ? localOrLibrary(process.env.FREYA_ADAPTER) : "";
 
 const examples = JSON.parse(await readFile(new URL("../training/freya-examples.json", import.meta.url), "utf8"));
 const system = buildLocalSystemPrompt([], "adaptive", createDefaultCharacterProfile(), true);
