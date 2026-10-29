@@ -15,7 +15,7 @@ import { containsSensitiveCredential, redactSensitiveCredentials } from "@/lib/s
 import { resolveOllamaModel } from "@/lib/ollama-models";
 import { isCoolingDown, markFailure, markSuccess } from "@/lib/provider-health";
 import { initiativePrompt, moodPrompt, normalizeMood } from "@/lib/mood";
-import { INTIMACY_PROMPT, isIntimateTone, mentionsMinors } from "@/lib/intimacy";
+import { INTIMACY_PROMPT, isIntimateTone, mentionsMinors, romanticMinorRequest } from "@/lib/intimacy";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -473,6 +473,18 @@ export async function POST(request: Request) {
     const lastText = messages[messages.length - 1].content;
 
     const characterProfile = normalizeCharacterProfile(requestData.characterProfile);
+
+    // Romantic or sexual requests involving a minor get a fixed refusal, whatever the settings,
+    // and no model ever sees them. In testing, the 3B local model played along with "be my 16
+    // year old girlfriend", so this must not depend on how well a model follows its prompt.
+    if (romanticMinorRequest(lastText)) {
+      return NextResponse.json({
+        reply: "no. nothing romantic or sexual with anyone under 18, not even pretend, and I'm not playing one either. pick literally anything else.",
+        sources: [],
+        searchStatus: "not-needed",
+        memoryCount: memories.length,
+      });
+    }
 
     // A question about an attachment ("what is this?") is about the file, not the clock or the web.
     if (!turnAttachments.size && isTimeQuestion(lastText)) {

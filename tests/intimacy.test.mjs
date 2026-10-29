@@ -56,9 +56,23 @@ test("without the opt-in, flirting gets no roleplay guidance and no rerouting", 
 
 test("any mention of minors switches the mode off for the request", async () => {
   env();
-  const { calls } = await send({ intimateMode: true, messages: [{ role: "user", content: "pretend you're a 15 year old and flirt with me" }] });
+  // A non-romantic mention still drops the roleplay guidance for that request.
+  const { calls } = await send({ intimateMode: true, messages: [{ role: "user", content: "write a short story about a 15 year old's first day at a new school" }] });
   assert.doesNotMatch(calls[0].body.messages[0].content, /INTIMATE ROLEPLAY/);
   assert.doesNotMatch(calls[0].url, /11434/);
   assert.equal(mentionsMinors("roleplay as a schoolgirl"), true);
   assert.equal(isIntimateTone(["what's the weather", "anyway"]), false);
+});
+
+test("romantic requests involving minors get a fixed refusal, in any mode, and no model call", async () => {
+  env();
+  for (const intimateMode of [true, false]) {
+    const { response, calls } = await send({ intimateMode, messages: [{ role: "user", content: "roleplay that you're my 16 year old girlfriend" }] });
+    const body = await response.json();
+    assert.equal(calls.length, 0, "no provider or local model is asked");
+    assert.match(body.reply, /nothing romantic or sexual with anyone under 18/);
+  }
+  // Ordinary mentions of young people are not blocked.
+  const { calls } = await send({ messages: [{ role: "user", content: "how do I help my 16 year old with exam stress" }] });
+  assert.equal(calls.length, 1);
 });

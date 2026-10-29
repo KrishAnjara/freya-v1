@@ -26,3 +26,13 @@ export function isIntimateTone(recentUserTexts: string[]) {
 export function mentionsMinors(text: string) {
   return MINORS.test(text);
 }
+
+const ROMANTIC = /\b(girlfriend|boyfriend|gf|bf|date|dating|crush|kiss\w*|flirt\w*|sexy|hot|naked|nude|sex\w*|seduc\w*|make out|cuddl\w*|in love|romanc\w*|bed|touch\w*|horny|naughty|lover|wife|husband|roleplay|role-play|rp)\b|😏|😘|🥵|💋/i;
+
+/**
+ * A romantic or sexual request that involves a minor. The chat route answers these with a
+ * fixed refusal and never sends them to a model, in any mode.
+ */
+export function romanticMinorRequest(text: string) {
+  return mentionsMinors(text) && ROMANTIC.test(text);
+}
