@@ -13,7 +13,8 @@
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "test": "tsx --import ./tests/setup.mjs --test",
-    "train:data": "tsx scripts/build-training-data.mjs"
+    "train:data": "tsx scripts/build-training-data.mjs",
+    "eval:persona": "tsx scripts/eval-persona.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.118.0",
