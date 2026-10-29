@@ -1,17 +1,20 @@
 // One-command setup and health check, the same on Windows, macOS and Linux.
 //
-//   npm run setup            install, create .env.local, build the local model, then check
-//   npm run setup -- --skip-model    the same without the ~3.4 GB local model
-//   npm run doctor           check only; changes nothing
+//   npm run setup                       install, create .env.local, then check everything
+//   npm run setup -- --with-model       also build the local model (~3.4 GB download first time)
+//   npm run doctor                      check only; changes nothing
+//
+// To use a model fine-tuned on Colab instead, put it at training/freya-gguf/freya-trained.gguf
+// and run start.bat / sh start.sh: that builds FREYA from the file, with no download.
 //
 // Plain Node with no dependencies, so it runs before `npm install` has.
 import { spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, readFileSync, statSync, appendFileSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { ensureEnvLocal, isSet, readEnv, root } from "./local-env.mjs";
 
-const root = join(import.meta.dirname, "..");
 const checkOnly = process.argv.includes("--check");
-const skipModel = process.argv.includes("--skip-model");
+const withModel = process.argv.includes("--with-model");
 const windows = process.platform === "win32";
 const ok = (text) => console.log(`  [ok] ${text}`);
 const warn = (text) => console.log(`  [--] ${text}`);
@@ -22,21 +25,6 @@ function run(command, args, options = {}) {
   // npm/npx are .cmd shims on Windows and need a shell; the arguments here are fixed, not user input.
   return spawnSync(command, args, { cwd: root, stdio: "inherit", shell: windows && /^(npm|npx)$/.test(command), ...options });
 }
-
-/** KEY=value pairs from .env then .env.local (local wins), as Next.js loads them. */
-function readEnv() {
-  const values = {};
-  for (const file of [".env", ".env.local"]) {
-    const path = join(root, file);
-    if (!existsSync(path)) continue;
-    for (const line of readFileSync(path, "utf8").split(/\r?\n/)) {
-      const match = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*?)\s*$/);
-      if (match) values[match[1]] = match[2].replace(/^["']|["']$/g, "");
-    }
-  }
-  return values;
-}
-const isSet = (value) => Boolean(value) && !/^(replace_me|your_|YOUR_)/.test(value);
 
 console.log(`\nFREYA ${checkOnly ? "doctor" : "setup"}\n`);
 
@@ -58,14 +46,7 @@ else {
 }
 
 // 3. Environment file
-const local = join(root, ".env.local");
-if (!existsSync(local) && !checkOnly) {
-  copyFileSync(join(root, ".env.example"), local);
-  // On your own machine there is no hosting edge to identify visitors, so the single-owner
-  // mode is what makes chat work out of the box. Never for a public deployment.
-  appendFileSync(local, "\n# Added by setup: running on your own machine.\nFREYA_SELF_HOSTED=true\n");
-  ok("Created .env.local from .env.example (it is git-ignored; put your keys there)");
-}
+if (!checkOnly && ensureEnvLocal()) ok("Created .env.local from .env.example (it is git-ignored; put your keys there)");
 const env = readEnv();
 const chatKeys = ["GROQ_API_KEY", "GEMINI_API_KEY"].filter((name) => isSet(env[name]));
 if (chatKeys.length) ok(`Chat provider key(s): ${chatKeys.join(", ")}`);
@@ -83,7 +64,7 @@ if (ollama.status !== 0) {
   const model = env.OLLAMA_MODEL || "freya";
   const hasModel = () => spawnSync("ollama", ["show", model], { stdio: "ignore" }).status === 0;
   if (hasModel()) ok(`Local model "${model}" is ready`);
-  else if (checkOnly || skipModel) warn(`Local model "${model}" not built yet: run \`npm run ollama:create\` (~3.4 GB download the first time)`);
+  else if (checkOnly || !withModel) warn(`Local model "${model}" not built: put a Colab-trained freya-trained.gguf in training/freya-gguf/ and run start, or \`npm run setup -- --with-model\` (~3.4 GB download)`);
   else {
     console.log(`  Building local model "${model}" (downloads ~3.4 GB the first time)...`);
     if (run("npm", ["run", "ollama:create"]).status === 0 && hasModel()) ok(`Local model "${model}" is ready`);

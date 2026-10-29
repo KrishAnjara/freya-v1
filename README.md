@@ -19,14 +19,17 @@ cd freya-v1
 npm run setup
 ```
 
-`setup` installs dependencies, creates `.env.local` (git-ignored), builds the local model if
-Ollama is installed, and tells you what's missing. Then:
+`setup` installs dependencies, creates `.env.local` (git-ignored) and tells you what's missing.
+Then:
 
 1. Put at least one key in `.env.local`: `GROQ_API_KEY` ([get one](https://console.groq.com/keys))
    and ideally `GEMINI_API_KEY` ([get one](https://aistudio.google.com/apikey)) and
    `TAVILY_API_KEY` ([get one](https://app.tavily.com)).
-2. `npm run dev`, then open http://localhost:3000.
+2. Start FREYA: **`start.bat`** on Windows (double-click), **`sh start.sh`** on macOS/Linux.
+   Open http://localhost:3000.
 
+The start script never downloads a model. If you've fine-tuned one on Colab (below), drop
+`freya-trained.gguf` into `training/freya-gguf/` and start: it builds FREYA from that file first.
 `npm run doctor` re-checks everything at any time without changing anything.
 
 ## How a reply is made

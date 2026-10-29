@@ -18,7 +18,17 @@ Edit those two sources and rerun the command; never edit the generated Modelfile
 ## 2. Fine-tuning (optional, on Google Colab)
 
 Open [freya_colab.ipynb](https://colab.research.google.com/github/KrishAnjara/freya-v1/blob/main/training/freya_colab.ipynb),
-choose **Runtime > Change runtime type > T4 GPU**, then **Runtime > Run all**. It:
+choose **Runtime > Change runtime type > T4 GPU**, then run its one cell. Or, in any Colab
+notebook, one cell:
+
+```python
+from google.colab import drive; drive.mount("/content/drive")
+!git clone -q https://github.com/KrishAnjara/freya-v1.git /content/freya-v1 || git -C /content/freya-v1 pull -q
+%cd /content/freya-v1
+!python training/colab_run.py --save-to /content/drive/MyDrive/freya
+```
+
+Either way, `training/colab_run.py` does every step (`--smoke` for a quick 10-step check). It:
 
 1. builds `freya-train.jsonl` from `freya-examples.json` (plus any files you upload);
 2. validates every conversation (rules below);
@@ -26,18 +36,12 @@ choose **Runtime > Change runtime type > T4 GPU**, then **Runtime > Run all**. I
 4. loads it into Ollama **on Colab** and runs the same 17-case evaluation as the laptop;
 5. saves `freya-trained.gguf` to Google Drive.
 
-Back on your machine (same commands on every OS):
+Back on your machine: put `freya-trained.gguf` in `training/freya-gguf/` and run `start.bat`
+(Windows) or `sh start.sh`. It reads the file's model family, builds FREYA from it with the
+matching chat format (no download), and starts the app. It rebuilds only when the file changes.
+To go back to the stock model, delete the file and run `npm run ollama:create`.
 
-```bash
-# put the file in training/freya-gguf/, then build it next to your current model and compare
-npm run ollama:create -- --base training/freya-gguf/freya-trained.gguf --name freya-trained
-npm run eval:persona -- freya-trained
-npm run eval:persona -- freya
-# if it's better, make it the one the app uses (to undo: npm run ollama:create)
-npm run ollama:create -- --base training/freya-gguf/freya-trained.gguf
-```
-
-Read the transcripts, not just the scores.
+The Colab run already evaluated the model; read those transcripts, not just the score.
 
 ## Your own conversations
 
