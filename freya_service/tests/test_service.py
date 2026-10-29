@@ -40,6 +40,7 @@ def setup_service(handler, monkeypatch, ollama_url="http://ollama.test"):
     monkeypatch.setenv("AI_FALLBACK_PROVIDER", "groq")
     monkeypatch.setenv("AI_FALLBACK_ENABLED", "true")
     monkeypatch.setenv("GROQ_API_KEY", "test-only-key")
+    monkeypatch.setenv("OLLAMA_MODEL", "freya")
     settings = replace(Settings.from_env(), ollama_url=ollama_url, groq_key="test-only-key")
     app.state.settings = settings
     app.state.providers = build_providers(settings)
@@ -55,14 +56,16 @@ def teardown_service():
 def test_health_reports_provider_status_without_credentials(monkeypatch):
     def handler(request):
         assert request.url.path == "/api/tags"
-        return httpx.Response(200, json={"models": [{"name": "llama3.2:1b"}]})
+        # Real Ollama tag listing: untagged models appear as "name:latest".
+        return httpx.Response(200, json={"models": [{"name": "freya:latest"}]})
     client = setup_service(handler, monkeypatch)
     try:
         public_health = client.get("/health").json()
         result = client.get("/v1/diagnostics", headers={"Authorization": f"Bearer {TOKEN}"}).json()
         assert result["providers"]["ollama"] == "available"
         assert "test-only-key" not in json.dumps(result)
-        assert public_health["service_auth_configured"] is True
+        # The public probe reveals nothing about configuration; details need the token.
+        assert public_health == {"status": "ok"}
         assert client.get("/v1/diagnostics").status_code == 401
     finally:
         client.close()

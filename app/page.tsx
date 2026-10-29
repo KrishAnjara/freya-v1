@@ -20,6 +20,7 @@ import { prepareAttachment } from "@/lib/prepare-attachment";
 import { chopCasually, isAside, takeCompleteParts, typingDelay, wantsLongForm } from "@/lib/reply-parts";
 import { addCuriosity, applySelfReport, driftMood, extractMoodTag, initialMood, loadMood, reactToMessage, saveMood, type MoodState } from "@/lib/mood";
 import { contentWords } from "@/lib/stream-telemetry";
+import { isReasoningMode, needsReasoning, type ReasoningMode } from "@/lib/reasoning-signal";
 import LongformMessage from "@/app/components/LongformMessage";
 import { describeThread, modelHistory, requestTurns, turnOf } from "@/lib/chat-thread";
 import { notificationPreview, notificationState, requestNotifications, showNotification } from "@/lib/notifications";
@@ -73,6 +74,8 @@ type Message = {
   streaming?: boolean;
   /** FREYA texted this first, unprompted. */
   initiative?: boolean;
+  /** Cloud analysts who worked this reply through first (lib/council). */
+  reasoned?: string[];
 };
 type Memory = { id: string; text: string; createdAt: string; updatedAt?: string };
 type Conversation = { id: string; title: string; messages: Message[]; createdAt: string; updatedAt: string; unread?: number };
@@ -99,6 +102,7 @@ const NOTIFICATIONS_KEY = "freya.v1.notifications";
 const INITIATIVE_KEY = "freya.v1.initiative";
 const SOUND_KEY = "freya.v1.messageSound";
 const INTIMATE_KEY = "freya.v1.intimateMode";
+const REASONING_KEY = "freya.v1.reasoning";
 /** Messages sent within this long of each other are answered together. */
 const BURST_MS = 1500;
 const NO_MESSAGES: Message[] = [];
@@ -173,6 +177,7 @@ function sanitizeMessage(message: Message): Message {
     ...(message.failed === true ? { failed: true } : {}),
     ...(message.longform === true ? { longform: true } : {}),
     ...(message.initiative === true ? { initiative: true } : {}),
+    ...(Array.isArray(message.reasoned) && message.reasoned.every((name) => name === "groq" || name === "gemini") && message.reasoned.length ? { reasoned: message.reasoned } : {}),
   };
 }
 
@@ -224,7 +229,7 @@ function formatRelative(iso: string) {
 }
 
 type ReplyStreamHandlers = {
-  onMeta: (sources: Source[], searchStatus: string) => void;
+  onMeta: (sources: Source[], searchStatus: string, reasoned: string[]) => void;
   onProvider: (provider: string) => void;
   onDelta: (delta: string) => void;
   onDone: (data: { truncated?: boolean } | null) => void;
@@ -253,7 +258,12 @@ async function readReplyStream(body: ReadableStream<Uint8Array>, signal: AbortSi
           if (event === "meta") {
             const sources = (data as { sources?: unknown })?.sources;
             const searchStatus = (data as { searchStatus?: unknown })?.searchStatus;
-            handlers.onMeta(Array.isArray(sources) ? sources as Source[] : [], typeof searchStatus === "string" ? searchStatus : "");
+            const reasoned = (data as { reasoned?: unknown })?.reasoned;
+            handlers.onMeta(
+              Array.isArray(sources) ? sources as Source[] : [],
+              typeof searchStatus === "string" ? searchStatus : "",
+              Array.isArray(reasoned) ? reasoned.filter((name): name is string => typeof name === "string") : [],
+            );
           } else if (event === "provider" && typeof (data as { provider?: unknown })?.provider === "string") {
             handlers.onProvider((data as { provider: string }).provider);
           } else if (event === "delta" && typeof data === "string") {
@@ -338,6 +348,10 @@ export default function Home() {
   const [soundOn, setSoundOn] = useState(true);
   /** Adult roleplay, opt-in after an 18+ confirmation. */
   const [intimateMode, setIntimateMode] = useState(false);
+  /** When the cloud reasoning panel works a question through before she answers. */
+  const [reasoningMode, setReasoningMode] = useState<ReasoningMode>("auto");
+  /** The conversation where the panel is working right now, for the "thinking it through" label. */
+  const [deliberatingIn, setDeliberatingIn] = useState("");
   /** Set when a reply used up its continuation budget and still had more to say. */
   const [truncatedReplyId, setTruncatedReplyId] = useState("");
   const [user, setUser] = useState<User | null>(null);
@@ -395,6 +409,8 @@ export default function Home() {
       setInitiativeOn(localStorage.getItem(INITIATIVE_KEY) !== "false");
       setSoundOn(localStorage.getItem(SOUND_KEY) !== "false");
       setIntimateMode(localStorage.getItem(INTIMATE_KEY) === "true");
+      const savedReasoning = localStorage.getItem(REASONING_KEY);
+      if (isReasoningMode(savedReasoning)) setReasoningMode(savedReasoning);
       setMood(loadMood());
     } catch { /* Defaults remain safe when local settings storage is unavailable. */ }
   }, [hydrated]);
@@ -411,8 +427,9 @@ export default function Home() {
       localStorage.setItem(INITIATIVE_KEY, String(initiativeOn));
       localStorage.setItem(SOUND_KEY, String(soundOn));
       localStorage.setItem(INTIMATE_KEY, String(intimateMode));
+      localStorage.setItem(REASONING_KEY, reasoningMode);
     } catch { /* Settings still apply for this session. */ }
-  }, [autonomyLevel, privacyMode, autoMemory, candidLanguage, canvasShape, notificationsOn, initiativeOn, soundOn, intimateMode, hydrated]);
+  }, [autonomyLevel, privacyMode, autoMemory, candidLanguage, canvasShape, notificationsOn, initiativeOn, soundOn, intimateMode, reasoningMode, hydrated]);
 
   useEffect(() => {
     let active = true;
@@ -1056,6 +1073,7 @@ export default function Home() {
       workerRef.current = false;
       setLoading(false);
       setTypingIn("");
+      setDeliberatingIn("");
       syncReplying();
     }
   }
@@ -1156,6 +1174,8 @@ export default function Home() {
     patchConversation(job.conversationId, (messages) => messages.map((message, index) =>
       (message.queued || message.failed) && index <= targetIndex ? { ...message, queued: false, failed: false } : message));
     setTypingIn(job.conversationId);
+    // Same rule the route uses, so the label only shows when the panel really runs.
+    if (!initiative && !privacyMode && needsReasoning(latestUserText, reasoningMode)) setDeliberatingIn(job.conversationId);
     const controller = new AbortController();
     activeChatRequest.current = controller;
     beginStream(latestUserText);
@@ -1244,6 +1264,7 @@ export default function Home() {
     let received = "";
     let truncated = false;
     let sources: Source[] = [];
+    let reasoned: string[] = [];
     try {
       const session = supabase ? (await supabase.auth.getSession()).data.session : null;
       const attachments = [...await wireAttachments(sent), ...await voiceAudio(visible.slice(lastAnswer + 1))].slice(-MAX_ATTACHMENTS);
@@ -1266,6 +1287,7 @@ export default function Home() {
           mood: moodRef.current,
           initiative,
           intimateMode,
+          reasoning: reasoningMode,
           historySummary: summarizeOlderMessages(older),
           stream: true,
         }),
@@ -1284,7 +1306,7 @@ export default function Home() {
         if (Array.isArray(payload.sources)) sources = payload.sources;
       } else if (response.body && type.includes("text/event-stream")) {
         await readReplyStream(response.body, controller.signal, {
-          onMeta: (found, searchStatus) => { recordMeta(found.length, searchStatus); sources = found; },
+          onMeta: (found, searchStatus, panel) => { recordMeta(found.length, searchStatus); sources = found; reasoned = panel; setDeliberatingIn(""); },
           onProvider: (name) => { recordProvider(name); provider = name; },
           onDelta: (delta) => {
             recordChunk(delta);
@@ -1312,7 +1334,7 @@ export default function Home() {
       // The provider is only known for sure once the stream ends; sources go under the last part.
       const lastPart = posted[posted.length - 1];
       patchConversation(job.conversationId, (messages) => messages.map((message) => posted.includes(message.id)
-        ? { ...message, ...(provider ? { provider } : {}), ...(message.id === lastPart && sources.length ? { sources } : {}) }
+        ? { ...message, ...(provider ? { provider } : {}), ...(message.id === lastPart && sources.length ? { sources } : {}), ...(message.id === lastPart && reasoned.length ? { reasoned } : {}) }
         : message));
       setTruncatedReplyId(truncated && lastPart ? lastPart : "");
       if (latestUserText && !job.extraPrompt && !initiative) void autoSaveExplicitPreference(latestUserText);
@@ -1329,6 +1351,7 @@ export default function Home() {
     } finally {
       if (activeChatRequest.current === controller) activeChatRequest.current = null;
       setTypingIn("");
+      setDeliberatingIn("");
     }
   }
   useEffect(() => { runReplyRef.current = runReply; });
@@ -1599,6 +1622,7 @@ export default function Home() {
               <div className="dialog-setting-row"><div><strong>Auto-save clear preferences</strong><span>Stores only explicit “I prefer/like/love/enjoy…” statements after a successful reply, up to 30 notes. Review or delete them in Memory controls. It does not save every message.</span></div><label className="toggle-row"><span className="sr-only">Auto-save clear preferences</span><input type="checkbox" checked={autoMemory} onChange={(event) => setAutoMemory(event.target.checked)} /></label></div>
               <div className="dialog-setting-row"><div><strong>Candid language</strong><span>Allows occasional ordinary swearing when it fits; it won&apos;t use slurs, threats, or escalate serious distress.</span></div><label className="toggle-row"><span className="sr-only">Candid language</span><input type="checkbox" checked={candidLanguage} onChange={(event) => setCandidLanguage(event.target.checked)} /></label></div>
               <div className="dialog-setting-row"><div><strong>Notifications</strong><span>A desktop alert for every FREYA message while you are in another window or tab, or another chat is open. Unread counts show in the conversation list either way.</span></div><label className="toggle-row"><span className="sr-only">Notifications</span><input type="checkbox" checked={notificationsOn} onChange={(event) => void toggleNotifications(event.target.checked)} /></label></div>
+              <div className="dialog-setting-row"><div><strong>Deep reasoning</strong><span>For maths, code, logic, comparisons and decisions, Groq&apos;s reasoning model and Gemini each work the question through independently (with live search when facts matter) before FREYA answers. Slower by a few seconds; casual chat is unaffected. Never used in Local-only mode or intimate chats.</span></div><select value={reasoningMode} onChange={(event) => setReasoningMode(event.target.value as ReasoningMode)} aria-label="Deep reasoning"><option value="auto">Auto</option><option value="always">Always</option><option value="off">Off</option></select></div>
               <div className="dialog-setting-row"><div><strong>Intimate roleplay (18+)</strong><span>Flirting and adult roleplay when you lead there; she switches back to normal chat when you do. Those turns run on your local Ollama model.</span></div><label className="toggle-row"><span className="sr-only">Intimate roleplay</span><input type="checkbox" checked={intimateMode} onChange={(event) => void toggleIntimateMode(event.target.checked)} /></label></div>
               <div className="dialog-setting-row"><div><strong>Message sound</strong><span>A soft chime whenever FREYA sends a message.</span></div><label className="toggle-row"><span className="sr-only">Message sound</span><input type="checkbox" checked={soundOn} onChange={(event) => { setSoundOn(event.target.checked); if (event.target.checked) playChime(); }} /></label></div>
               <div className="dialog-setting-row"><div><strong>FREYA texts first</strong><span>Her mood drifts on its own and she may message you unprompted after you have been quiet a while, at most twice without a reply. Off at autonomy level 0.</span></div><label className="toggle-row"><span className="sr-only">FREYA texts first</span><input type="checkbox" checked={initiativeOn} onChange={(event) => setInitiativeOn(event.target.checked)} /></label></div>
@@ -1705,6 +1729,7 @@ export default function Home() {
                       {message.sources && message.sources.length > 0 && <div className="source-list"><div className="source-heading">RETRIEVED SOURCES</div>{message.sources.filter((source) => { try { return ["http:", "https:"].includes(new URL(source.url).protocol); } catch { return false; } }).map((source) => <a key={source.url} href={source.url} target="_blank" rel="noopener noreferrer">{source.title} ↗</a>)}</div>}
                       {(message.queued || clock || (info.endsTurn && message.provider)) && <div className="message-meta">
                         {message.queued && <span className="queued">QUEUED</span>}
+                        {message.reasoned && <span title={`Worked through first by ${message.reasoned.length} independent analyst${message.reasoned.length === 1 ? "" : "s"} (${message.reasoned.join(" + ")})`}>REASONED</span>}
                         {info.endsTurn && message.provider && <span title={`Response generated by ${message.provider}`}>{message.provider === "ollama" ? "LOCAL" : message.provider.toUpperCase()}</span>}
                         {clock && <time dateTime={message.at}>{clock}</time>}
                       </div>}
@@ -1720,7 +1745,7 @@ export default function Home() {
                 {typingIn === activeId && typingIn && <article className="message assistant typing-row" aria-live="polite">
                   <div className="avatar" aria-hidden="true">F</div>
                   <div className="message-body">
-                    <div className="typing" aria-label="FREYA is typing"><i/><i/><i/></div>
+                    <div className="typing" aria-label={deliberatingIn === activeId ? "FREYA is thinking it through" : "FREYA is typing"}><i/><i/><i/>{deliberatingIn === activeId && <span className="typing-label">thinking it through…</span>}</div>
                   </div>
                 </article>}
                 <div ref={bottomRef}/>

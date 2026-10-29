@@ -1,0 +1,20 @@
+# Same line endings on every device: LF in the repository and in working copies, whatever
+# each machine's core.autocrlf says. Without this, Windows checkouts rewrote files with CRLF,
+# which broke byte-exact checks (the generated Modelfile) and produced noisy diffs.
+* text=auto eol=lf
+
+# Windows-only scripts keep CRLF, which cmd.exe expects.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Never touched as text.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.gguf binary
+*.safetensors binary

@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { groqModels, groqReasoningEffort } from "@/lib/llm";
+import { groqModels, groqReasoningEffort, ollamaThinking } from "@/lib/llm";
 import { getFreyaServiceConfig, requestServiceReply } from "@/lib/freya-service";
 import { isSelfHosted } from "@/lib/rate-limit";
 
@@ -94,7 +94,7 @@ const ollamaCheck: Check = async () => {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      model, stream: false, keep_alive: process.env.OLLAMA_KEEP_ALIVE?.trim() || "30m",
+      model, stream: false, keep_alive: process.env.OLLAMA_KEEP_ALIVE?.trim() || "30m", think: ollamaThinking(),
       messages: [{ role: "user", content: PROMPT }], options: { num_predict: 16 },
     }),
     signal: AbortSignal.timeout(OLLAMA_TIMEOUT_MS), cache: "no-store",

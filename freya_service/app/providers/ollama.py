@@ -17,6 +17,8 @@ class OllamaProvider:
         return {
             "model": request.ollama_model or self.settings.ollama_model,
             "stream": stream,
+            # Hidden thinking (Qwen3.5) is off: on CPU it adds minutes before the first word.
+            "think": self.settings.ollama_think,
             "messages": [{"role": "system", "content": request.system}, *request.messages],
             "options": {"num_ctx": self.settings.ollama_context, "num_predict": 1400},
         }

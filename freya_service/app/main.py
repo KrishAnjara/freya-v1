@@ -96,7 +96,9 @@ async def diagnostics(request: Request, authorization: str | None = Header(defau
             result = await request.app.state.http.get(f"{settings.ollama_url}/api/tags", timeout=1.5)
             if result.is_success:
                 names = {item.get("name") for item in result.json().get("models", [])}
-                health["ollama"] = "available" if settings.ollama_model in names else "available_model_missing"
+                # Ollama lists "freya" as "freya:latest"; an untagged name means :latest.
+                wanted = settings.ollama_model if ":" in settings.ollama_model else f"{settings.ollama_model}:latest"
+                health["ollama"] = "available" if wanted in names or settings.ollama_model in names else "available_model_missing"
             else:
                 health["ollama"] = "unavailable"
         except (httpx.HTTPError, ValueError):

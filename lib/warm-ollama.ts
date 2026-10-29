@@ -11,6 +11,7 @@
 
 import { buildLocalSystemPrompt, buildSystemPrompt } from "@/lib/personality";
 import { normalizeCharacterProfile } from "@/lib/character-profile";
+import { ollamaThinking } from "@/lib/llm";
 
 export async function warmOllama() {
   const mode = (process.env.AI_PROVIDER || "").trim().toLowerCase();
@@ -35,6 +36,7 @@ export async function warmOllama() {
         model,
         stream: false,
         keep_alive: process.env.OLLAMA_KEEP_ALIVE?.trim() || "30m",
+        think: ollamaThinking(),
         messages: [{ role: "system", content: system }, { role: "user", content: "." }],
         // One token is enough: the point is reading the prompt, not the reply.
         options: { num_ctx: contextLength, num_predict: 1 },

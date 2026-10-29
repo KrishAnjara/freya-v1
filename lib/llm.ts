@@ -49,6 +49,14 @@ function ollamaTimeoutMs() {
 function ollamaKeepAlive() {
   return process.env.OLLAMA_KEEP_ALIVE?.trim() || "30m";
 }
+/**
+ * Hidden "thinking" for local models that have it (Qwen3.5). Off by default: on a laptop CPU a
+ * thinking pass adds minutes before the first word, and hard reasoning goes to the cloud
+ * reasoning panel (lib/council) instead. Models without thinking ignore `think: false`.
+ */
+export function ollamaThinking() {
+  return (process.env.OLLAMA_THINK || "").trim().toLowerCase() === "true";
+}
 /** Per-request output ceiling. Replies longer than this are continued, not cut off. */
 function maxOutputTokens() {
   return Number(process.env.AI_MAX_OUTPUT_TOKENS) || 1400;
@@ -253,6 +261,7 @@ async function ollamaChat(system: string, messages: ChatMessage[], signal?: Abor
       model,
       stream: false,
       keep_alive: ollamaKeepAlive(),
+      think: ollamaThinking(),
       messages: [{ role: "system", content: system }, ...plainTurns(messages)],
       options: { num_ctx: contextLength, num_predict: maxOutputTokens() },
     }),
@@ -439,6 +448,7 @@ async function* ollamaStream(system: string, messages: ChatMessage[], signal?: A
     body: JSON.stringify({
       model, stream: true,
       keep_alive: ollamaKeepAlive(),
+      think: ollamaThinking(),
       messages: [{ role: "system", content: system }, ...plainTurns(messages)],
       options: { num_ctx: contextLength, num_predict: maxOutputTokens() },
     }),

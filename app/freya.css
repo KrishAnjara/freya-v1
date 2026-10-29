@@ -1162,3 +1162,4 @@ button.attachment-face:hover { border-color: rgba(176, 188, 186, .5); background
   .message.assistant.longform .message-body { max-width: 100%; }
 }
 @media (prefers-reduced-motion: reduce) { .longform-body .typing-caret { animation: none; } }
+.typing-label { margin-left: 8px; color: #8f9997; font: 8px var(--mono); letter-spacing: .1em; align-self: center; }

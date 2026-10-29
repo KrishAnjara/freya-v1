@@ -58,7 +58,21 @@ export function shouldSearch(text: string): boolean {
   const factual =
     /\b(who is|what is|what are|when did|when was|where is|how much does|how many|which model|compare|statistics|study says|according to)\b/i;
 
-  return explicit.test(value) || factual.test(value);
+  if (explicit.test(value)) return true;
+  // A self-contained problem (arithmetic, code) is answered by reasoning, not by the web:
+  // "what is 17 * 23" matched "what is" and went to search, then was refused when search was off.
+  if (/\d\s*[-+*/×÷^%=]\s*\(?\d|```/.test(value)) return false;
+  return factual.test(value);
+}
+
+/**
+ * Questions that cannot be answered honestly without live sources: current events, or an
+ * explicit request to search. Only these are refused when search is off or fails; any other
+ * question is answered from knowledge instead.
+ */
+export function requiresLiveSearch(text: string): boolean {
+  return needsCurrentInformation(text)
+    || /\b(search|look up|google|browse|news|headlines?|price of|weather|who won|release date|current version|stock price)\b/i.test(text);
 }
 
 export function explicitlyDisablesSearch(text: string): boolean {

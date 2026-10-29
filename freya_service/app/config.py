@@ -21,6 +21,7 @@ class Settings:
     ollama_url: str
     ollama_model: str
     ollama_context: int
+    ollama_think: bool
     groq_key: str
     groq_model: str
     gemini_key: str
@@ -53,8 +54,9 @@ class Settings:
             summary_provider=summary,
             fallback_enabled=os.getenv("AI_FALLBACK_ENABLED", "true").lower() != "false",
             ollama_url=os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/"),
-            ollama_model=os.getenv("OLLAMA_MODEL", "llama3.2:1b"),
+            ollama_model=os.getenv("OLLAMA_MODEL", "freya"),
             ollama_context=_bounded_int("OLLAMA_NUM_CTX", 4096, 1024, 8192),
+            ollama_think=os.getenv("OLLAMA_THINK", "false").strip().lower() == "true",
             groq_key=os.getenv("GROQ_API_KEY", ""),
             groq_model=os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b"),
             gemini_key=os.getenv("GEMINI_API_KEY", ""),
