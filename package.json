@@ -9,12 +9,14 @@
     "start": "next start",
     "prestart:local": "node scripts/check-production-env.mjs",
     "start:local": "next start -H 127.0.0.1",
-    "ollama:create": "tsx scripts/build-modelfile.mjs && ollama create freya -f ollama/Modelfile",
+    "ollama:create": "tsx scripts/ollama-create.mjs",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "test": "tsx --import ./tests/setup.mjs --test",
     "train:data": "tsx scripts/build-training-data.mjs",
-    "eval:persona": "tsx scripts/eval-persona.mjs"
+    "eval:persona": "tsx scripts/eval-persona.mjs",
+    "setup": "node scripts/setup.mjs",
+    "doctor": "node scripts/setup.mjs --check"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.118.0",
@@ -41,5 +43,8 @@
   },
   "overrides": {
     "postcss": "^8.5.31"
+  },
+  "engines": {
+    "node": ">=20"
   }
 }

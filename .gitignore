@@ -1,14 +1,33 @@
+# Dependencies
 node_modules/
+.venv/
+
+# Next.js builds (including the isolated build/dev folders the scripts use)
 .next/
 .next-freya-dev/
 .next-freya-build/
 out/
-.venv/
+*.tsbuildinfo
+
+# Python
 __pycache__/
 *.py[cod]
 .pytest_cache/
+
+# Secrets: only the template is tracked
 .env*
 !.env.example
+
+# Model files and training outputs (gigabytes; download or train them, never commit)
+*.gguf
+*.safetensors
+training/freya-gguf/
+training/checkpoints/
+training/outputs/
+# Your own training conversations stay private on your machine
+training/data/
+
+# Logs and OS clutter
 *.log
 .DS_Store
-*.gguf
+Thumbs.db

@@ -1,65 +1,79 @@
 // Generates ollama/Modelfile from the app's own persona and the shared example conversations.
 //
-//   npm run ollama:create     (runs this, then `ollama create freya -f ollama/Modelfile`)
+//   npm run ollama:create                      builds the Modelfile and the "freya" model
+//   npx tsx scripts/build-modelfile.mjs        only writes the Modelfile
 //
 // The SYSTEM block is the same compact prompt the app sends (lib/personality.ts), so FREYA
 // is the same character whether you chat in the app or with `ollama run freya`. The MESSAGE
 // examples come from training/freya-examples.json, the file the fine-tuning dataset is built
 // from. Edit those sources, not the generated Modelfile.
-//
-// Set FREYA_ADAPTER=./path/to/adapter to layer a trained LoRA adapter (see training/README.md).
-import { execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { buildLocalSystemPrompt } from "../lib/personality.ts";
 import { createDefaultCharacterProfile } from "../lib/character-profile.ts";
+
+/** Qwen3.5 4B, uncensored ("abliterated"), from the same author as the earlier bases. */
+export const DEFAULT_BASE = "huihui_ai/qwen3.5-abliterated:4b";
+export const MODELFILE_PATH = fileURLToPath(new URL("../ollama/Modelfile", import.meta.url));
 
 /**
  * Ollama resolves a relative FROM/ADAPTER path against the Modelfile's own folder (ollama/),
  * not where the command runs, so "./training/x.gguf" was looked up as "ollama/training/x.gguf"
  * and rejected as an "invalid model name". Local files are made absolute here, and checked.
- * Library names like "huihui_ai/qwen2.5-abliterate:3b" are passed through unchanged.
+ * Library names like "huihui_ai/qwen3.5-abliterated:4b" are passed through unchanged.
  */
 function localOrLibrary(value) {
   const isPath = /^(\.{1,2}[\\/]|[a-z]:[\\/]|\/)|\.(gguf|safetensors|bin)$/i.test(value);
-  if (!isPath) return value;
+  if (!isPath) return { value, local: false };
   const absolute = resolve(process.cwd(), value);
   if (!existsSync(absolute)) throw new Error(`Model file not found: ${absolute}`);
   // Forward slashes work for Ollama on Windows too, and avoid backslash escaping.
-  return absolute.replace(/\\/g, "/");
+  return { value: absolute.replace(/\\/g, "/"), local: true };
 }
-
-const BASE = localOrLibrary(process.env.FREYA_BASE_MODEL || "huihui_ai/qwen2.5-abliterate:3b");
-const ADAPTER = process.env.FREYA_ADAPTER ? localOrLibrary(process.env.FREYA_ADAPTER) : "";
-
-/**
- * A GGUF exported from training carries Hugging Face's Jinja chat template, which Ollama does
- * not render as its own Go template. For a local file, the prompt format is copied from an
- * installed Qwen2.5 model (same ChatML format), with ChatML's stop tokens.
- */
-const TEMPLATE_SOURCE = process.env.FREYA_TEMPLATE_FROM || "huihui_ai/qwen2.5-abliterate:3b";
-let chatFormat = "";
-if (BASE.includes("/") && existsSync(BASE)) {
-  const template = execFileSync("ollama", ["show", TEMPLATE_SOURCE, "--template"], { encoding: "utf8" }).trim();
-  if (!template.includes("<|im_start|>")) throw new Error(`${TEMPLATE_SOURCE} has no ChatML template to copy.`);
-  chatFormat = `\n# Qwen ChatML prompt format, copied from ${TEMPLATE_SOURCE}: the GGUF's own template is Jinja.\nTEMPLATE ${quoted(template)}\nPARAMETER stop "<|im_start|>"\nPARAMETER stop "<|im_end|>"\n`;
-}
-
-const examples = JSON.parse(await readFile(new URL("../training/freya-examples.json", import.meta.url), "utf8"));
-const system = buildLocalSystemPrompt([], "adaptive", createDefaultCharacterProfile(), true);
 
 /** Modelfile values are wrapped in triple quotes; the content must not close them early. */
 function quoted(text) {
-  if (text.includes('"""')) throw new Error(`Example text cannot contain """: ${text.slice(0, 60)}`);
+  if (text.includes('"""')) throw new Error(`Text cannot contain """: ${text.slice(0, 60)}`);
   return `"""${text}"""`;
 }
 
-const messages = examples.conversations
-  .filter((conversation) => conversation.modelfile)
-  .flatMap((conversation) => conversation.messages.map((message) => `MESSAGE ${message.role} ${quoted(message.content)}`));
+/**
+ * How Ollama should format chats for a local GGUF file (a library model brings its own).
+ *
+ * A GGUF exported from training carries Hugging Face's Jinja chat template, which Ollama does
+ * not use. Qwen3.5 is formatted by Ollama's built-in renderer and parser, exactly as the
+ * official package does (its config sets renderer/parser "qwen3.5"; its template is just
+ * {{ .Prompt }}); that also drives the thinking on/off switch. Older ChatML models (Qwen2.5,
+ * Qwen3 instruct) use the Go template kept in ollama/templates/chatml.tmpl, so neither needs
+ * the base package installed: it works on Colab and on a machine that never pulled the base.
+ */
+export const FORMATS = ["qwen3.5", "chatml"];
 
-const modelfile = `# GENERATED by scripts/build-modelfile.mjs. Do not edit by hand; edit lib/personality.ts
+function chatFormatFor(format) {
+  if (format === "qwen3.5") {
+    return "\n# Qwen3.5 chat format: Ollama's built-in renderer and parser, as in the official package.\nRENDERER qwen3.5\nPARSER qwen3.5\n";
+  }
+  if (format === "chatml") {
+    const template = readFileSync(fileURLToPath(new URL("../ollama/templates/chatml.tmpl", import.meta.url)), "utf8").replace(/\r\n/g, "\n").trim();
+    return `\n# ChatML chat format (ollama/templates/chatml.tmpl).\nTEMPLATE ${quoted(template)}\nPARAMETER stop "<|im_start|>"\nPARAMETER stop "<|im_end|>"\n`;
+  }
+  throw new Error(`Unknown chat format "${format}". Use one of: ${FORMATS.join(", ")}.`);
+}
+
+export async function writeModelfile({ base = DEFAULT_BASE, adapter = "", format = "qwen3.5" } = {}) {
+  const from = localOrLibrary(base);
+  const lora = adapter ? localOrLibrary(adapter).value : "";
+  const examples = JSON.parse(await readFile(new URL("../training/freya-examples.json", import.meta.url), "utf8"));
+  const system = buildLocalSystemPrompt([], "adaptive", createDefaultCharacterProfile(), true);
+  // Only examples marked for the Modelfile: intimate ones are training-only, so they never
+  // colour an ordinary local chat.
+  const messages = examples.conversations
+    .filter((conversation) => conversation.modelfile)
+    .flatMap((conversation) => conversation.messages.map((message) => `MESSAGE ${message.role} ${quoted(message.content)}`));
+
+  const modelfile = `# GENERATED by scripts/build-modelfile.mjs. Do not edit by hand; edit lib/personality.ts
 # or training/freya-examples.json and run \`npm run ollama:create\`.
 #
 # FREYA as a local Ollama model: an independent online operative with a consistent voice.
@@ -67,17 +81,18 @@ const modelfile = `# GENERATED by scripts/build-modelfile.mjs. Do not edit by ha
 # prompt (the same text as SYSTEM below) is sent with every request; SYSTEM is what she uses
 # when you run the model on its own.
 #
-# BASE: an "abliterated" qwen2.5 3B (the stock weights with the refusal direction removed),
-# so the persona isn't overridden by the stock model's trained refusals. The app's rules and
-# hard limits still apply through the system prompt. To use another base:
-#   FREYA_BASE_MODEL=qwen2.5:3b npm run ollama:create
-FROM ${BASE}
-${chatFormat}${ADAPTER ? `\n# LoRA adapter trained on training/freya-train.jsonl (see training/README.md).\nADAPTER ${ADAPTER}\n` : ""}
-# Warm enough for personality, low enough that a small model stays coherent.
-PARAMETER temperature 0.8
-PARAMETER top_p 0.9
-# Small models loop; this keeps her from repeating a pet phrase every reply.
-PARAMETER repeat_penalty 1.12
+# BASE: Qwen3.5 4B "abliterated" (stock weights with the refusal direction removed), so the
+# persona isn't overridden by trained refusals. The app's rules and hard limits still apply
+# through its system prompt. Another base or a trained file:
+#   npm run ollama:create -- --base qwen3.5:4b
+#   npm run ollama:create -- --base training/freya-gguf/freya-trained.gguf
+FROM ${from.value}
+${from.local ? chatFormatFor(format) : ""}${lora ? `\n# LoRA adapter (see training/README.md).\nADAPTER ${lora}\n` : ""}
+# Qwen's recommended sampling for direct (non-thinking) chat.
+PARAMETER temperature 0.7
+PARAMETER top_p 0.8
+PARAMETER top_k 20
+PARAMETER repeat_penalty 1.05
 PARAMETER num_ctx 4096
 
 SYSTEM ${quoted(system)}
@@ -85,6 +100,12 @@ SYSTEM ${quoted(system)}
 # Example exchanges. Small models copy demonstrated tone far more reliably than rules.
 ${messages.join("\n")}
 `;
+  await writeFile(MODELFILE_PATH, modelfile);
+  return { path: MODELFILE_PATH, base: from.value, examples: messages.length };
+}
 
-await writeFile(new URL("../ollama/Modelfile", import.meta.url), modelfile);
-console.log(`ollama/Modelfile written: base ${BASE}${ADAPTER ? `, adapter ${ADAPTER}` : ""}, ${messages.length} example messages.`);
+// Run directly: write the Modelfile only (FREYA_BASE_MODEL / FREYA_ADAPTER still honoured).
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  const result = await writeModelfile({ base: process.env.FREYA_BASE_MODEL || DEFAULT_BASE, adapter: process.env.FREYA_ADAPTER || "", format: process.env.FREYA_CHAT_FORMAT || "qwen3.5" });
+  console.log(`ollama/Modelfile written: base ${result.base}, ${result.examples} example messages.`);
+}

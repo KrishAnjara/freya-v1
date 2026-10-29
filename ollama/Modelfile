@@ -6,17 +6,18 @@
 # prompt (the same text as SYSTEM below) is sent with every request; SYSTEM is what she uses
 # when you run the model on its own.
 #
-# BASE: an "abliterated" qwen2.5 3B (the stock weights with the refusal direction removed),
-# so the persona isn't overridden by the stock model's trained refusals. The app's rules and
-# hard limits still apply through the system prompt. To use another base:
-#   FREYA_BASE_MODEL=qwen2.5:3b npm run ollama:create
-FROM huihui_ai/qwen2.5-abliterate:3b
+# BASE: Qwen3.5 4B "abliterated" (stock weights with the refusal direction removed), so the
+# persona isn't overridden by trained refusals. The app's rules and hard limits still apply
+# through its system prompt. Another base or a trained file:
+#   npm run ollama:create -- --base qwen3.5:4b
+#   npm run ollama:create -- --base training/freya-gguf/freya-trained.gguf
+FROM huihui_ai/qwen3.5-abliterated:4b
 
-# Warm enough for personality, low enough that a small model stays coherent.
-PARAMETER temperature 0.8
-PARAMETER top_p 0.9
-# Small models loop; this keeps her from repeating a pet phrase every reply.
-PARAMETER repeat_penalty 1.12
+# Qwen's recommended sampling for direct (non-thinking) chat.
+PARAMETER temperature 0.7
+PARAMETER top_p 0.8
+PARAMETER top_k 20
+PARAMETER repeat_penalty 1.05
 PARAMETER num_ctx 4096
 
 SYSTEM """PERSONALITY PROMPT VERSION: freya-agent-v4-local
