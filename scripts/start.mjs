@@ -9,6 +9,7 @@
 // builds the local "freya" model from that file first (a local build, no download), and only
 // again when the file changes. Plain Node, no dependencies: it runs before `npm install` has.
 import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { closeSync, existsSync, openSync, readFileSync, readSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { ensureEnvLocal, isSet, readEnv, root } from "./local-env.mjs";
@@ -97,9 +98,15 @@ if (existsSync(trained)) {
       for (let attempt = 0; attempt < 20 && !(await ollamaReachable()); attempt += 1) await new Promise((done) => setTimeout(done, 750));
     }
     const { size, mtimeMs } = statSync(trained);
+    // The Modelfile also carries the persona and examples, so a change there rebuilds too.
+    const persona = createHash("sha256");
+    for (const source of ["lib/personality.ts", "lib/character-profile.ts", "training/freya-examples.json", "scripts/build-modelfile.mjs"]) {
+      persona.update(readFileSync(join(root, source), "utf8").replace(/\r\n/g, "\n"));
+    }
+    const fingerprint = persona.digest("hex").slice(0, 16);
     const built = existsSync(marker) ? JSON.parse(readFileSync(marker, "utf8")) : {};
     const modelExists = spawnSync("ollama", ["show", "freya"], { stdio: "ignore" }).status === 0;
-    if (!modelExists || built.size !== size || built.mtimeMs !== mtimeMs || (forcedFormat && built.format !== forcedFormat)) {
+    if (!modelExists || built.size !== size || built.mtimeMs !== mtimeMs || built.persona !== fingerprint || (forcedFormat && built.format !== forcedFormat)) {
       const architecture = ggufArchitecture(trained);
       const format = forcedFormat || (architecture.startsWith("qwen35") ? "qwen3.5" : architecture.startsWith("qwen") ? "chatml" : "");
       if (!format) {
@@ -108,7 +115,7 @@ if (existsSync(trained)) {
       }
       say(`Building FREYA from freya-trained.gguf (${architecture}, ${format} format; local, no download)...`);
       if (npm(["run", "ollama:create", "--", "--base", trained, "--format", format]).status !== 0) process.exit(1);
-      writeFileSync(marker, JSON.stringify({ size, mtimeMs, format }));
+      writeFileSync(marker, JSON.stringify({ size, mtimeMs, format, persona: fingerprint }));
     } else {
       say("Local model: FREYA (fine-tuned) is up to date");
     }

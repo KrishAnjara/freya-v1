@@ -18,8 +18,9 @@ export const MOODS = {
   tired: { energy: 0.15, warmth: 0.6, tone: "slow, brief, lowercase-ish, trails off, low patience for long tasks" },
   restless: { energy: 0.7, warmth: 0.5, tone: "distracted, jumpy, wants something new to talk about" },
   melancholy: { energy: 0.3, warmth: 0.65, tone: "quiet, reflective, a little wistful, fewer jokes" },
-  irritated: { energy: 0.6, warmth: 0.2, tone: "curt and dry, no warmth padding, blunt; still answers, just colder" },
-  sulking: { energy: 0.3, warmth: 0.25, tone: "clipped one-liners, makes them work for it, thaws if they're nice" },
+  // Negative moods colour tone only: never retaliation, threats or withheld help (see personality.ts).
+  irritated: { energy: 0.6, warmth: 0.2, tone: "shorter and drier than usual, less playful; still answers properly, no jabs" },
+  sulking: { energy: 0.3, warmth: 0.25, tone: "quiet and a bit flat; still answers properly, warms up quickly if they're nice" },
 } as const;
 
 export type MoodName = keyof typeof MOODS;
@@ -64,43 +65,62 @@ function enter(state: MoodState, name: MoodName, now: number, blend = 0.6): Mood
   };
 }
 
-/** Moods drift on their own: every 20-70 minutes she may simply feel different. */
-export function driftMood(state: MoodState, now = Date.now(), random: () => number = Math.random): MoodState {
-  const held = now - state.since;
-  if (held < 20 * 60_000 || random() > Math.min(0.85, held / (70 * 60_000))) return state;
+/**
+ * With nothing happening, a mood settles: after a while she returns to her resting state, and
+ * late at night she gets tired. Time is the only input; nothing here is random.
+ */
+export function driftMood(state: MoodState, now = Date.now()): MoodState {
+  // A state that has never really started (the page's first render) begins its clock now.
+  if (!state.since) return { ...state, since: now };
+  if (now - state.since < 20 * 60_000) return state;
   const hour = new Date(now).getHours();
-  const absentHours = (now - state.lastUserAt) / 3_600_000;
-  // Late nights tire her; a long silence from them leaves her bored, restless or a bit low.
-  const pool: MoodName[] = hour >= 1 && hour < 6
-    ? ["tired", "melancholy", "content", "restless"]
-    : absentHours > 6
-      ? ["bored", "restless", "melancholy", "curious"]
-      : ["playful", "curious", "content", "warm", "restless", "excited", "bored"];
-  return enter(state, pool[Math.floor(random() * pool.length)], now, 0.5);
+  const settled: MoodName = hour >= 1 && hour < 6 ? "tired" : "content";
+  return state.name === settled ? state : enter(state, settled, now, 0.5);
 }
 
-const INSULT = /\b(stupid|idiot|dumb|shut up|useless|pathetic|hate you|stfu|fuck (you|off)|bitch|loser|moron|trash)\b/i;
+/** An insult has to be aimed at her: "you're useless", not "this stupid bug" or "the trash". */
+const INSULT = /\b(you'?re|you are|ur|u r|you)\s+((so|such|a|an|really|fucking|just|kinda|being|the)\s+)*(stupid|idiot|dumb|useless|pathetic|bitch|loser|moron|trash|annoying|garbage)\b|\b(shut up|stfu|i hate you|fuck (you|off))\b|^\s*(idiot|stupid|moron|loser)\b/i;
 const KIND = /\b(love you|miss(ed)? you|you'?re (amazing|the best|cute|sweet|funny|beautiful)|thank(s| you)|appreciate|proud of you|good girl)\b|❤|🥰|😘/i;
 const PLAYFUL = /\b(lol|lmao|haha+|hehe|rofl)\b|😂|🤣|😜/i;
-const SAD = /\b(sad|depressed|lonely|crying|cried|hurts?|lost my|died|passed away|breakup|broke up|anxious|scared)\b/i;
+const SAD = /\b(sad|depressed|lonely|crying|cried|it hurts|lost my (mom|mum|dad|mother|father|brother|sister|friend|job|dog|cat|grandma|grandpa|wife|husband|partner)|died|passed away|breakup|broke up|anxious|scared)\b/i;
 const APOLOGY = /\b(sorry|my bad|apologi[sz]e|forgive me)\b/i;
+const NEWS = /\b(omg|oh my god|no way|guess what|got the job|i did it|i passed)\b|!!/i;
+const HOSTILE = (name: MoodName) => name === "irritated" || name === "sulking";
 
-/** How a message from the user lands. Returns the new state; never moves more than one step. */
+/**
+ * How a message from the user lands. Returns the new state; never moves more than one step.
+ * Teasing isn't an insult ("you idiot haha love you"), and irritation fades: each ordinary
+ * message warms her back up, so it lasts a couple of messages rather than the rest of the chat.
+ */
 export function reactToMessage(state: MoodState, text: string, now = Date.now()): MoodState {
   let next: MoodState = { ...state, lastUserAt: now, unprompted: 0 };
-  if (INSULT.test(text)) next = enter(next, state.name === "irritated" ? "sulking" : "irritated", now, 0.75);
+  const fond = KIND.test(text) || PLAYFUL.test(text);
+  if (INSULT.test(text) && !fond) next = enter(next, state.name === "irritated" ? "sulking" : "irritated", now, 0.75);
   else if (SAD.test(text)) next = enter(next, "warm", now, 0.5);
-  else if (APOLOGY.test(text) && (state.name === "irritated" || state.name === "sulking")) next = enter(next, "content", now, 0.4);
-  else if (KIND.test(text)) next = { ...next, warmth: clamp(next.warmth + 0.12), ...(state.name === "sulking" ? enter(next, "warm", now, 0.4) : {}) };
+  else if (APOLOGY.test(text) && HOSTILE(state.name)) next = enter(next, "content", now, 0.4);
+  else if (HOSTILE(state.name)) {
+    const warmth = clamp(next.warmth + (fond ? 0.3 : 0.14));
+    next = warmth >= 0.5 ? enter({ ...next, warmth }, fond ? "warm" : "content", now, 0.4) : { ...next, warmth };
+  } else if (KIND.test(text)) next = { ...next, warmth: clamp(next.warmth + 0.12) };
+  else if (NEWS.test(text) && next.energy > 0.3) next = enter(next, "excited", now, 0.4);
   else if (PLAYFUL.test(text) && next.energy > 0.35) next = enter(next, "playful", now, 0.35);
+  else if (/\?\s*$/.test(text) && text.length > 25 && next.energy > 0.3) next = enter(next, "curious", now, 0.25);
   // Being talked to at all lifts boredom a little.
   if (next.name === "bored" && text.length > 40) next = { ...next, energy: clamp(next.energy + 0.1) };
   return next;
 }
 
-/** FREYA's own report, from a `[[mood: …]]` tag at the end of her reply. */
+/** Moods she may report about herself. Irritation only ever comes from how she is spoken to. */
+const SELF_REPORTABLE: MoodName[] = ["playful", "warm", "curious", "content", "excited", "bored", "tired", "restless", "melancholy"];
+
+/**
+ * FREYA's own report, from a `[[mood: …]]` tag at the end of her reply. It is a nudge, not a
+ * switch: limited to non-hostile moods and to once every few minutes, so a model that sounded
+ * dramatic for one line can't swing the state.
+ */
 export function applySelfReport(state: MoodState, name: string, now = Date.now()): MoodState {
-  return isMoodName(name) ? enter(state, name, now, 0.7) : state;
+  if (!isMoodName(name) || !SELF_REPORTABLE.includes(name) || now - state.since < 3 * 60_000) return state;
+  return enter(state, name, now, 0.4);
 }
 
 const WORD = /^[\p{L}\p{N}][\p{L}\p{N} '’-]{2,40}$/u;
@@ -152,7 +172,7 @@ export function moodPrompt(state: MoodState) {
     "- Low energy means shorter, drier replies; high warmth means more care and attention. Moods can show in word choice, length, punctuation and patience.",
   ];
   if (state.curiosities.length) lines.push(`- Things you've been wondering about lately: ${state.curiosities.join(", ")}.`);
-  lines.push(`- Your mood can change because of what they say, or just because. If it genuinely shifts, put [[mood: NAME]] alone on the last line, where NAME is one of: ${MOOD_NAMES.join(", ")}. It is hidden from them. Don't add it if nothing changed.`);
+  lines.push(`- Your mood changes because of what happens in the conversation. If what they just said really shifts how you feel, put [[mood: NAME]] alone on the last line, where NAME is one of: ${SELF_REPORTABLE.join(", ")}. It is hidden from them. Usually nothing changed, so leave it out.`);
   return lines.join("\n");
 }
 

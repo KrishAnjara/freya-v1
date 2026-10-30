@@ -16,19 +16,38 @@ test("how a message lands moves her mood", () => {
   assert.equal(reactToMessage({ ...base, unprompted: 2 }, "hey", NOW).unprompted, 0, "a reply resets her unanswered count");
 });
 
-test("moods drift on their own, but not every minute", () => {
+test("left alone, a mood settles by time alone; nothing is random", () => {
   const fresh = initialMood(NOW);
-  assert.equal(driftMood(fresh, NOW + 5 * 60_000, () => 0).name, fresh.name, "held too briefly to change");
-  const later = driftMood(fresh, NOW + 3 * 3_600_000, () => 0);
+  assert.equal(driftMood(fresh, NOW + 5 * 60_000).name, fresh.name, "held too briefly to change");
+  const later = driftMood(fresh, NOW + 3 * 3_600_000);
   assert.notEqual(later.since, fresh.since);
+  assert.ok(["content", "tired"].includes(later.name), `settled to ${later.name}`);
+  assert.equal(driftMood(driftMood(fresh, NOW + 3 * 3_600_000), NOW + 3 * 3_600_000).name, later.name, "same input, same result");
+  assert.equal(driftMood(initialMood(0), NOW).name, "curious", "the first render's state only starts its clock");
+});
+
+test("only what is aimed at her irritates her, teasing doesn't, and irritation fades", () => {
+  const base = initialMood(NOW);
+  for (const text of ["this stupid bug is killing me", "can you remind me to take out the trash", "this dumb compiler", "you're such an idiot haha i love you"]) {
+    assert.notEqual(reactToMessage(base, text, NOW).name, "irritated", text);
+  }
+  assert.notEqual(reactToMessage(base, "lol i lost my keys again", NOW).name, "warm", "lost keys aren't grief");
+  assert.equal(reactToMessage(base, "i lost my dog this morning", NOW).name, "warm");
+  let state = reactToMessage(base, "you're useless", NOW);
+  assert.equal(state.name, "irritated");
+  for (let turn = 0; turn < 3; turn += 1) state = reactToMessage(state, "how do i convert a list to a set in python", NOW);
+  assert.notEqual(state.name, "irritated", "gone within a few ordinary messages");
 });
 
 test("she can change her own mood with a hidden tag, which never reaches the chat", () => {
   const { text, mood } = extractMoodTag("whatever. fine.\n[[mood: sulking]]");
   assert.equal(text, "whatever. fine.");
   assert.equal(mood, "sulking");
-  assert.equal(applySelfReport(initialMood(NOW), "sulking", NOW).name, "sulking");
-  assert.equal(applySelfReport(initialMood(NOW), "omnipotent", NOW).name, "curious", "unknown moods are ignored");
+  const settled = NOW + 10 * 60_000;
+  assert.equal(applySelfReport(initialMood(NOW), "playful", settled).name, "playful");
+  assert.equal(applySelfReport(initialMood(NOW), "playful", NOW).name, "curious", "not right after a change");
+  assert.equal(applySelfReport(initialMood(NOW), "sulking", settled).name, "curious", "hostile moods only come from how she is spoken to");
+  assert.equal(applySelfReport(initialMood(NOW), "omnipotent", settled).name, "curious", "unknown moods are ignored");
 });
 
 test("the browser's mood is validated; the prompt is built from a fixed table", () => {

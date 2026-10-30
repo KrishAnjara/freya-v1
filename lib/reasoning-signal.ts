@@ -12,6 +12,15 @@ export function isReasoningMode(value: unknown): value is ReasoningMode {
   return value === "auto" || value === "always" || value === "off";
 }
 
+/**
+ * The deployment's reasoning setting (FREYA_REASONING_MODE, default auto). It is server-owned:
+ * the panel spends cloud quota, so a request cannot switch it on or off. Server code only.
+ */
+export function configuredReasoningMode(): ReasoningMode {
+  const value = (process.env.FREYA_REASONING_MODE || "auto").trim().toLowerCase();
+  return isReasoningMode(value) ? value : "auto";
+}
+
 /** Signals strong enough on their own: maths, code, formal logic, explicit requests to think. */
 const STRONG = [
   /\d\s*[-+*/×÷^%]\s*\(?\d/, // arithmetic in the message

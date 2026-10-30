@@ -33,7 +33,7 @@ Either way, `training/colab_run.py` does every step (`--smoke` for a quick 10-st
 1. builds `freya-train.jsonl` from `freya-examples.json` (plus any files you upload);
 2. validates every conversation (rules below);
 3. trains a LoRA adapter on `huihui-ai/Huihui-Qwen3.5-4B-abliterated` and exports a GGUF;
-4. loads it into Ollama **on Colab** and runs the same 17-case evaluation as the laptop;
+4. loads it into Ollama **on Colab** and runs the same persona evaluation as the laptop;
 5. saves `freya-trained.gguf` to Google Drive.
 
 Back on your machine: put `freya-trained.gguf` in `training/freya-gguf/` and run `start.bat`
@@ -66,9 +66,8 @@ example and passes.
 
 ## What actually improves a fine-tune
 
-**The number and quality of examples, far more than any setting.** The ~30 bundled conversations
-are enough to test the pipeline, not to change the model much; with that few, it memorises them
-word for word. Aim for a few hundred varied conversations: identity, everyday help, scams,
+**The number and quality of examples, far more than any setting.** The ~115 bundled conversations
+are a start, written to docs/freya-persona.md; a small set can still get memorised word for word. Aim for a few hundred varied conversations: identity, everyday help, scams,
 pushback, feelings, flirting, refusals, and the same ideas phrased many different ways.
 
 Keep epochs low (the default is 2): over-training a small dataset makes the model parrot it.

@@ -5,6 +5,55 @@ import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import Image from "next/image";
 import * as THREE from "three";
 import { captionRevision, getCaption, mouthOpening, speechEmphasis, subscribeCaption, tickCaption } from "@/lib/mouth-drive";
+import { POSES, type Expression } from "@/lib/expression";
+
+/** Square crop used for both the texture and the height map, so they always line up. */
+function squareCrop(image: HTMLImageElement) {
+  const side = Math.min(image.naturalWidth, image.naturalHeight);
+  return { side, x: (image.naturalWidth - side) / 2, y: (image.naturalHeight - side) / 2 };
+}
+
+/** Luminance height map of the square crop, box-blurred (raw photo noise shreds the normals). */
+function reliefHeights(image: HTMLImageElement, samples: number): Float32Array {
+  const canvas = document.createElement("canvas");
+  canvas.width = samples;
+  canvas.height = samples;
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  if (!context) throw new Error("Canvas image sampling is unavailable.");
+  const crop = squareCrop(image);
+  context.drawImage(image, crop.x, crop.y, crop.side, crop.side, 0, 0, samples, samples);
+  const pixels = context.getImageData(0, 0, samples, samples).data;
+  const raw = new Float32Array(samples * samples);
+  for (let i = 0; i < raw.length; i += 1) {
+    const p = i * 4;
+    raw[i] = (pixels[p] * 0.2126 + pixels[p + 1] * 0.7152 + pixels[p + 2] * 0.0722) / 255;
+  }
+  const height = new Float32Array(raw.length);
+  const R = 2;
+  for (let y = 0; y < samples; y += 1) {
+    for (let x = 0; x < samples; x += 1) {
+      let total = 0;
+      let count = 0;
+      for (let dy = -R; dy <= R; dy += 1) {
+        const yy = y + dy;
+        if (yy < 0 || yy >= samples) continue;
+        for (let dx = -R; dx <= R; dx += 1) {
+          const xx = x + dx;
+          if (xx < 0 || xx >= samples) continue;
+          total += raw[yy * samples + xx];
+          count += 1;
+        }
+      }
+      height[y * samples + x] = total / count;
+    }
+  }
+  return height;
+}
+
+/** Expression images that exist (from /api/portrait/expressions), grouped by expression. */
+type ExpressionImages = Partial<Record<Expression, string[]>>;
+/** How long an expression change takes: long enough to read as a change, not a cut. */
+const EXPRESSION_FADE_S = 0.7;
 
 /** Width of the portrait plane in world units. */
 const PLANE_SIZE = 3.5;
@@ -74,8 +123,10 @@ function falloff(distance: number) {
   return t * t * (3 - 2 * t);
 }
 
-export default function PortraitParticles() {
+export default function PortraitParticles({ expression = "neutral" }: { expression?: Expression }) {
   const hostRef = useRef<HTMLDivElement>(null);
+  const expressionRef = useRef<Expression>(expression);
+  useEffect(() => { expressionRef.current = expression; }, [expression]);
   const [fallback, setFallback] = useState(false);
   const [failed, setFailed] = useState(false);
   const [disturbed, setDisturbed] = useState(false);
@@ -127,7 +178,76 @@ export default function PortraitParticles() {
 
     let geometry: THREE.PlaneGeometry | undefined;
     let material: THREE.MeshStandardMaterial | undefined;
-    let texture: THREE.Texture | undefined;
+    let texture: THREE.CanvasTexture | undefined;
+    // The texture is drawn from a square canvas so two expression images can be blended in it.
+    const textureCanvas = document.createElement("canvas");
+    textureCanvas.width = 1024;
+    textureCanvas.height = 1024;
+    const textureContext = textureCanvas.getContext("2d");
+    let uvGrid: Float32Array | undefined;
+    const vertexHeights = (height: Float32Array) => {
+      const out = new Float32Array(vertexCount);
+      for (let i = 0; i < vertexCount; i += 1) {
+        const u = uvGrid![i * 2];
+        const v = uvGrid![i * 2 + 1];
+        const hx = Math.min(HEIGHT_SAMPLES - 1, Math.max(0, Math.round(u * (HEIGHT_SAMPLES - 1))));
+        // Texture V runs bottom-up; the height map rows run top-down.
+        const hy = Math.min(HEIGHT_SAMPLES - 1, Math.max(0, Math.round((1 - v) * (HEIGHT_SAMPLES - 1))));
+        out[i] = (height[hy * HEIGHT_SAMPLES + hx] - 0.42) * RELIEF_DEPTH;
+      }
+      return out;
+    };
+    const paint = (from: HTMLImageElement, to: HTMLImageElement | null, mix: number) => {
+      if (!textureContext) return;
+      textureContext.globalAlpha = 1;
+      const a = squareCrop(from);
+      textureContext.drawImage(from, a.x, a.y, a.side, a.side, 0, 0, 1024, 1024);
+      if (to && mix > 0) {
+        const b = squareCrop(to);
+        textureContext.globalAlpha = mix;
+        textureContext.drawImage(to, b.x, b.y, b.side, b.side, 0, 0, 1024, 1024);
+        textureContext.globalAlpha = 1;
+      }
+      if (texture) texture.needsUpdate = true;
+    };
+    // Expression images: loaded on first use and kept; the base portrait is the neutral face.
+    let expressionImages: ExpressionImages = {};
+    const loaded = new Map<string, { image: HTMLImageElement; heights: Float32Array }>();
+    const loading = new Set<string>();
+    const variation: Partial<Record<Expression, number>> = {};
+    let shownUrl = "base";
+    let shownImage: HTMLImageElement | null = null;
+    let shownHeights: Float32Array | undefined;
+    let fadeFrom: { image: HTMLImageElement; heights: Float32Array } | null = null;
+    let fadeTo: { image: HTMLImageElement; heights: Float32Array; url: string } | null = null;
+    let fadeMix = 0;
+    let lastExpression: Expression | null = null;
+    let wantedUrl = "base";
+    let baseHeightCache: Float32Array | undefined;
+    const baseHeights = () => (baseHeightCache ??= vertexHeights(reliefHeights(image, HEIGHT_SAMPLES)));
+    fetch("/api/portrait/expressions", { cache: "no-store" })
+      .then((response) => response.ok ? response.json() : { images: [] })
+      .then((payload: { images?: { expression: Expression; url: string }[] }) => {
+        const grouped: ExpressionImages = {};
+        for (const item of payload.images ?? []) (grouped[item.expression] ??= []).push(item.url);
+        expressionImages = grouped;
+        lastExpression = null; // re-pick now that images are known
+      })
+      .catch(() => { /* No images: the procedural face covers every expression. */ });
+    const loadExpressionImage = (url: string) => {
+      if (loaded.has(url) || loading.has(url) || url === "base") return;
+      loading.add(url);
+      const next = document.createElement("img");
+      next.decoding = "async";
+      next.onload = () => {
+        loading.delete(url);
+        if (disposed || !uvGrid) return;
+        try { loaded.set(url, { image: next, heights: vertexHeights(reliefHeights(next, HEIGHT_SAMPLES)) }); }
+        catch { /* unreadable image: keep the procedural face */ }
+      };
+      next.onerror = () => { loading.delete(url); };
+      next.src = url;
+    };
     let basePositions: Float32Array | undefined;
     let baseUvs: Float32Array | undefined;
     let vertexCount = 0;
@@ -176,71 +296,25 @@ export default function PortraitParticles() {
     image.onload = () => {
       if (disposed) return;
       try {
-        const sampleCanvas = document.createElement("canvas");
-        sampleCanvas.width = HEIGHT_SAMPLES;
-        sampleCanvas.height = HEIGHT_SAMPLES;
-        const context = sampleCanvas.getContext("2d", { willReadFrequently: true });
-        if (!context) throw new Error("Canvas image sampling is unavailable.");
-
-        // Center-crop the supplied landscape portrait to a square, as the texture does.
-        const side = Math.min(image.naturalWidth, image.naturalHeight);
-        const sourceX = (image.naturalWidth - side) / 2;
-        const sourceY = (image.naturalHeight - side) / 2;
-        context.drawImage(image, sourceX, sourceY, side, side, 0, 0, HEIGHT_SAMPLES, HEIGHT_SAMPLES);
-        const pixels = context.getImageData(0, 0, HEIGHT_SAMPLES, HEIGHT_SAMPLES).data;
-
-        // Luminance height map, then a box blur. Unsmoothed photo noise turns into spikes
-        // that shred the normals and make the relief look like crumpled foil.
-        const raw = new Float32Array(HEIGHT_SAMPLES * HEIGHT_SAMPLES);
-        for (let i = 0; i < raw.length; i += 1) {
-          const p = i * 4;
-          raw[i] = (pixels[p] * 0.2126 + pixels[p + 1] * 0.7152 + pixels[p + 2] * 0.0722) / 255;
-        }
-        const height = new Float32Array(raw.length);
-        const R = 2;
-        for (let y = 0; y < HEIGHT_SAMPLES; y += 1) {
-          for (let x = 0; x < HEIGHT_SAMPLES; x += 1) {
-            let total = 0;
-            let count = 0;
-            for (let dy = -R; dy <= R; dy += 1) {
-              const yy = y + dy;
-              if (yy < 0 || yy >= HEIGHT_SAMPLES) continue;
-              for (let dx = -R; dx <= R; dx += 1) {
-                const xx = x + dx;
-                if (xx < 0 || xx >= HEIGHT_SAMPLES) continue;
-                total += raw[yy * HEIGHT_SAMPLES + xx];
-                count += 1;
-              }
-            }
-            height[y * HEIGHT_SAMPLES + x] = total / count;
-          }
-        }
-
+        const height = reliefHeights(image, HEIGHT_SAMPLES);
         const segments = meshSegments();
         geometry = new THREE.PlaneGeometry(PLANE_SIZE, PLANE_SIZE, segments, segments);
         const position = geometry.getAttribute("position") as THREE.BufferAttribute;
         const uv = geometry.getAttribute("uv") as THREE.BufferAttribute;
         vertexCount = position.count;
-        for (let i = 0; i < vertexCount; i += 1) {
-          const u = uv.getX(i);
-          const v = uv.getY(i);
-          const hx = Math.min(HEIGHT_SAMPLES - 1, Math.max(0, Math.round(u * (HEIGHT_SAMPLES - 1))));
-          // Texture V runs bottom-up; the height map rows run top-down.
-          const hy = Math.min(HEIGHT_SAMPLES - 1, Math.max(0, Math.round((1 - v) * (HEIGHT_SAMPLES - 1))));
-          position.setZ(i, (height[hy * HEIGHT_SAMPLES + hx] - 0.42) * RELIEF_DEPTH);
-        }
+        uvGrid = Float32Array.from(uv.array as Float32Array);
+        shownHeights = vertexHeights(height);
+        shownImage = image;
+        for (let i = 0; i < vertexCount; i += 1) position.setZ(i, shownHeights[i]);
         geometry.computeVertexNormals();
         basePositions = Float32Array.from(position.array as Float32Array);
         baseUvs = Float32Array.from(uv.array as Float32Array);
         // Per-vertex shade, white everywhere except the open mouth, which it darkens.
         geometry.setAttribute("color", new THREE.Float32BufferAttribute(new Float32Array(vertexCount * 3).fill(1), 3));
 
-        texture = new THREE.Texture(image);
+        texture = new THREE.CanvasTexture(textureCanvas);
         texture.colorSpace = THREE.SRGBColorSpace;
-        // Match the square center-crop the height map used.
-        texture.repeat.set(side / image.naturalWidth, side / image.naturalHeight);
-        texture.offset.set(sourceX / image.naturalWidth, sourceY / image.naturalHeight);
-        texture.needsUpdate = true;
+        paint(image, null, 0);
 
         material = new THREE.MeshStandardMaterial({
           map: texture,
@@ -291,7 +365,6 @@ export default function PortraitParticles() {
     let smileTarget = 0;
     let squint = 0;           // lids narrowing, which is what makes a smile reach the eyes
     let jaw = 0;              // smoothed mouth opening, so the jaw lags the lips slightly
-    let nextMood = 0;
     let headTilt = 0;
     let headTiltTarget = 0;
 
@@ -338,19 +411,51 @@ export default function PortraitParticles() {
         // The photo's lips are closed, so at rest they barely part with the breath.
         idleLip += ((Math.sin(time * 0.8) * 0.5 + 0.5) * 0.04 - idleLip) * 0.05 * step;
         // Eased toward the envelope: lips that jump frame to frame read as flicker, not speech.
-        lipOpen += (Math.max(spoken, idleLip) - lipOpen) * Math.min(1, 0.45 * step);
-        const lip = lipOpen;
-        // The jaw is heavier than the lips, so it trails them instead of matching exactly.
-        jaw += (lip - jaw) * 0.22 * step;
+        // (The expression's own lip parting is added once the pose is known, below.)
 
-        // Mood drifts on its own schedule; speaking pushes the brows with the stressed word.
-        if (time > nextMood) {
-          const roll = Math.random();
-          browTarget = roll < 0.3 ? -0.35 - Math.random() * 0.3 : roll < 0.75 ? Math.random() * 0.45 : 0.6 + Math.random() * 0.4;
-          smileTarget = roll > 0.62 ? 0.35 + Math.random() * 0.5 : Math.random() * 0.2;
-          headTiltTarget = (Math.random() - 0.5) * 0.9;
-          nextMood = time + 2.4 + Math.random() * 4.5;
+        // Expression: chosen by the app from mood and conversation (lib/expression), never at
+        // random. With an image for it on screen, the pose only adds a little life on top.
+        const current = expressionRef.current;
+        if (current !== lastExpression) {
+          lastExpression = current;
+          const options = expressionImages[current];
+          if (options?.length) {
+            // Variations take turns, so a frequent expression doesn't look identical every time.
+            variation[current] = ((variation[current] ?? -1) + 1) % options.length;
+            wantedUrl = options[variation[current]!];
+          } else {
+            wantedUrl = expressionImages.neutral?.[0] ?? "base";
+          }
+          loadExpressionImage(wantedUrl);
         }
+        if (wantedUrl !== shownUrl && !fadeTo && shownImage && shownHeights) {
+          const target = wantedUrl === "base" ? { image, heights: baseHeights() } : loaded.get(wantedUrl);
+          if (target) {
+            fadeFrom = { image: shownImage, heights: shownHeights };
+            fadeTo = { ...target, url: wantedUrl };
+            fadeMix = 0;
+          }
+        }
+        if (fadeFrom && fadeTo) {
+          fadeMix = Math.min(1, fadeMix + (delta / 1000) / EXPRESSION_FADE_S);
+          const eased = fadeMix * fadeMix * (3 - 2 * fadeMix);
+          for (let i = 0; i < vertexCount; i += 1) basePositions[i * 3 + 2] = fadeFrom.heights[i] + (fadeTo.heights[i] - fadeFrom.heights[i]) * eased;
+          paint(fadeFrom.image, fadeTo.image, eased);
+          if (fadeMix >= 1) {
+            shownUrl = fadeTo.url;
+            shownImage = fadeTo.image;
+            shownHeights = fadeTo.heights;
+            fadeFrom = null;
+            fadeTo = null;
+          }
+        }
+        const pose = POSES[current];
+        const poseWeight = shownUrl === "base" || shownUrl === expressionImages.neutral?.[0] ? 1 : 0.3;
+        // A slow, small sway keeps a held expression alive without repeating a gesture.
+        browTarget = pose.brow * poseWeight + Math.sin(time * 0.37) * 0.05;
+        smileTarget = pose.smile * poseWeight + Math.sin(time * 0.23 + 1) * 0.03;
+        headTiltTarget = pose.tilt + Math.sin(time * 0.19) * 0.08;
+        const poseLips = pose.lips * poseWeight * (current === "laugh" ? 0.65 + 0.35 * Math.abs(Math.sin(time * 7)) : 1);
         // Hovering reads as attention: brows lift a little, the hint of a smile arrives.
         const attention = pointerActive ? 1 : 0;
         const browDrive = browTarget + attention * 0.3 + emphasis * 0.55;
@@ -358,15 +463,20 @@ export default function PortraitParticles() {
         browRaise += (browDrive - browRaise) * 0.07 * step;
         smile += (smileDrive - smile) * 0.05 * step;
         // A smile that does not reach the eyes looks false, so the lids follow the mouth.
-        squint += ((smile * 0.55 + emphasis * 0.15) - squint) * 0.06 * step;
+        squint += ((smile * 0.55 + POSES[current].squint * poseWeight + emphasis * 0.15) - squint) * 0.06 * step;
+        lipOpen += (Math.max(spoken, idleLip, poseLips) - lipOpen) * Math.min(1, 0.45 * step);
+        const lip = lipOpen;
+        // The jaw is heavier than the lips, so it trails them instead of matching exactly.
+        jaw += (lip - jaw) * 0.22 * step;
         headTilt += (headTiltTarget - headTilt) * 0.03 * step;
 
         if (time > nextGlance) {
           // Saccades favour small movements; wide sweeps are rarer, as in a real gaze.
-          const magnitude = Math.pow(Math.random(), 1.7);
+          // Around where the expression looks (up and aside when thinking, down when sad).
+          const magnitude = Math.pow(Math.random(), 1.7) * 0.5;
           const angle = Math.random() * Math.PI * 2;
-          glanceTargetX = Math.cos(angle) * magnitude;
-          glanceTargetY = Math.sin(angle) * magnitude * 0.6;
+          glanceTargetX = Math.max(-1, Math.min(1, POSES[current].gazeX + Math.cos(angle) * magnitude));
+          glanceTargetY = Math.max(-1, Math.min(1, POSES[current].gazeY + Math.sin(angle) * magnitude * 0.6));
           nextGlance = time + 0.9 + Math.random() * 2.6;
         }
         // When the pointer is over her, she follows it instead of glancing idly.

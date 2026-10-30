@@ -157,6 +157,14 @@ export function typingDelay(part: string) {
   return Math.min(1600, 320 + part.length * 3);
 }
 
+/** Consecutive bubbles never land closer than this: a person sends one text, then the next. */
+export const MIN_BUBBLE_GAP_MS = 1000;
+
+/** Delay before posting a bubble; a follow-up bubble waits at least MIN_BUBBLE_GAP_MS. */
+export function bubbleDelay(part: string, followUp: boolean) {
+  return followUp ? Math.max(MIN_BUBBLE_GAP_MS, typingDelay(part)) : typingDelay(part);
+}
+
 /**
  * Casual texting rhythm: a paragraph is sometimes sent whole and sometimes broken after a
  * sentence, at random, the way people fire off a thought in two or three messages. Code,
@@ -189,8 +197,24 @@ export function chopCasually(part: string, random: () => number = Math.random): 
  * off as ordinary messages.
  */
 export function wantsLongForm(request: string) {
-  return /\b(essay|letter|story|poem|article|report|speech|script|cover letter|blog( post)?|biography|summary|summari[sz]e|lyrics|email|e-mail|proposal|statement|review|chapter|monologue|eulogy|toast)\b/i.test(request)
+  const composed = /\b(essay|letter|story|poem|article|report|speech|script|cover letter|blog( post)?|biography|summary|summari[sz]e|lyrics|email|e-mail|proposal|statement|review|chapter|monologue|eulogy|toast|guide|tutorial|write-?up|overview)\b/i.test(request)
     && /\b(write|draft|compose|make|create|give me|craft|pen|need)\b/i.test(request);
+  // Asking for depth is asking for a document, whatever the subject.
+  const depth = /\b(explain|describe|teach|break (it )?down|walk me through|tell me (all|everything))\b.*\b(in (great |full )?detail|in depth|in-depth|thoroughly|step by step|properly|everything)\b|\b(detailed|in-depth|comprehensive|thorough) (explanation|guide|overview|breakdown|answer|analysis)\b/i.test(request);
+  return composed || depth;
+}
+
+/** Past this, an ordinary reply is a document, not a chat. */
+const LONG_REPLY_CHARS = 1400;
+
+/**
+ * Whether a reply that started as chat should become a document now: it has reached headings
+ * or a substantial list, or it has simply run long.
+ */
+export function becomesLongForm(nextPart: string, sentChars: number) {
+  const listItems = nextPart.match(/^\s*([-*+]|\d+[.)])\s/gm)?.length ?? 0;
+  const structured = /^\s*(#{1,3}\s|\|.*\|)/m.test(nextPart) || (listItems >= 3 && nextPart.length > 220);
+  return structured || sentChars + nextPart.length > LONG_REPLY_CHARS;
 }
 
 /** A lead-in or sign-off short enough to sit outside a composed piece. */

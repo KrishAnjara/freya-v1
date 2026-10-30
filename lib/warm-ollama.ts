@@ -13,10 +13,16 @@ import { buildLocalSystemPrompt, buildSystemPrompt } from "@/lib/personality";
 import { normalizeCharacterProfile } from "@/lib/character-profile";
 import { ollamaThinking } from "@/lib/llm";
 
+/** Next can bundle the caller twice (startup and the models route), so the guard is process-wide. */
+const WARM_INTERVAL_MS = 10 * 60_000;
+const warmState = globalThis as typeof globalThis & { __freyaWarmedAt?: number };
+
 export async function warmOllama() {
   const mode = (process.env.AI_PROVIDER || "").trim().toLowerCase();
   // Only when the local model is the one that speaks; otherwise this would load it for nothing.
   if (mode !== "hybrid" && mode !== "ollama") return;
+  if (Date.now() - (warmState.__freyaWarmedAt ?? 0) < WARM_INTERVAL_MS) return;
+  warmState.__freyaWarmedAt = Date.now();
 
   const endpoint = (process.env.OLLAMA_BASE_URL || "http://127.0.0.1:11434").replace(/\/+$/, "");
   const model = process.env.OLLAMA_MODEL || "freya";
@@ -24,7 +30,7 @@ export async function warmOllama() {
   // Defaults match an ordinary request, so the cached prefix covers the shared persona block.
   // Hybrid speaks with the compact persona; plain Ollama mode uses the full one.
   const system = mode === "hybrid"
-    ? buildLocalSystemPrompt([], "adaptive", normalizeCharacterProfile(undefined), false)
+    ? buildLocalSystemPrompt([], "adaptive", normalizeCharacterProfile(undefined), true)
     : buildSystemPrompt([], "adaptive", undefined, 1, false);
 
   try {

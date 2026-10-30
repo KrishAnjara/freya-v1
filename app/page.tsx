@@ -17,7 +17,7 @@ import AttachmentList from "@/app/components/Attachments";
 import { AUDIO_MIMES, AttachmentError, MAX_ATTACHMENTS, type AttachmentKind, type AttachmentMeta, type WireAttachment } from "@/lib/attachments";
 import { deleteAttachments, getAttachment, putAttachment } from "@/lib/attachment-store";
 import { prepareAttachment } from "@/lib/prepare-attachment";
-import { chopCasually, isAside, takeCompleteParts, typingDelay, wantsLongForm } from "@/lib/reply-parts";
+import { becomesLongForm, bubbleDelay, chopCasually, isAside, takeCompleteParts, wantsLongForm } from "@/lib/reply-parts";
 import { addCuriosity, applySelfReport, driftMood, extractMoodTag, initialMood, loadMood, reactToMessage, saveMood, type MoodState } from "@/lib/mood";
 import { contentWords } from "@/lib/stream-telemetry";
 import { isReasoningMode, needsReasoning, type ReasoningMode } from "@/lib/reasoning-signal";
@@ -28,11 +28,18 @@ import { playChime } from "@/lib/chime";
 import VoiceControls, { type SpeechRequest } from "@/app/components/VoiceControls";
 import { CHARACTER_PROFILE_KEY, createDefaultCharacterProfile, normalizeCharacterProfile, type CharacterProfile } from "@/lib/character-profile";
 import dynamic from "next/dynamic";
-import type { CanvasSignal } from "@/app/components/EmotionCanvas";
-import { deriveCanvasVisual, type CanvasShape } from "@/lib/canvas-visual";
+import type { CanvasForm, CanvasSignal } from "@/app/components/EmotionCanvas";
+import { PictureCard, VisualizationCard, type PictureInfo, type VisualizationInfo } from "@/app/components/MediaCards";
+import { commandHints, parseCommand, pictureRequest } from "@/lib/composer-commands";
+import { FORM_POINTS, validateSpec, type VisualSpec } from "@/lib/visualize";
+import { cloudForSpec } from "@/lib/visualize-client";
+import { chooseExpression, reactionInReply, reactionTo, type Reaction } from "@/lib/expression";
+import { sanitizeSvg } from "@/lib/svg-safety";
 import { captureExplicitPreference } from "@/lib/memory-capture";
 import { deriveReflectionCandidates } from "@/lib/reflection";
 import { summarizeOlderMessages } from "@/lib/conversation-summary";
+import { applyChangesLocally, describeChanges, LOCAL_MEMORY_LIMIT, loadForgotten, normalizeStoredMemories, reflectionWindow, rememberForgotten, type StoredMemory } from "@/lib/memory-client";
+import type { MemoryChanges } from "@/lib/memory-reflection";
 import { containsSensitiveCredential } from "@/lib/sensitive-data";
 
 // Only rendered inside the settings dialog, so it stays out of the first-load bundle.
@@ -76,9 +83,19 @@ type Message = {
   initiative?: boolean;
   /** Cloud analysts who worked this reply through first (lib/council). */
   reasoned?: string[];
+  /** A composer command (/visualize, /image, or "draw me…"): shown as a chip, never sent as chat. */
+  command?: "visualize" | "image";
+  /** A /visualize result; its spec can be put back on the canvas. */
+  visualization?: VisualizationInfo & { spec?: VisualSpec };
+  /** A picture FREYA made: a generated image (in attachments) or an SVG drawing. */
+  picture?: PictureInfo;
 };
-type Memory = { id: string; text: string; createdAt: string; updatedAt?: string };
-type Conversation = { id: string; title: string; messages: Message[]; createdAt: string; updatedAt: string; unread?: number };
+type Memory = StoredMemory;
+type Conversation = {
+  id: string; title: string; messages: Message[]; createdAt: string; updatedAt: string; unread?: number;
+  /** How many of its messages automatic memory has already read, so nothing is mined twice. */
+  reflectedCount?: number;
+};
 /** One reply FREYA owes: to `targetId`, or a continuation of `turn` when `extraPrompt` is set. */
 type ReplyJob = { conversationId: string; targetId: string; turn?: string; extraPrompt?: string; initiative?: boolean };
 type Style = "adaptive" | "friendly" | "direct" | "professional" | "playful";
@@ -96,8 +113,10 @@ const AUTONOMY_KEY = "freya.v1.autonomyLevel";
 const PRIVACY_KEY = "freya.v1.localOnly";
 const MODEL_KEY = "freya.v1.ollamaModel";
 const AUTO_MEMORY_KEY = "freya.v1.autoMemory";
+const MEMORY_ENABLED_KEY = "freya.v1.useMemories";
+/** Quiet time after FREYA's last message before automatic memory reads the new stretch. */
+const REFLECT_AFTER_MS = 90_000;
 const CANDID_LANGUAGE_KEY = "freya.v1.candidLanguage";
-const CANVAS_SHAPE_KEY = "freya.v1.canvasShape";
 const NOTIFICATIONS_KEY = "freya.v1.notifications";
 const INITIATIVE_KEY = "freya.v1.initiative";
 const SOUND_KEY = "freya.v1.messageSound";
@@ -178,7 +197,56 @@ function sanitizeMessage(message: Message): Message {
     ...(message.longform === true ? { longform: true } : {}),
     ...(message.initiative === true ? { initiative: true } : {}),
     ...(Array.isArray(message.reasoned) && message.reasoned.every((name) => name === "groq" || name === "gemini") && message.reasoned.length ? { reasoned: message.reasoned } : {}),
+    ...(message.command === "visualize" || message.command === "image" ? { command: message.command } : {}),
+    ...sanitizeMedia(message),
   };
+}
+
+/** Visualisations and pictures from storage: anything left mid-way by a reload reads as failed. */
+function sanitizeMedia(message: Message): Pick<Message, "visualization" | "picture"> {
+  const visual = message.visualization;
+  if (visual && typeof visual.title === "string") {
+    const spec = validateSpec(visual.spec);
+    return { visualization: spec ? { title: visual.title.slice(0, 60), status: "ready", spec } : { title: visual.title.slice(0, 60), status: "error", error: visual.error || "This visualisation didn't finish." } };
+  }
+  const picture = message.picture;
+  if (picture && typeof picture.prompt === "string") {
+    const prompt = picture.prompt.slice(0, 600);
+    if (picture.status === "ready" && picture.kind === "svg") {
+      const svg = sanitizeSvg(picture.svg);
+      return { picture: svg ? { status: "ready", kind: "svg", prompt, svg, ...(typeof picture.reason === "string" ? { reason: picture.reason } : {}) } : { status: "error", prompt, error: "This drawing couldn't be shown." } };
+    }
+    if (picture.status === "ready" && picture.kind === "generated") return { picture: { status: "ready", kind: "generated", prompt, ...(typeof picture.model === "string" ? { model: picture.model.slice(0, 60) } : {}) } };
+    return { picture: { status: "error", prompt, error: typeof picture.error === "string" ? picture.error : "This picture didn't finish." } };
+  }
+  return {};
+}
+
+/**
+ * What FREYA's model sees of a message. Commands and media cards become short notes, so she
+ * knows a picture or visualisation happened without its data (an SVG or a spec) filling the
+ * context; a voice note becomes what was measured and said.
+ */
+function forModel(message: Message): Message {
+  if (message.voice) return { ...message, content: describeVoice(message.voice, message.content) };
+  if (message.command) return { ...message, content: `(asked for ${message.command === "image" ? "a picture" : "a 3D visualisation on the canvas"}: ${message.content})`, attachments: [] };
+  if (message.visualization) return { ...message, content: message.visualization.status === "ready" ? `(showed them a 3D particle visualisation on the canvas: ${message.visualization.title})` : "(a visualisation didn't work)", attachments: [] };
+  if (message.picture) {
+    const picture = message.picture;
+    return { ...message, attachments: [], content: picture.status !== "ready" ? "(a picture didn't work)" : picture.kind === "svg" ? `(sent them an SVG drawing, not a generated image, of: ${picture.prompt})` : `(sent them a generated picture of: ${picture.prompt})` };
+  }
+  return message;
+}
+
+/** Text for a failed card: the server's own message, never a raw browser network error. */
+function cardError(error: unknown, fallback: string) {
+  if (error instanceof TypeError) return "Couldn't reach the server. Check that it's running and try again.";
+  return error instanceof Error && error.message ? error.message : fallback;
+}
+
+/** "make it…", "now add…": a follow-up that changes the last picture rather than starting over. */
+function refinesPrevious(text: string) {
+  return /^(make (it|her|him|them)|now\b|add\b|change\b|turn (it|her|him)|but\b|more\b|less\b|without\b|with\b|same\b|again\b|remove\b|zoom\b|darker|brighter|bigger|smaller)/i.test(text.trim());
 }
 
 function formatClock(iso?: string) {
@@ -213,8 +281,20 @@ function normalizeConversations(value: unknown): Conversation[] {
       createdAt,
       updatedAt: typeof candidate.updatedAt === "string" ? candidate.updatedAt : createdAt,
       ...(unread ? { unread } : {}),
+      ...(typeof candidate.reflectedCount === "number" && candidate.reflectedCount > 0 ? { reflectedCount: Math.min(messages.length, Math.floor(candidate.reflectedCount)) } : {}),
     }];
   }).slice(0, MAX_CONVERSATIONS);
+}
+
+/** Notes kept in this browser (no account, or cloud memory not configured). */
+function readLocalMemories(): Memory[] {
+  try { return normalizeStoredMemories(JSON.parse(localStorage.getItem(MEMORY_KEY) || "[]")); } catch { return []; }
+}
+
+/** The user's local calendar date, for dating what automatic memory saves. */
+function localDate() {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
 }
 
 function formatRelative(iso: string) {
@@ -310,6 +390,10 @@ export default function Home() {
   const [memoryText, setMemoryText] = useState("");
   const [memoryOpen, setMemoryOpen] = useState(false);
   const [memoryEnabled, setMemoryEnabled] = useState(true);
+  const memoriesRef = useRef<Memory[]>([]);
+  const reflectingRef = useRef(new Set<string>());
+  const reflectTimersRef = useRef(new Map<string, number>());
+  const reflectRef = useRef<(conversationId: string) => void>(() => {});
   const [characterProfile, setCharacterProfile] = useState<CharacterProfile>(() => createDefaultCharacterProfile());
   const [profileRevisions, setProfileRevisions] = useState<PersonalityRevision[]>([]);
   const [personalityProposals, setPersonalityProposals] = useState<PersonalityProposal[]>([]);
@@ -317,12 +401,12 @@ export default function Home() {
   const [cloudProfileAvailable, setCloudProfileAvailable] = useState(!supabase);
   const [autonomyLevel, setAutonomyLevel] = useState<0 | 1 | 2>(1);
   const [privacyMode, setPrivacyMode] = useState(false);
-  const [ollamaModels, setOllamaModels] = useState<{ name: string; size: number }[]>([]);
-  const [selectedModel, setSelectedModel] = useState("");
-  const [modelStatus, setModelStatus] = useState("Checking Ollama…");
+  /** The server-owned AI setup (display only): Local-only mode's model and the reasoning setting. */
+  const [serverSetup, setServerSetup] = useState<{ localModel: string | null; localReady: boolean; reasoning: ReasoningMode }>({ localModel: null, localReady: false, reasoning: "auto" });
   const [autoMemory, setAutoMemory] = useState(true);
   const [candidLanguage, setCandidLanguage] = useState(true);
-  const [canvasShape, setCanvasShape] = useState<CanvasShape>("auto");
+  /** The /visualize form on the canvas, if any. */
+  const [canvasForm, setCanvasForm] = useState<CanvasForm | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<"profile" | "settings">("profile");
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -348,13 +432,21 @@ export default function Home() {
   const [soundOn, setSoundOn] = useState(true);
   /** Adult roleplay, opt-in after an 18+ confirmation. */
   const [intimateMode, setIntimateMode] = useState(false);
-  /** When the cloud reasoning panel works a question through before she answers. */
-  const [reasoningMode, setReasoningMode] = useState<ReasoningMode>("auto");
   /** The conversation where the panel is working right now, for the "thinking it through" label. */
   const [deliberatingIn, setDeliberatingIn] = useState("");
+  /** A short-lived facial reaction (their news, a joke, "smile for me"); then her mood shows again. */
+  const [reaction, setReaction] = useState<(Reaction & { until: number }) | null>(null);
+  const react = useCallback((next: Reaction | null) => { if (next) setReaction({ ...next, until: Date.now() + next.ms }); }, []);
+  useEffect(() => {
+    if (!reaction) return;
+    const timer = window.setTimeout(() => setReaction((current) => current === reaction ? null : current), Math.max(0, reaction.until - Date.now()));
+    return () => window.clearTimeout(timer);
+  }, [reaction]);
   /** Set when a reply used up its continuation budget and still had more to say. */
   const [truncatedReplyId, setTruncatedReplyId] = useState("");
   const [user, setUser] = useState<User | null>(null);
+  /** Signed in with cloud memory configured: notes live in the account, otherwise in this browser. */
+  const memoryInCloud = Boolean(supabase && user);
   const [authEmail, setAuthEmail] = useState("");
   const [authPassword, setAuthPassword] = useState("");
   const [authBusy, setAuthBusy] = useState(false);
@@ -401,16 +493,13 @@ export default function Home() {
       setAutonomyLevel(level === 0 || level === 2 ? level : 1);
       setPrivacyMode(localStorage.getItem(PRIVACY_KEY) === "true");
       setAutoMemory(localStorage.getItem(AUTO_MEMORY_KEY) !== "false");
+      setMemoryEnabled(localStorage.getItem(MEMORY_ENABLED_KEY) !== "false");
       setCandidLanguage(localStorage.getItem(CANDID_LANGUAGE_KEY) !== "false");
-      const savedShape = localStorage.getItem(CANVAS_SHAPE_KEY);
-      if (["auto", "wave", "graph", "face", "bike", "dog"].includes(savedShape || "")) setCanvasShape(savedShape as CanvasShape);
       // Permission can be revoked in browser settings between visits; the toggle follows it.
       setNotificationsOn(localStorage.getItem(NOTIFICATIONS_KEY) === "true" && notificationState() === "granted");
       setInitiativeOn(localStorage.getItem(INITIATIVE_KEY) !== "false");
       setSoundOn(localStorage.getItem(SOUND_KEY) !== "false");
       setIntimateMode(localStorage.getItem(INTIMATE_KEY) === "true");
-      const savedReasoning = localStorage.getItem(REASONING_KEY);
-      if (isReasoningMode(savedReasoning)) setReasoningMode(savedReasoning);
       setMood(loadMood());
     } catch { /* Defaults remain safe when local settings storage is unavailable. */ }
   }, [hydrated]);
@@ -421,32 +510,29 @@ export default function Home() {
       localStorage.setItem(AUTONOMY_KEY, String(autonomyLevel));
       localStorage.setItem(PRIVACY_KEY, String(privacyMode));
       localStorage.setItem(AUTO_MEMORY_KEY, String(autoMemory));
+      localStorage.setItem(MEMORY_ENABLED_KEY, String(memoryEnabled));
       localStorage.setItem(CANDID_LANGUAGE_KEY, String(candidLanguage));
-      localStorage.setItem(CANVAS_SHAPE_KEY, canvasShape);
       localStorage.setItem(NOTIFICATIONS_KEY, String(notificationsOn));
       localStorage.setItem(INITIATIVE_KEY, String(initiativeOn));
       localStorage.setItem(SOUND_KEY, String(soundOn));
       localStorage.setItem(INTIMATE_KEY, String(intimateMode));
-      localStorage.setItem(REASONING_KEY, reasoningMode);
     } catch { /* Settings still apply for this session. */ }
-  }, [autonomyLevel, privacyMode, autoMemory, candidLanguage, canvasShape, notificationsOn, initiativeOn, soundOn, intimateMode, reasoningMode, hydrated]);
+  }, [autonomyLevel, privacyMode, autoMemory, memoryEnabled, candidLanguage, notificationsOn, initiativeOn, soundOn, intimateMode, hydrated]);
 
   useEffect(() => {
     let active = true;
+    // Models and routing are server-owned; this only shows what the server is set up to use.
+    // The old per-browser model choice silently sent every message to the local model.
+    try { localStorage.removeItem(MODEL_KEY); localStorage.removeItem(REASONING_KEY); } catch { /* nothing stored */ }
     fetch("/api/models", { cache: "no-store" }).then(async (response) => {
       const payload = await response.json().catch(() => null);
-      if (!active) return;
-      if (!response.ok || !Array.isArray(payload?.models)) throw new Error("Ollama unavailable");
-      const models: { name: string; size: number }[] = (payload.models as unknown[]).filter(
-        (model): model is { name: string; size: number } => typeof (model as { name?: unknown })?.name === "string");
-      setOllamaModels(models);
-      const saved = localStorage.getItem(MODEL_KEY);
-      const fallback = typeof payload.defaultModel === "string" ? payload.defaultModel : models[0]?.name || "";
-      const selected = models.some((model) => model.name === saved) ? saved! : fallback;
-      setSelectedModel(selected);
-      if (selected) localStorage.setItem(MODEL_KEY, selected);
-      setModelStatus(models.length ? `${models.length} local model${models.length === 1 ? "" : "s"} ready` : "Install a model in Ollama to chat");
-    }).catch(() => { if (active) setModelStatus("Ollama unavailable"); });
+      if (!active || !response.ok || !payload) return;
+      setServerSetup({
+        localModel: typeof payload.defaultModel === "string" ? payload.defaultModel : null,
+        localReady: payload.ollama === "ready",
+        reasoning: isReasoningMode(payload.reasoning) ? payload.reasoning : "auto",
+      });
+    }).catch(() => { /* Display only; chat works without it. */ });
     return () => { active = false; };
   }, []);
 
@@ -573,8 +659,7 @@ export default function Home() {
       try {
         loadSavedCharacterProfile();
         loadConversations();
-        const savedMemories = localStorage.getItem(MEMORY_KEY);
-        if (savedMemories && active) setMemories(JSON.parse(savedMemories));
+        if (active) setMemories(readLocalMemories());
       } catch {
         if (active) {
           setConversations([createConversation()]);
@@ -597,13 +682,14 @@ export default function Home() {
       try { loadConversations(); } catch { setConversations([createConversation()]); }
       setHydrated(true);
       if (data.session?.user) void loadCloudMemories();
+      else setMemories(readLocalMemories());
     });
     const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
       if (!active) return;
       setUser(session?.user ?? null);
       setCloudProfileReady(!session?.user);
       if (session?.user) void loadCloudMemories();
-      else setMemories([]);
+      else setMemories(readLocalMemories());
     });
     return () => { active = false; listener.subscription.unsubscribe(); };
     // Hydration runs once on mount; re-running it would discard in-progress state.
@@ -648,7 +734,7 @@ export default function Home() {
     if (!supabase) return;
     const { error } = await supabase.auth.signOut();
     if (error) notify(reportError("auth", error, "Sign-out did not complete."), "error");
-    else { setUser(null); setMemories([]); loadSavedCharacterProfile(); setProfileRevisions([]); setPersonalityProposals([]); notify("Signed out. Cloud memories remain in your account."); }
+    else { setUser(null); setMemories(readLocalMemories()); loadSavedCharacterProfile(); setProfileRevisions([]); setPersonalityProposals([]); notify("Signed out. Cloud memories remain in your account."); }
   }
 
   async function personalityRequest(body: Record<string, unknown>) {
@@ -881,6 +967,8 @@ export default function Home() {
 
   function selectConversation(conversationId: string) {
     if (conversationId === activeId) { setDrawerOpen((open) => (window.innerWidth <= 700 ? false : open)); return; }
+    // Leaving a conversation is a natural point to remember what mattered in it.
+    reflectRef.current(activeIdRef.current);
     // A reply in progress keeps going in the background and lands in its own conversation.
     activeIdRef.current = conversationId;
     setActiveId(conversationId);
@@ -891,19 +979,16 @@ export default function Home() {
   }
 
   const newConversation = useCallback(() => {
-    setConversations((previous) => {
-      // Reuse an untouched conversation rather than stacking up empty ones.
-      const empty = previous.find((conversation) => !conversation.messages.length);
-      if (empty) {
-        activeIdRef.current = empty.id;
-        setActiveId(empty.id);
-        return previous;
-      }
-      const created = createConversation();
-      activeIdRef.current = created.id;
-      setActiveId(created.id);
-      return [created, ...previous].slice(0, MAX_CONVERSATIONS);
-    });
+    reflectRef.current(activeIdRef.current);
+    // Decided outside the state updater: React may run an updater twice (it does in development),
+    // and creating the conversation in there made two ids, leaving the active one pointing at a
+    // conversation that was never stored, so the next message vanished.
+    const empty = conversationsRef.current.find((conversation) => !conversation.messages.length);
+    const target = empty ?? createConversation();
+    activeIdRef.current = target.id;
+    setActiveId(target.id);
+    // Reuse an untouched conversation rather than stacking up empty ones.
+    if (!empty) setConversations((previous) => [target, ...previous.filter((conversation) => conversation.id !== target.id)].slice(0, MAX_CONVERSATIONS));
     setInput("");
     shouldAutoScroll.current = true;
     atBottomRef.current = true;
@@ -916,7 +1001,7 @@ export default function Home() {
     if (target?.messages.length) {
       const confirmed = await askFor({
         title: "Delete this conversation?",
-        body: `"${target.title}" and its ${target.messages.length} messages will be removed. This cannot be undone.`,
+        body: `"${target.title}" and its ${target.messages.length} messages will be removed. This cannot be undone. Anything FREYA remembered from it stays in Memory, where you can delete it separately.`,
         confirmLabel: "Delete",
         destructive: true,
       });
@@ -924,14 +1009,17 @@ export default function Home() {
     }
     cancelRepliesFor(conversationId);
     void deleteAttachments(target?.messages.flatMap((message) => message.attachments?.map((item) => item.id) ?? []) ?? []);
+    // Worked out before the update (an updater may run twice), so the active id always exists.
+    const remaining = conversationsRef.current.filter((conversation) => conversation.id !== conversationId);
+    const replacement = remaining.length ? null : createConversation();
+    if (conversationId === activeIdRef.current) {
+      const nextId = replacement?.id ?? remaining[0].id;
+      activeIdRef.current = nextId;
+      setActiveId(nextId);
+    }
     setConversations((previous) => {
-      const remaining = previous.filter((conversation) => conversation.id !== conversationId);
-      const next = remaining.length ? remaining : [createConversation()];
-      if (conversationId === activeIdRef.current) {
-        activeIdRef.current = next[0].id;
-        setActiveId(next[0].id);
-      }
-      return next;
+      const kept = previous.filter((conversation) => conversation.id !== conversationId);
+      return kept.length ? kept : [replacement ?? createConversation()];
     });
     notify("Conversation deleted.");
   }
@@ -966,22 +1054,93 @@ export default function Home() {
     localStorage.setItem(MEMORY_KEY, JSON.stringify(next));
   }
 
+  /**
+   * Local-only mode can't use automatic memory (it would send the chat to a hosted model), so
+   * there, and only there, the old on-device rule still saves explicit "I prefer…" statements,
+   * to this browser only: Local-only never writes to the cloud.
+   */
   async function autoSaveExplicitPreference(userText: string) {
-    if (!autoMemory) return;
+    if (!autoMemory || !memoryEnabled || !privacyMode || memoryInCloud) return;
     const candidate = captureExplicitPreference(userText);
-    if (!candidate || memories.length >= 30 || memories.some((memory) => memory.text.toLowerCase() === candidate.toLowerCase())) return;
-    // Local-only mode must never turn an automatic save into a cloud write.
-    if (supabase && (!user || privacyMode)) return;
-    if (supabase && user) {
-      const { error } = await supabase.from("memories").insert({ content: candidate, user_id: user.id });
-      if (error) { notify("A preference was not added to cloud memory.", "error"); return; }
+    if (!candidate || memories.length >= LOCAL_MEMORY_LIMIT || memories.some((memory) => memory.text.toLowerCase() === candidate.toLowerCase())) return;
+    const timestamp = new Date().toISOString();
+    saveLocalMemories([{ id: id(), text: candidate, createdAt: timestamp, updatedAt: timestamp, kind: "preference", source: "freya" }, ...memories]);
+    notify(`FREYA will remember: "${candidate}"`);
+  }
+
+  /** Saves validated automatic-memory changes where the notes live. True only if all of it saved. */
+  async function applyMemoryChanges(changes: MemoryChanges): Promise<boolean> {
+    if (memoryInCloud && supabase && user) {
+      for (const item of changes.remove) {
+        const { error } = await supabase.from("memories").delete().eq("id", item.id);
+        if (error) { reportError("memory", error); return false; }
+      }
+      for (const item of changes.update) {
+        const { error } = await supabase.from("memories").update({ content: item.text, updated_at: new Date().toISOString() }).eq("id", item.id);
+        if (error) { reportError("memory", error); return false; }
+      }
+      if (changes.add.length) {
+        const { error } = await supabase.from("memories").insert(changes.add.map((item) => ({ content: item.text, user_id: user.id })));
+        if (error) { reportError("memory", error); return false; }
+      }
       await loadCloudMemories();
-      notify("Saved an explicit preference to cloud memory.");
-    } else {
-      const timestamp = new Date().toISOString();
-      saveLocalMemories([{ id: id(), text: candidate, createdAt: timestamp, updatedAt: timestamp }, ...memories].slice(0, 30));
-      notify("Saved an explicit preference to this browser's memory.");
+      return true;
     }
+    saveLocalMemories(applyChangesLocally(memoriesRef.current, changes, new Date().toISOString(), id));
+    return true;
+  }
+
+  function markReflected(conversationId: string, upTo: number) {
+    setConversations((previous) => previous.map((conversation) => conversation.id === conversationId
+      ? { ...conversation, reflectedCount: Math.max(conversation.reflectedCount ?? 0, upTo) }
+      : conversation));
+  }
+
+  /**
+   * Automatic memory: reads what is new in a conversation and saves what is worth keeping.
+   * Runs after a quiet spell, when you switch conversations or leave the tab, and once after
+   * loading for anything left unread. Never in Local-only mode, never with memory off.
+   */
+  async function reflectConversation(conversationId: string) {
+    if (!hydrated || !autoMemory || !memoryEnabled || privacyMode || reflectingRef.current.has(conversationId)) return;
+    const conversation = conversationsRef.current.find((item) => item.id === conversationId);
+    if (!conversation) return;
+    const settled = conversation.messages.filter((message) => !message.streaming && !message.failed && !message.command && !message.visualization && !message.picture);
+    const window = reflectionWindow(settled.map(({ role, content }) => ({ role, content })), conversation.reflectedCount ?? 0, intimateMode);
+    if (!window) return;
+    reflectingRef.current.add(conversationId);
+    try {
+      const response = await fetch("/api/memory/reflect", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          turns: window.turns,
+          memories: memoriesRef.current.map((memory) => ({ id: memory.id, text: memory.text })),
+          forgotten: loadForgotten(),
+          today: localDate(),
+        }),
+      });
+      if (!response.ok) return;
+      const changes = await response.json() as MemoryChanges;
+      if (!Array.isArray(changes.add) || !Array.isArray(changes.update) || !Array.isArray(changes.remove)) return;
+      if (!await applyMemoryChanges(changes)) return;
+      markReflected(conversationId, window.upTo);
+      const line = describeChanges(changes);
+      if (line) notify(line);
+    } catch (error) {
+      reportError("memory", error);
+    } finally {
+      reflectingRef.current.delete(conversationId);
+    }
+  }
+  useEffect(() => { reflectRef.current = (conversationId) => { void reflectConversation(conversationId); }; });
+
+  function scheduleReflection(conversationId: string, after = REFLECT_AFTER_MS) {
+    window.clearTimeout(reflectTimersRef.current.get(conversationId));
+    reflectTimersRef.current.set(conversationId, window.setTimeout(() => {
+      reflectTimersRef.current.delete(conversationId);
+      reflectRef.current(conversationId);
+    }, after));
   }
 
   async function addMemory(event: FormEvent) {
@@ -990,27 +1149,47 @@ export default function Home() {
     if (!text) return;
     if (text.length > 240) { notify("Keep each memory under 240 characters.", "error"); return; }
     if (containsSensitiveCredential(text)) { notify("Credentials and secrets cannot be saved as memories.", "error"); return; }
-    if (supabase) {
-      if (!user) { notify("Sign in to save cloud memories. Local memory is disabled while cloud mode is configured.", "error"); return; }
+    if (memoryInCloud && supabase && user) {
       const { error } = await supabase.from("memories").insert({ content: text, user_id: user.id });
       if (error) { notify(reportError("memory", error), "error"); return; }
       await loadCloudMemories();
       notify("Memory saved to your account.");
     } else {
-      saveLocalMemories([{ id: id(), text, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }, ...memories].slice(0, 30));
-      notify("Memory saved in this browser. Add Supabase configuration to enable cloud memory.");
+      if (memories.length >= LOCAL_MEMORY_LIMIT) { notify(`This browser keeps up to ${LOCAL_MEMORY_LIMIT} memories. Delete one first.`, "error"); return; }
+      const now = new Date().toISOString();
+      saveLocalMemories([{ id: id(), text, createdAt: now, updatedAt: now, source: "you" }, ...memories]);
+      notify("Memory saved in this browser.");
     }
     setMemoryText("");
   }
 
+  async function editMemory(memoryId: string) {
+    const target = memories.find((memory) => memory.id === memoryId);
+    if (!target) return;
+    const answer = await askFor({ title: "Edit memory", field: { label: "What FREYA remembers", value: target.text, placeholder: "", maxLength: 240 }, confirmLabel: "Save" });
+    const text = typeof answer === "string" ? answer.replace(/\s+/g, " ").trim() : "";
+    if (!text || text === target.text) return;
+    if (containsSensitiveCredential(text)) { notify("Credentials and secrets cannot be saved as memories.", "error"); return; }
+    if (memoryInCloud && supabase) {
+      const { error } = await supabase.from("memories").update({ content: text, updated_at: new Date().toISOString() }).eq("id", memoryId);
+      if (error) { notify(reportError("memory", error, "That memory could not be changed."), "error"); return; }
+      await loadCloudMemories();
+    } else {
+      saveLocalMemories(memories.map((memory) => memory.id === memoryId ? { ...memory, text, updatedAt: new Date().toISOString() } : memory));
+    }
+    notify("Memory updated.");
+  }
+
   async function deleteMemory(memoryId: string) {
-    if (supabase) {
-      if (!user) { notify("Sign in to manage cloud memories.", "error"); return; }
+    const target = memories.find((memory) => memory.id === memoryId);
+    if (memoryInCloud && supabase) {
       const { error } = await supabase.from("memories").delete().eq("id", memoryId);
       if (error) { notify(reportError("memory", error, "That memory could not be deleted."), "error"); return; }
       await loadCloudMemories();
-      notify("Memory deleted from your account.");
     } else saveLocalMemories(memories.filter((memory) => memory.id !== memoryId));
+    // Never re-learned from an old conversation.
+    if (target) rememberForgotten([target.text]);
+    notify("Memory deleted. FREYA won't pick it up again from old chats.");
   }
 
   function patchConversation(conversationId: string, update: (messages: Message[]) => Message[]) {
@@ -1155,7 +1334,7 @@ export default function Home() {
 
     // FREYA reads a voice note as its transcript, and knows it was spoken.
     // FREYA reads a voice note as what was measured and said, and hears it on Gemini.
-    const history = modelHistory(visible.map((message) => message.voice ? { ...message, content: describeVoice(message.voice, message.content) } : message));
+    const history = modelHistory(visible.map(forModel));
     if (job.extraPrompt) history.push({ role: "user", content: job.extraPrompt, attachments: [] });
     if (initiative) history.push({ role: "user", content: "[No new message from them. You are choosing to text first.]", attachments: [] });
     const { turns, older, sent } = requestTurns(history);
@@ -1167,7 +1346,8 @@ export default function Home() {
     const answeringVoice = visible.slice(lastAnswer + 1).some((message) => message.voice);
     let voiceTurn = !job.extraPrompt && Math.random() < (answeringVoice ? 0.85 : 0.12);
     // Essays, letters and stories arrive as one typed-out piece; everything else is texted.
-    const longform = !initiative && !job.extraPrompt && wantsLongForm(latestUserText);
+    let longform = !initiative && !job.extraPrompt && wantsLongForm(latestUserText);
+    let postedChars = 0;
     let spokenChars = 0;
 
     // FREYA has now read everything up to the message she is answering.
@@ -1175,7 +1355,7 @@ export default function Home() {
       (message.queued || message.failed) && index <= targetIndex ? { ...message, queued: false, failed: false } : message));
     setTypingIn(job.conversationId);
     // Same rule the route uses, so the label only shows when the panel really runs.
-    if (!initiative && !privacyMode && needsReasoning(latestUserText, reasoningMode)) setDeliberatingIn(job.conversationId);
+    if (!initiative && !privacyMode && needsReasoning(latestUserText, serverSetup.reasoning)) setDeliberatingIn(job.conversationId);
     const controller = new AbortController();
     activeChatRequest.current = controller;
     beginStream(latestUserText);
@@ -1188,7 +1368,7 @@ export default function Home() {
     const postBubble = (text: string) => {
       const first = posted.length === 0 && !job.turn;
       delivery = delivery.then(async () => {
-        const wait = typingDelay(text) - (performance.now() - lastPostedAt);
+        const wait = bubbleDelay(text, posted.length > 0) - (performance.now() - lastPostedAt);
         if (wait > 0) await delay(wait);
         if (controller.signal.aborted) return;
         // A reply that turns out long switches to text for the rest: nobody wants five minutes of voice notes.
@@ -1205,6 +1385,7 @@ export default function Home() {
         patchConversation(job.conversationId, (messages) => [...messages, message]);
         lastPostedAt = performance.now();
         announceReply(job.conversationId, message, first);
+        if (job.conversationId === activeIdRef.current) react(reactionInReply(text));
       });
     };
 
@@ -1245,7 +1426,10 @@ export default function Home() {
       const { text, mood: reported } = extractMoodTag(raw);
       if (reported) moodShift = reported;
       if (!text) return;
-      if (!longform) { chopCasually(text).forEach(postBubble); return; }
+      // A reply that turns out substantial (a structured explanation, or simply long) becomes one
+      // document from here on, rather than a stack of bubbles. What's already sent stays.
+      if (!longform && !initiative && becomesLongForm(text, postedChars)) longform = true;
+      if (!longform) { postedChars += text.length; chopCasually(text).forEach(postBubble); return; }
       if (!bodyStarted && !introSent && !held && isAside(text)) { introSent = true; postBubble(text); return; }
       if (held) appendBody(held);
       held = text;
@@ -1277,17 +1461,17 @@ export default function Home() {
         signal: controller.signal,
         body: JSON.stringify({
           messages: turns.map((entry, index) => index === turns.length - 1 && attachments.length ? { ...entry, attachments } : entry),
-          useMemories: memoryEnabled && (!supabase || Boolean(user)),
+          useMemories: memoryEnabled,
+          // Without an account the notes live here, so they travel with the request.
+          ...(memoryEnabled && !memoryInCloud && memories.length ? { localMemories: memories.map((memory) => ({ id: memory.id, text: memory.text, createdAt: memory.createdAt })) } : {}),
           style,
           characterProfile,
           privacyMode,
           autonomyLevel,
-          ollamaModel: selectedModel || undefined,
           candidLanguage,
           mood: moodRef.current,
           initiative,
           intimateMode,
-          reasoning: reasoningMode,
           historySummary: summarizeOlderMessages(older),
           stream: true,
         }),
@@ -1339,6 +1523,7 @@ export default function Home() {
       setTruncatedReplyId(truncated && lastPart ? lastPart : "");
       if (latestUserText && !job.extraPrompt && !initiative) void autoSaveExplicitPreference(latestUserText);
       if (!job.turn && !initiative && user && autonomyLevel > 0) void reflectOnConversation(visible, true);
+      scheduleReflection(job.conversationId);
     } catch (error) {
       failStream(controller.signal.aborted);
       if (controller.signal.aborted) return;
@@ -1355,6 +1540,27 @@ export default function Home() {
     }
   }
   useEffect(() => { runReplyRef.current = runReply; });
+  useEffect(() => { memoriesRef.current = memories; }, [memories]);
+
+  // Between conversations: once after loading, catch up on the most recent conversation left
+  // unread; and whenever the tab is hidden, remember what mattered in the open one.
+  useEffect(() => {
+    if (!hydrated) return;
+    const timers = reflectTimersRef.current;
+    const catchUp = window.setTimeout(() => {
+      const pending = [...conversationsRef.current]
+        .filter((conversation) => conversation.messages.length > (conversation.reflectedCount ?? 0))
+        .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
+      if (pending) reflectRef.current(pending.id);
+    }, 15_000);
+    const onHidden = () => { if (document.hidden) reflectRef.current(activeIdRef.current); };
+    document.addEventListener("visibilitychange", onHidden);
+    return () => {
+      window.clearTimeout(catchUp);
+      document.removeEventListener("visibilitychange", onHidden);
+      for (const timer of timers.values()) window.clearTimeout(timer);
+    };
+  }, [hydrated]);
 
   /** How a message from them lands on her: mood, and sometimes a new thing to wonder about. */
   function feel(text: string) {
@@ -1370,6 +1576,18 @@ export default function Home() {
     event?.preventDefault();
     const text = input.trim();
     if ((!text && !pendingFiles.length) || preparingFiles > 0) return;
+    if (!pendingFiles.length) {
+      const command = parseCommand(text);
+      if (command) {
+        if (!command.argument) { notify(command.name === "visualize" ? "Say what to show, e.g. /visualize a red fox." : "Say what to draw, e.g. /image a lighthouse at night.", "error"); return; }
+        setInput("");
+        if (command.name === "visualize") void runVisualize(command.argument);
+        else void runPicture(command.argument, command.argument);
+        return;
+      }
+      const subject = pictureRequest(text);
+      if (subject) { setInput(""); void runPicture(subject, text); return; }
+    }
     const message: Message = {
       id: id(), role: "user", content: text, at: new Date().toISOString(),
       ...(pendingFiles.length ? { attachments: pendingFiles } : {}),
@@ -1378,6 +1596,7 @@ export default function Home() {
     };
     updateActiveMessages((previous) => [...previous, message]);
     feel(text);
+    react(reactionTo(text));
     setInput("");
     setPendingFiles([]);
     setTruncatedReplyId("");
@@ -1385,6 +1604,95 @@ export default function Home() {
     atBottomRef.current = true;
     setAtBottom(true);
     enqueueReply({ conversationId: activeIdRef.current, targetId: message.id });
+  }
+
+  /** Adds a command chip and FREYA's card to the open conversation; returns the card's id. */
+  function postCommand(kind: "visualize" | "image", shown: string, card: Partial<Message>) {
+    const at = new Date().toISOString();
+    const cardId = id();
+    updateActiveMessages((previous) => [...previous,
+      { id: id(), role: "user", content: shown, at, command: kind },
+      { id: cardId, role: "assistant", content: "", at, ...card },
+    ]);
+    shouldAutoScroll.current = true;
+    atBottomRef.current = true;
+    setAtBottom(true);
+    return { conversationId: activeIdRef.current, cardId };
+  }
+
+  function patchMessage(conversationId: string, messageId: string, patch: Partial<Message>) {
+    patchConversation(conversationId, (messages) => messages.map((message) => message.id === messageId ? { ...message, ...patch } : message));
+  }
+
+  /** /visualize: the request goes to the visualisation route; the result lands on the canvas. */
+  async function runVisualize(description: string) {
+    if (privacyMode) { notify("Visualisations need a cloud model, so they're paused in Local-only mode.", "error"); return; }
+    const title = description.length > 40 ? `${description.slice(0, 40).trimEnd()}…` : description;
+    // The latest form in this conversation, so "make it bigger" can change it.
+    const current = [...messages].reverse().find((message) => message.visualization?.status === "ready" && message.visualization.spec)?.visualization?.spec;
+    const { conversationId, cardId } = postCommand("visualize", description, { visualization: { title, status: "loading" } });
+    setCanvasForm({ key: cardId, title, status: "loading" });
+    try {
+      const response = await fetch("/api/visualize", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ description, ...(current ? { current } : {}) }) });
+      const payload = await response.json().catch(() => ({}));
+      const spec = validateSpec(payload?.spec);
+      if (!response.ok || !spec) throw new Error(typeof payload?.error === "string" ? payload.error : "The visualisation couldn't be made.");
+      const cloud = await cloudForSpec(spec, FORM_POINTS);
+      patchMessage(conversationId, cardId, { visualization: { title: spec.title, status: "ready", spec } });
+      // A newer request may own the canvas by now; only replace our own placeholder.
+      setCanvasForm((shown) => shown?.key === cardId ? { key: cardId, title: spec.title, status: "ready", cloud } : shown);
+    } catch (error) {
+      const message = cardError(error, "The visualisation couldn't be made.");
+      patchMessage(conversationId, cardId, { visualization: { title, status: "error", error: message } });
+      setCanvasForm((shown) => shown?.key === cardId ? { key: cardId, title, status: "error" } : shown);
+      reportError("visualize", error);
+    }
+  }
+
+  async function showVisualization(message: Message) {
+    const spec = message.visualization?.spec;
+    if (!spec) return;
+    try {
+      setCanvasForm({ key: `${message.id}:${Date.now()}`, title: spec.title, status: "ready", cloud: await cloudForSpec(spec, FORM_POINTS) });
+    } catch (error) { notify(reportError("visualize", error, "That form couldn't be shown."), "error"); }
+  }
+
+  /** A picture in the chat: generated when an image model is available, else a labelled SVG. */
+  async function runPicture(prompt: string, shown: string) {
+    if (privacyMode) { notify("Pictures need a cloud model, so they're paused in Local-only mode.", "error"); return; }
+    const last = refinesPrevious(prompt) ? [...messages].reverse().find((message) => message.picture?.status === "ready") : undefined;
+    let previous: { prompt: string; mime?: string; data?: string } | undefined;
+    if (last?.picture) {
+      previous = { prompt: last.picture.prompt };
+      const stored = last.picture.kind === "generated" && last.attachments?.[0] ? await getAttachment(last.attachments[0].id).catch(() => undefined) : undefined;
+      if (stored?.data && last.attachments?.[0]) previous = { ...previous, mime: last.attachments[0].mime, data: stored.data };
+    }
+    const fullPrompt = previous ? `${previous.prompt}; ${prompt}` : prompt;
+    const { conversationId, cardId } = postCommand("image", shown, { picture: { status: "loading", prompt: fullPrompt } });
+    try {
+      const response = await fetch("/api/image", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt, ...(previous ? { previous } : {}) }) });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(typeof payload?.error === "string" ? payload.error : "That picture couldn't be made.");
+      if (payload.kind === "generated" && typeof payload.data === "string" && typeof payload.mime === "string") {
+        const bytes = Uint8Array.from(atob(payload.data), (character) => character.charCodeAt(0));
+        const attachmentId = id();
+        const prepared = await prepareAttachment(new File([bytes], `freya-picture.${payload.mime.split("/")[1] || "png"}`, { type: payload.mime }), attachmentId);
+        await putAttachment(attachmentId, prepared.stored);
+        patchMessage(conversationId, cardId, { attachments: [prepared.meta], picture: { status: "ready", kind: "generated", prompt: fullPrompt, model: String(payload.model || "") } });
+      } else {
+        const svg = sanitizeSvg(payload.svg);
+        if (payload.kind !== "svg" || !svg) throw new Error("That picture couldn't be made.");
+        patchMessage(conversationId, cardId, { picture: { status: "ready", kind: "svg", prompt: fullPrompt, svg, reason: String(payload.reason || "") } });
+      }
+    } catch (error) {
+      patchMessage(conversationId, cardId, { picture: { status: "error", prompt: fullPrompt, error: cardError(error, "That picture couldn't be made.") } });
+      reportError("image", error);
+    }
+  }
+
+  function startRefine(kind: "visualize" | "image") {
+    setInput(`/${kind} `);
+    window.requestAnimationFrame(() => composerRef.current?.focus());
   }
 
   async function addFiles(list: FileList | File[] | null) {
@@ -1541,24 +1849,25 @@ export default function Home() {
   }, [newConversation, settingsOpen]);
 
   async function clearAllMemories() {
-    const location = supabase ? "your account" : "this browser";
+    const location = memoryInCloud ? "your account" : "this browser";
     const confirmed = await askFor({
-      title: "Delete every saved memory?",
-      body: `All ${memories.length} memories stored in ${location} will be removed. This cannot be undone.`,
-      confirmLabel: "Delete all",
+      title: "Forget everything?",
+      body: `All ${memories.length} memories kept in ${location} will be deleted, and FREYA won't re-learn them from your existing conversations. Your conversations themselves are kept. This cannot be undone.`,
+      confirmLabel: "Forget everything",
       destructive: true,
     });
     if (!confirmed) return;
-    if (supabase) {
-      if (!user) { notify("Sign in to manage cloud memories.", "error"); return; }
+    if (memoryInCloud && supabase && user) {
       const { error } = await supabase.from("memories").delete().eq("user_id", user.id);
       if (error) { notify(reportError("memory", error, "Those memories could not be deleted."), "error"); return; }
       setMemories([]);
-      notify("All cloud memories were deleted from your account.");
     } else {
       saveLocalMemories([]);
-      notify("All saved memories were deleted from this browser.");
     }
+    rememberForgotten(memories.map((memory) => memory.text));
+    // Everything said so far counts as read, so nothing deleted comes back from an old chat.
+    setConversations((previous) => previous.map((conversation) => ({ ...conversation, reflectedCount: conversation.messages.length })));
+    notify(`All memories were deleted from ${location}.`);
   }
 
   const canvasSignal: CanvasSignal = loading
@@ -1570,11 +1879,11 @@ export default function Home() {
         : "idle";
   const latestUserText = [...messages].reverse().find((message) => message.role === "user")?.content || "";
   const latestAssistantText = [...messages].reverse().find((message) => message.role === "assistant")?.content || "";
-  const visualPrompt = input.trim() || `${latestUserText} ${latestAssistantText.slice(-500)}`;
-  const canvasVisual = useMemo(() => deriveCanvasVisual(visualPrompt, canvasShape), [visualPrompt, canvasShape]);
   const remainingChars = MAX_INPUT_CHARS - input.length;
   const thread = useMemo(() => describeThread(messages), [messages]);
   const replyingHere = replyingIn.includes(activeId);
+  // Her face: a fresh reaction first, then thinking while she works out a reply, then her mood.
+  const portraitExpression = chooseExpression(mood.name, typingIn === activeId && Boolean(typingIn), reaction);
   const awaitingReply = hydrated && !replyingHere && messages.at(-1)?.role === "user";
 
   return (
@@ -1600,7 +1909,7 @@ export default function Home() {
           </div>
           <div className="settings-dialog-content">
             {settingsTab === "profile" ? <div id="profile-tab-panel" role="tabpanel" aria-labelledby="profile-tab" className="settings-tab-panel">
-              <div className="profile-summary"><div className="profile-monogram">F</div><div><strong>FREYA · THE CURSED MUSE</strong><span>{user ? user.email : "Anonymous session"}</span></div></div>
+              <div className="profile-summary"><div className="profile-monogram">F</div><div><strong>FREYA, 20</strong><span>{user ? user.email : "Anonymous session"}</span></div></div>
               <p className="settings-description">Edit FREYA&apos;s fictional character dossier. These tastes are separate from your saved memories.</p>
               <CharacterProfileEditor
                 profile={characterProfile}
@@ -1614,26 +1923,38 @@ export default function Home() {
               />
               {supabase && <div className="settings-account-block">{user ? <><p className="memory-description">Cloud memories are scoped to this signed-in account.</p><button className="small-primary" type="button" onClick={() => void signOut()}>Sign out</button></> : <><div className="side-label">CLOUD MEMORY ACCOUNT</div><p className="memory-description">Sign in to sync personal memories.</p><form className="memory-form" onSubmit={(event) => void submitAuth("signin", event)}><input type="email" value={authEmail} onChange={(event) => setAuthEmail(event.target.value)} placeholder="Email" autoComplete="email" required/><input type="password" value={authPassword} onChange={(event) => setAuthPassword(event.target.value)} placeholder="Password (min. 6 chars)" autoComplete="current-password" minLength={6} required/><button className="small-primary" type="submit" disabled={authBusy}>{authBusy ? "Please wait…" : "Sign in"}</button><button className="clear-memories" type="button" disabled={authBusy} onClick={() => void submitAuth("signup")}>Create account</button></form></>}</div>}
             </div> : <div id="settings-tab-panel" role="tabpanel" aria-labelledby="settings-tab" className="settings-tab-panel">
+              <div className="settings-group-title">CONVERSATION</div>
               <div className="dialog-setting-row"><div><strong>Reply style</strong><span>Choose FREYA&apos;s conversational tone.</span></div><select value={style} onChange={(event) => setStyle(event.target.value as Style)} aria-label="Reply style"><option value="adaptive">Adaptive</option><option value="friendly">Friendly</option><option value="direct">Direct</option><option value="professional">Professional</option><option value="playful">Playful</option></select></div>
-              <div className="dialog-setting-row"><div><strong>Local model</strong><span>{modelStatus}. Chat uses this model locally without hosted model fallback. Search can still use an external provider unless Local-only is enabled. Larger models may need more RAM and disk; FREYA never downloads them automatically.</span></div><select value={selectedModel} onChange={(event) => { setSelectedModel(event.target.value); localStorage.setItem(MODEL_KEY, event.target.value); }} aria-label="Ollama model" disabled={!ollamaModels.length}><option value="">No local model</option>{ollamaModels.map((model) => <option key={model.name} value={model.name}>{model.name}</option>)}</select></div>
-              <div className="dialog-setting-row"><div><strong>Canvas form</strong><span>Auto follows the topic; you can pin a shape.</span></div><select value={canvasShape} onChange={(event) => setCanvasShape(event.target.value as CanvasShape)} aria-label="Canvas form"><option value="auto">Auto</option><option value="wave">Flowing field</option><option value="graph">Graph</option><option value="face">Expressive face</option><option value="bike">Bicycle</option><option value="dog">Dog</option></select></div>
-              <div className="dialog-setting-row"><div><strong>Autonomy</strong><span>Level 1 proposes. Level 2 may approve allowlisted, tentative interests from an explicit daily reflection.</span></div><select value={autonomyLevel} onChange={(event) => setAutonomyLevel(Number(event.target.value) as 0 | 1 | 2)} aria-label="Autonomy level"><option value={0}>Level 0 · Reply only</option><option value={1}>Level 1 · Propose for approval</option><option value={2}>Level 2 · Approve tentative interests</option></select></div>
-              <p className="settings-description">Level 3 scheduled exploration is unavailable: no background worker, external research budget, or scheduled-task permissions are configured. Reflection is opt-in by button, checks only an allowlist of non-sensitive topics locally, and is limited to one run per day in this browser.</p>
-              <div className="dialog-setting-row"><div><strong>Auto-save clear preferences</strong><span>Stores only explicit “I prefer/like/love/enjoy…” statements after a successful reply, up to 30 notes. Review or delete them in Memory controls. It does not save every message.</span></div><label className="toggle-row"><span className="sr-only">Auto-save clear preferences</span><input type="checkbox" checked={autoMemory} onChange={(event) => setAutoMemory(event.target.checked)} /></label></div>
               <div className="dialog-setting-row"><div><strong>Candid language</strong><span>Allows occasional ordinary swearing when it fits; it won&apos;t use slurs, threats, or escalate serious distress.</span></div><label className="toggle-row"><span className="sr-only">Candid language</span><input type="checkbox" checked={candidLanguage} onChange={(event) => setCandidLanguage(event.target.checked)} /></label></div>
-              <div className="dialog-setting-row"><div><strong>Notifications</strong><span>A desktop alert for every FREYA message while you are in another window or tab, or another chat is open. Unread counts show in the conversation list either way.</span></div><label className="toggle-row"><span className="sr-only">Notifications</span><input type="checkbox" checked={notificationsOn} onChange={(event) => void toggleNotifications(event.target.checked)} /></label></div>
-              <div className="dialog-setting-row"><div><strong>Deep reasoning</strong><span>For maths, code, logic, comparisons and decisions, Groq&apos;s reasoning model and Gemini each work the question through independently (with live search when facts matter) before FREYA answers. Slower by a few seconds; casual chat is unaffected. Never used in Local-only mode or intimate chats.</span></div><select value={reasoningMode} onChange={(event) => setReasoningMode(event.target.value as ReasoningMode)} aria-label="Deep reasoning"><option value="auto">Auto</option><option value="always">Always</option><option value="off">Off</option></select></div>
+              <div className="dialog-setting-row"><div><strong>FREYA texts first</strong><span>She may message you after you&apos;ve been quiet a while, at most twice without a reply. Off at autonomy level 0. Only while FREYA is open in a tab.</span></div><label className="toggle-row"><span className="sr-only">FREYA texts first</span><input type="checkbox" checked={initiativeOn} onChange={(event) => setInitiativeOn(event.target.checked)} /></label></div>
+              <div className="dialog-setting-row"><div><strong>Autonomy</strong><span>How much she does on her own: texting first, and suggesting new tastes for her profile.</span></div><select value={autonomyLevel} onChange={(event) => setAutonomyLevel(Number(event.target.value) as 0 | 1 | 2)} aria-label="Autonomy level"><option value={0}>Level 0 · Reply only</option><option value={1}>Level 1 · Propose for approval</option><option value={2}>Level 2 · Approve tentative interests</option></select></div>
               <div className="dialog-setting-row"><div><strong>Intimate roleplay (18+)</strong><span>Flirting and adult roleplay when you lead there; she switches back to normal chat when you do. Those turns run on your local Ollama model.</span></div><label className="toggle-row"><span className="sr-only">Intimate roleplay</span><input type="checkbox" checked={intimateMode} onChange={(event) => void toggleIntimateMode(event.target.checked)} /></label></div>
+              <div className="settings-group-title">MEMORY</div>
+              <div className="dialog-setting-row"><div><strong>Use memories in replies</strong><span>FREYA brings up what she remembers about you when it&apos;s relevant.</span></div><label className="toggle-row"><span className="sr-only">Use memories in replies</span><input type="checkbox" checked={memoryEnabled} onChange={(event) => setMemoryEnabled(event.target.checked)} /></label></div>
+              <div className="dialog-setting-row"><div><strong>Remember things automatically</strong><span>After a conversation goes quiet, or when you switch chats, a cloud model reads what&apos;s new and keeps what matters: people, plans, preferences, things to follow up. Small talk isn&apos;t kept. In Local-only mode only explicit &ldquo;I prefer…&rdquo; statements are saved.</span></div><label className="toggle-row"><span className="sr-only">Remember things automatically</span><input type="checkbox" checked={autoMemory} onChange={(event) => setAutoMemory(event.target.checked)} /></label></div>
+              <button className={`side-action dialog-action ${memoryOpen ? "active" : ""}`} onClick={() => setMemoryOpen(!memoryOpen)} aria-expanded={memoryOpen}>◈ <span>What FREYA remembers</span><span className="count">{memories.length}</span></button>
+              {memoryOpen && <div className="memory-panel dialog-memory-panel">
+                <p className="memory-description">{memoryInCloud ? "Synced to your account: only you can see them, on any device you sign in on." : `Kept in this browser only${supabase ? "; sign in under Profile to sync them to your account" : ""}. Clearing this site's data deletes them.`}</p>
+                <form onSubmit={addMemory} className="memory-form"><textarea value={memoryText} onChange={(event) => setMemoryText(event.target.value)} placeholder="Tell her something to remember, e.g. I prefer short answers" maxLength={240} rows={2} aria-label="New memory"/><button className="small-primary" type="submit">Save memory</button></form>
+                {memories.length === 0
+                  ? <p className="empty-memories">Nothing yet. {autoMemory ? "She'll pick things up as you talk" : "Turn on automatic memory, or add one above"}.</p>
+                  : <ul className="memory-list" aria-label="Saved memories">{memories.map((memory) => <li className="memory-item" key={memory.id}>
+                    <span>{memory.text}<small className="memory-meta">{[memory.source === "freya" ? "noticed by FREYA" : memory.source === "you" ? "added by you" : "", memory.kind && memory.kind !== "other" ? memory.kind : "", formatRelative(memory.updatedAt || memory.createdAt).toLowerCase()].filter(Boolean).join(" · ")}</small></span>
+                    <button type="button" aria-label={`Edit memory: ${memory.text}`} title="Edit" onClick={() => void editMemory(memory.id)}>✎</button>
+                    <button type="button" aria-label={`Delete memory: ${memory.text}`} title="Delete" onClick={() => void deleteMemory(memory.id)}>×</button>
+                  </li>)}</ul>}
+                {memories.length > 0 && <button className="clear-memories" onClick={clearAllMemories}>Forget everything</button>}
+              </div>}
+              <div className="settings-group-title">NOTIFICATIONS</div>
+              <div className="dialog-setting-row"><div><strong>Notifications</strong><span>A desktop alert for every FREYA message while you are in another window or tab, or another chat is open. Unread counts show in the conversation list either way.</span></div><label className="toggle-row"><span className="sr-only">Notifications</span><input type="checkbox" checked={notificationsOn} onChange={(event) => void toggleNotifications(event.target.checked)} /></label></div>
               <div className="dialog-setting-row"><div><strong>Message sound</strong><span>A soft chime whenever FREYA sends a message.</span></div><label className="toggle-row"><span className="sr-only">Message sound</span><input type="checkbox" checked={soundOn} onChange={(event) => { setSoundOn(event.target.checked); if (event.target.checked) playChime(); }} /></label></div>
-              <div className="dialog-setting-row"><div><strong>FREYA texts first</strong><span>Her mood drifts on its own and she may message you unprompted after you have been quiet a while, at most twice without a reply. Off at autonomy level 0.</span></div><label className="toggle-row"><span className="sr-only">FREYA texts first</span><input type="checkbox" checked={initiativeOn} onChange={(event) => setInitiativeOn(event.target.checked)} /></label></div>
-              <div className="dialog-setting-row"><div><strong>Local-only privacy</strong><span>Route chat to Ollama and disable hosted-provider fallback.</span></div><label className="toggle-row"><span className="sr-only">Local-only privacy</span><input type="checkbox" checked={privacyMode} onChange={(event) => setPrivacyMode(event.target.checked)} /></label></div>
-              <button className={`side-action dialog-action ${memoryOpen ? "active" : ""}`} onClick={() => setMemoryOpen(!memoryOpen)} aria-expanded={memoryOpen}>◈ <span>Memory controls</span><span className="count">{memories.length}</span></button>
-              {memoryOpen && <div className="memory-panel dialog-memory-panel"><p className="memory-description">{supabase ? (user ? "These memories are stored in your signed-in account. Only you can access them." : "Sign in in Profile to manage cloud memories.") : "Saved memories are stored in this browser."}</p><label className="toggle-row"><span>Use saved memories</span><input type="checkbox" checked={memoryEnabled} onChange={(event) => setMemoryEnabled(event.target.checked)} /></label><form onSubmit={addMemory} className="memory-form"><textarea value={memoryText} onChange={(event) => setMemoryText(event.target.value)} placeholder="e.g. I prefer concise answers" maxLength={240} rows={3}/><button className="small-primary" type="submit" disabled={Boolean(supabase && !user)}>Save memory</button></form><div className="memory-list-heading">YOUR MEMORIES</div>{memories.length === 0 ? <p className="empty-memories">No saved memories yet.</p> : memories.map((memory) => <div className="memory-item" key={memory.id}><span>{memory.text}</span><button aria-label={`Delete memory: ${memory.text}`} title="Delete memory" onClick={() => void deleteMemory(memory.id)}>×</button></div>)}{memories.length > 0 && <button className="clear-memories" onClick={clearAllMemories}>Delete all memories</button>}</div>}
-              <div className="dialog-setting-row"><div><strong>Export</strong><span>Save the open conversation as a Markdown file.</span></div><button type="button" className="dialog-inline-button" onClick={exportActiveConversation}>Export chat</button></div>
-              <div className="dialog-setting-row"><div><strong>Voice</strong><span>Playback and optional speech recognition.</span></div></div>
+              <div className="settings-group-title">VOICE</div>
               <VoiceControls speechRequest={speechRequest} onTranscript={(transcript) => setInput((current) => current ? `${current.trim()} ${transcript}` : transcript)} onInterrupt={cancelSpeech} privacyMode={privacyMode}/>
-              <p className="settings-description">Voice support depends on browser permissions. Chat remains usable by typing.</p>
-              <div className="shortcut-list"><div className="side-label">KEYBOARD</div><dl><dt>Ctrl / ⌘ + K</dt><dd>New conversation</dd><dt>Ctrl / ⌘ + B</dt><dd>Toggle conversation list</dd><dt>/</dt><dd>Focus the composer</dd><dt>Shift + Enter</dt><dd>New line</dd></dl></div>
+              <p className="settings-description">Voice notes need microphone permission. Typing always works.</p>
+              <div className="settings-group-title">PRIVACY &amp; DATA</div>
+              <div className="dialog-setting-row"><div><strong>Local-only privacy</strong><span>Every reply comes from the local model on this computer{serverSetup.localModel ? ` (${serverSetup.localModel}${serverSetup.localReady ? "" : ", not running"})` : " (none found)"}; nothing is sent to cloud models. Automatic memory, images and visualisations pause.</span></div><label className="toggle-row"><span className="sr-only">Local-only privacy</span><input type="checkbox" checked={privacyMode} onChange={(event) => setPrivacyMode(event.target.checked)} /></label></div>
+              <div className="dialog-setting-row"><div><strong>Export</strong><span>Save the open conversation as a Markdown file.</span></div><button type="button" className="dialog-inline-button" onClick={exportActiveConversation}>Export chat</button></div>
+              <div className="shortcut-list"><div className="side-label">KEYBOARD</div><dl><dt>Ctrl / ⌘ + K</dt><dd>New conversation</dd><dt>Ctrl / ⌘ + B</dt><dd>Toggle conversation list</dd><dt>/</dt><dd>Focus the composer</dd><dt>Shift + Enter</dt><dd>New line</dd><dt>/visualize …</dt><dd>Show something on the canvas</dd><dt>/image …</dt><dd>Make a picture in the chat</dd></dl></div>
             </div>}
           </div>
         </section>
@@ -1658,15 +1979,15 @@ export default function Home() {
                 <button className="conversation-delete" onClick={() => deleteConversation(conversation.id)} aria-label={`Delete conversation: ${conversation.title}`} title="Delete conversation">×</button>
               </div>)}
           </div>
-          <div className="sidebar-footer"><span className="status-dot"/> <span>{supabase ? "Cloud memory enabled" : "Local-first prototype"}</span><div>v0.4</div></div>
+          <div className="sidebar-footer"><span className="status-dot"/> <span>{memoryInCloud ? "Memories synced to your account" : "Memories kept in this browser"}</span><div>v0.5</div></div>
         </aside>
         {drawerOpen && <button className="drawer-backdrop" type="button" aria-label="Close conversation drawer" onClick={() => setDrawerOpen(false)}/>}
 
         <section className="main-panel">
           <div className="center-status-bar">
-            <span>USER: [{user?.email ?? "anonymous"}]</span>
-            <span className="status-separator" aria-hidden="true">|</span>
-            <span>FREYA: [{typingIn === activeId && typingIn ? "typing..." : replyingHere ? "queued..." : loading ? "replying elsewhere..." : canvasSignal === "composing" ? "composing..." : "waiting..."} · {mood.name}]</span>
+            <span className="status-name">FREYA</span>
+            <span className="status-separator" aria-hidden="true">·</span>
+            <span className="status-presence" aria-live="polite">{deliberatingIn === activeId && deliberatingIn ? "thinking it through…" : typingIn === activeId && typingIn ? "typing…" : replyingHere ? "will reply in a moment" : loading ? "replying in another chat" : `online · ${mood.name}`}</span>
             <span className="status-trailing" title={activeConversation?.title}>{activeConversation?.title ?? UNTITLED}</span>
           </div>
           <div
@@ -1678,6 +1999,11 @@ export default function Home() {
             {(pendingFiles.length > 0 || preparingFiles > 0) && <div className="composer-attachments">
               <AttachmentList items={pendingFiles} onRemove={removePendingFile}/>
               {preparingFiles > 0 && <span className="attachment-preparing">PREPARING {preparingFiles}…</span>}
+            </div>}
+            {commandHints(input).length > 0 && <div className="command-hints" role="listbox" aria-label="Commands">
+              {commandHints(input).map((command) => <button type="button" role="option" aria-selected={false} key={command.name} onClick={() => { setInput(`/${command.name} `); composerRef.current?.focus(); }}>
+                <b>/{command.name}</b><span>{command.hint}</span>
+              </button>)}
             </div>}
             <form className="composer" onSubmit={sendMessage}>
               <button type="button" className="attach-button" onClick={() => fileInputRef.current?.click()} disabled={pendingFiles.length + preparingFiles >= MAX_ATTACHMENTS} aria-label="Attach images or files" title="Attach images or files (or paste / drop them)">
@@ -1719,7 +2045,13 @@ export default function Home() {
                         <span className="reply-tag-text">{info.tag.content.replace(/\s+/g, " ").slice(0, 90) || info.tag.attachments?.[0]?.name || "your message"}</span>
                       </button>}
                       {message.attachments && message.attachments.length > 0 && <AttachmentList items={message.attachments} onUnavailable={() => notify("That file is no longer stored in this browser.", "error")}/>}
-                      {message.longform
+                      {message.command
+                        ? <div className="command-chip"><span className="command-chip-label">{message.command === "image" ? "PICTURE" : "VISUALIZE"}</span><span>{message.content}</span></div>
+                        : message.visualization
+                        ? <VisualizationCard info={message.visualization} onShow={() => void showVisualization(message)} onRefine={() => startRefine("visualize")}/>
+                        : message.picture
+                        ? <PictureCard info={message.picture} onRefine={() => startRefine("image")}/>
+                        : message.longform
                         ? <LongformMessage content={message.content} streaming={Boolean(message.streaming)}/>
                         : message.voice || message.spoken
                         ? <VoiceNote messageId={message.id} transcript={message.content} audio={message.voice} onProblem={(problem) => notify(problem, "error")}/>
@@ -1753,16 +2085,16 @@ export default function Home() {
             </div>
             {!atBottom && messages.length > 0 && <button type="button" className="jump-latest" onClick={() => { atBottomRef.current = true; setAtBottom(true); scrollToBottom(); }}>↓ Latest</button>}
           </div>
-          <EmotionCanvas signal={canvasSignal} visual={canvasVisual}/>
-          <div className="center-privacy-note">Responses may be imperfect · sources appear only when retrieved · voice is optional</div>
+          <EmotionCanvas signal={canvasSignal} mood={mood} form={canvasForm} onClearForm={() => setCanvasForm(null)}/>
+          <div className="center-privacy-note">FREYA is a fictional character played by an AI · replies can be wrong · type /visualize or /image for pictures</div>
         </section>
 
         <aside className="profile-panel" aria-label="FREYA profile">
-          <PortraitParticles />
-          <div className="profile-name-row"><h2>FREYA</h2><span className="profile-state">ONLINE · {mood.name.toUpperCase()}</span></div>
-          <p className="profile-description">Independent operative, online<br/>Wit, simulated mood cues, and a soft center. Not evidence of consciousness.</p>
+          <PortraitParticles expression={portraitExpression} />
+          <div className="profile-name-row"><h2>FREYA, 20</h2><span className="profile-state">ONLINE · {mood.name.toUpperCase()}</span></div>
+          <p className="profile-description">5&apos;7&quot; | Somewhere between brilliant and unbearable.<br/>Probably reading something you wouldn&apos;t understand. Occasionally online. Rarely impressed.<br/><em>Don&apos;t mistake curiosity for interest.</em></p>
           <div className="profile-sigil" aria-hidden="true">✦</div>
-          <p className="profile-footnote">User-provided portrait, lit as a 3D relief displaced from its own brightness. Eye and lip motion use fixed points measured from this image. No face scanning, recognition, or generation.</p>
+          <p className="profile-footnote">Your portrait, lit as a 3D relief. Her expression follows her simulated mood and the conversation; no face scanning or recognition.</p>
         </aside>
       </div>
     </main>

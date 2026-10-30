@@ -8,8 +8,14 @@
 // --name   the model to create (default: freya, the one the app uses)
 // --adapter a LoRA adapter to layer on top (optional)
 // --format  chat format for a local .gguf: qwen3.5 (default) or chatml (Qwen2.5, Qwen3 instruct)
+// --no-examples  leave out the MESSAGE examples (for a model fine-tuned on them)
+//
+// Any --name other than "freya" is a candidate: its Modelfile goes to a temp file, so building
+// one for comparison never rewrites ollama/Modelfile.
 import { spawnSync } from "node:child_process";
-import { DEFAULT_BASE, writeModelfile } from "./build-modelfile.mjs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { DEFAULT_BASE, MODELFILE_PATH, writeModelfile } from "./build-modelfile.mjs";
 
 function option(name, fallback) {
   const index = process.argv.indexOf(`--${name}`);
@@ -21,7 +27,10 @@ const base = option("base", process.env.FREYA_BASE_MODEL || DEFAULT_BASE);
 const adapter = option("adapter", process.env.FREYA_ADAPTER || "");
 const format = option("format", process.env.FREYA_CHAT_FORMAT || "qwen3.5");
 
-const result = await writeModelfile({ base, adapter, format });
+const examples = !process.argv.includes("--no-examples");
+const path = name === "freya" ? MODELFILE_PATH : join(tmpdir(), `${name.replace(/[^\w.-]/g, "_")}.Modelfile`);
+
+const result = await writeModelfile({ base, adapter, format, examples, path });
 console.log(`Modelfile: base ${result.base}, ${result.examples} example messages. Creating "${name}"...`);
 
 // A library base must be present first; `ollama create` does not download it.

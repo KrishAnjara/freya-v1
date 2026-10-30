@@ -113,9 +113,16 @@ test("casual chat, Local-only mode and intimate turns never convene the panel", 
   await chat({ intimateMode: true, messages: [{ role: "user", content: "kiss me and then explain why 17 * 23 is 391 😏" }] });
   assert.equal(calls.groqAnalyst.length + calls.gemini.length, 0, "intimate turns stay local");
 
+  // The panel spends cloud quota, so only the server setting turns it off; a request can't.
   calls = mockUpstreams();
+  setEnv("FREYA_REASONING_MODE", "off");
+  await chat({ messages: [{ role: "user", content: "what is 17 * 23?" }] });
+  assert.equal(calls.groqAnalyst.length + calls.gemini.length, 0, "FREYA_REASONING_MODE=off turns it off");
+
+  calls = mockUpstreams();
+  setEnv("FREYA_REASONING_MODE", undefined);
   await chat({ reasoning: "off", messages: [{ role: "user", content: "what is 17 * 23?" }] });
-  assert.equal(calls.groqAnalyst.length + calls.gemini.length, 0, "the setting can turn it off");
+  assert.ok(calls.groqAnalyst.length + calls.gemini.length > 0, "a request's own reasoning field is ignored");
 });
 
 test("questions that don't need live facts are answered, not refused, when search is off or failing", async () => {

@@ -41,13 +41,15 @@ const PROVIDER_TIMEOUT_MS = 25000;
  * that is about 50 tokens a second, so FREYA's ~2,500-token persona takes ~50s the first time.
  * The 25s cloud timeout therefore aborted every cold local request and fell back to the cloud.
  * Once read, the prompt prefix is cached and later requests start in well under a second.
+ * Loading the model as well took 128s when measured on this laptop, so the limit leaves room
+ * for a busy CPU: running out of it fails the message when the local model is FREYA's voice.
  */
 function ollamaTimeoutMs() {
-  return Math.max(10_000, Number(process.env.OLLAMA_TIMEOUT_MS) || 150_000);
+  return Math.max(10_000, Number(process.env.OLLAMA_TIMEOUT_MS) || 300_000);
 }
 /** Keeps the model and its prompt cache loaded between messages (Ollama's default is 5m). */
 function ollamaKeepAlive() {
-  return process.env.OLLAMA_KEEP_ALIVE?.trim() || "30m";
+  return process.env.OLLAMA_KEEP_ALIVE?.trim() || "2h";
 }
 /**
  * Hidden "thinking" for local models that have it (Qwen3.5). Off by default: on a laptop CPU a

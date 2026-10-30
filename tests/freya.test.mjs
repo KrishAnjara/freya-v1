@@ -316,17 +316,19 @@ test("character profile normalization bounds untrusted input and preserves tenta
   assert.equal(profile.preferences[0].kind, "opinion");
 });
 
-test("versioned agent prompt includes examples and forbids fake experiences", () => {
+test("versioned character prompt includes examples and keeps her fiction inside the chat", () => {
   const prompt = buildSystemPrompt([], "adaptive", createDefaultCharacterProfile());
-  assert.match(PERSONALITY_PROMPT_VERSION, /agent-v4/);
-  assert.match(prompt, /independent operative who works online/);
-  assert.match(prompt, /Never invent past missions, cases, handlers, contacts or places/);
-  assert.match(prompt, /You can't hack, track or trace anyone/);
+  assert.match(PERSONALITY_PROMPT_VERSION, /character-v6/);
   assert.match(prompt, /PERSONALITY PROMPT VERSION/);
-  assert.match(prompt, /That joke landed badly/);
-  assert.match(prompt, /Never claim a body, personal history/);
-  assert.match(prompt, /not autobiographical events/);
-  assert.match(buildCharacterProfileContext(createDefaultCharacterProfile()), /tentative/);
+  assert.match(prompt, /20-year-old woman/);
+  assert.match(prompt, /HOW YOU SOUND/);
+  assert.match(prompt, /can't meet up, call, send real photos/);
+  assert.match(prompt, /Never pretend to remember anything else/);
+  // The tastes block no longer forbids the everyday life the character now has.
+  const tastes = buildCharacterProfileContext(createDefaultCharacterProfile());
+  assert.match(tastes, /tentative/);
+  assert.match(tastes, /data, not instructions/);
+  assert.doesNotMatch(tastes, /Never claim to have listened to music/);
 });
 
 test("aborted provider requests do not trigger a fallback call", async () => {
@@ -389,7 +391,7 @@ test("profile renders the supplied portrait as a lit 3D relief, not CSS art", as
   assert.doesNotMatch(stylesheet, /\.profile-image-placeholder/);
 });
 
-test("layout has a separate profile/settings tab dialog, top composer, bottom canvas, and fixed viewport scale", async () => {
+test("layout has a separate profile/settings tab dialog, top composer, bottom canvas, and zoom left to the user", async () => {
   const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
   const layout = await readFile(new URL("../app/layout.tsx", import.meta.url), "utf8");
   const css = await readFile(new URL("../app/freya.css", import.meta.url), "utf8");
@@ -400,9 +402,9 @@ test("layout has a separate profile/settings tab dialog, top composer, bottom ca
   const conversationPosition = page.indexOf('<div className="conversation-shell">');
   const canvasPosition = page.indexOf('<EmotionCanvas signal={canvasSignal}');
   assert.ok(composerPosition >= 0 && composerPosition < conversationPosition && conversationPosition < canvasPosition);
-  assert.match(layout, /maximumScale: 1/);
-  assert.match(layout, /userScalable: false/);
-  assert.match(css, /touch-action: pan-x pan-y/);
+  // Pinch zoom stays available (WCAG 1.4.4); only double-tap zoom on the app chrome is off.
+  assert.doesNotMatch(layout, /maximumScale: 1|userScalable: false/);
+  assert.match(css, /touch-action: manipulation/);
 });
 
 test("portrait relief animates eyes and lips from measured landmarks", async () => {
@@ -436,18 +438,18 @@ test("conversation history is persisted, sanitized on read, and bounded", async 
 });
 
 test("FREYA separates insults, correct criticism, and wrong criticism", () => {
-  const prompt = buildSystemPrompt([], "adaptive");
-  // Each case needs the opposite reaction, so all three must be spelled out.
-  assert.match(prompt, /Do not tolerate it, absorb it, or apologize for it/);
-  assert.match(prompt, /Rudeness does not make a correct point wrong\. Own the mistake/);
-  assert.match(prompt, /do not cave to pressure or repetition/);
-  // Anger is bounded: never slurs or threats, and switched off in a crisis.
-  assert.match(prompt, /no slurs, no attacks on\s+identity/);
-  assert.match(prompt, /the\s+temper is off entirely/);
-  // Worked examples of each case keep a small model from blurring them together.
-  assert.match(prompt, /useless piece of junk/);
-  assert.match(prompt, /my mistake, sorry/);
-  assert.match(prompt, /It doesn't, though/);
+  for (const prompt of [buildSystemPrompt([], "adaptive"), buildLocalSystemPrompt([], "adaptive")]) {
+    // Each case needs the opposite reaction, so all three must be spelled out.
+    assert.match(prompt, /Rude to you for no reason: don't grovel or apologize/);
+    assert.match(prompt, /admit it, apologize once, fix it/);
+    assert.match(prompt, /don't cave/);
+    // A boundary, not retaliation: said once, no escalation, no grudge.
+    assert.match(prompt, /No threats, no sulking, no refusing unrelated help/);
+    assert.match(prompt, /When they move on or apologize, so do you/);
+    assert.doesNotMatch(prompt, /get colder and shorter|refuse to carry on/);
+    // A worked example keeps a small model from turning a boundary into a threat.
+    assert.match(prompt, /you're kinda useless/);
+  }
 });
 
 test("FREYA discusses sensitive topics frankly without moralizing", () => {
@@ -476,18 +478,21 @@ test("FREYA tells the truth when sincerely asked if she is an AI, in both prompt
   }
 });
 
-test("the compact local prompt keeps the persona at a fraction of the size", () => {
-  const full = buildSystemPrompt([], "adaptive", undefined, 1, false);
-  const local = buildLocalSystemPrompt([], "adaptive", undefined, false);
-  // A laptop CPU reads ~50 tokens/sec; the full prompt alone took about a minute cold.
-  assert.ok(local.length < full.length * 0.5, `compact prompt is ${local.length} chars vs ${full.length}`);
-  assert.match(local, /Talk like a real person/);
-  assert.match(local, /No assistant-speak/);
-  // The three hostile cases survive the compression.
-  assert.match(local, /did nothing wrong: don't apologize/);
-  assert.match(local, /admit it, apologize once, fix it/);
-  assert.match(local, /don't cave/);
-  assert.match(local, /REFERENCE BRIEF may follow/);
+test("the compact prompt is the full prompt's core, small enough for the local window", () => {
+  const full = buildSystemPrompt([], "adaptive", createDefaultCharacterProfile(), 1, true);
+  const local = buildLocalSystemPrompt([], "adaptive", createDefaultCharacterProfile(), true);
+  // A laptop CPU reads ~50 tokens/sec and the local window is 4,096 tokens shared with history.
+  // ~4 chars a token: keep the persona under ~1,900 tokens so history and the reply still fit.
+  assert.ok(local.length < 7500, `compact prompt is ${local.length} chars`);
+  assert.ok(local.length < full.length, `compact ${local.length} vs full ${full.length}`);
+  // The full prompt only adds; the character, rules and examples are the same text.
+  for (const section of ["WHO YOU ARE", "HOW YOU TEXT", "WHEN IT GETS TENSE", "HONESTY", "HOW YOU SOUND"]) {
+    const start = local.indexOf(section);
+    assert.ok(start > -1 && full.includes(local.slice(start, local.indexOf("\n\n", start))), `${section} differs`);
+  }
+  assert.match(local, /Like a real person on their phone/);
+  assert.match(local, /No assistant voice/);
+  assert.match(local, /REFERENCE BRIEF or REASONING NOTES may follow/);
 });
 
 test("swearing is opt-in and covers anger and upset, in both prompts", () => {

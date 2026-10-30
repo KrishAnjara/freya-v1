@@ -1,0 +1,32 @@
+1. Benign messages hit the insult/sad patterns
+frustration aimed at a bug, not FREYA
+  "this stupid bug is killing me"
+  moods: curious -> irritated  final irritated (energy 0.63, warmth 0.33)
+household chore
+  "can you remind me to take out the trash"
+  moods: curious -> irritated  final irritated (energy 0.63, warmth 0.33)
+lost keys (not grief)
+  "lol i lost my keys again"
+  moods: curious -> warm  final warm (energy 0.63, warmth 0.82)
+affectionate sarcasm
+  "you're such an idiot haha i love you"
+  moods: curious -> irritated  final irritated (energy 0.63, warmth 0.33)
+
+2. No decay: irritated persists through neutral messages
+one insult, then ten neutral questions
+  "you're useless" -> "how do i convert a list to a set in python" -> "how do i convert a list to a set in python" -> "how do i convert a list to a set in python" -> "how do i convert a list to a set in python" -> "how do i convert a list to a set in python" -> "how do i convert a list to a set in python" -> "how do i convert a list to a set in python" -> "how do i convert a list to a set in python" -> "how do i convert a list to a set in python" -> "how do i convert a list to a set in python"
+  moods: curious -> irritated -> irritated -> irritated -> irritated -> irritated -> irritated -> irritated -> irritated -> irritated -> irritated -> irritated  final irritated (energy 0.63, warmth 0.33)
+
+3. Escalation into sulking from two borderline words
+two frustrated messages about code
+  "this dumb compiler" -> "ugh this stupid linker"
+  moods: curious -> irritated -> sulking  final sulking (energy 0.38, warmth 0.27)
+
+4. Self-report: whatever tag the model emits is applied at 70% strength, no evidence
+  [[mood: sulking]] -> sulking (energy 0.42, warmth 0.39)
+  [[mood: excited]] -> excited (energy 0.79, warmth 0.68)
+  [[mood: melancholy]] -> melancholy (energy 0.45, warmth 0.66)
+  [[mood: irritated]] -> irritated (energy 0.55, warmth 0.34)
+
+5. Random drift, no cause (fixed random sequence)
+  checked every 25 min while chatting: curious -> bored -> curious -> restless -> playful

@@ -28,5 +28,7 @@ export async function resolveOllamaModel(requested?: unknown): Promise<string> {
     return selected;
   }
   const configured = process.env.OLLAMA_MODEL || "freya";
-  return models.some((model) => model.name === configured) ? configured : models[0]?.name || configured;
+  // Ollama lists untagged models as "name:latest"; "freya" and "freya:latest" are the same model.
+  const installed = (name: string) => name === configured || name === `${configured}:latest`;
+  return models.some((model) => installed(model.name)) ? configured : models[0]?.name || configured;
 }

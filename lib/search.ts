@@ -62,6 +62,8 @@ export function shouldSearch(text: string): boolean {
   // A self-contained problem (arithmetic, code) is answered by reasoning, not by the web:
   // "what is 17 * 23" matched "what is" and went to search, then was refused when search was off.
   if (/\d\s*[-+*/×÷^%=]\s*\(?\d|```/.test(value)) return false;
+  // Questions to her are conversation: "what are you up to?" matched "what are" and searched the web.
+  if (/\b(who|what|where|when|how)\b[^.?!]*\b(you|your|u|ur)\b/i.test(value) && !/\b(search|look up|google)\b/i.test(value)) return false;
   return factual.test(value);
 }
 

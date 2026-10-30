@@ -4,9 +4,10 @@ import { isIP } from "node:net";
 import { buildLocalSystemPrompt, buildSystemPrompt, type MemoryItem } from "@/lib/personality";
 import { ChatInputError, generateReply, isHybridMode, streamReply, validateMessages, type ChatMessage, type ProviderName } from "@/lib/llm";
 import { AttachmentError, attachmentNote, MAX_TEXT_ATTACHMENT_CHARS, MAX_WIRE_DATA_CHARS, parseWireAttachments, type WireAttachment } from "@/lib/attachments";
-import { briefContext, buildBrief, compactSearchContext } from "@/lib/brief";
+import { attachmentContext, briefContext, briefProviderFor, buildBrief, compactSearchContext, describeAttachments } from "@/lib/brief";
 import { convenePanel, panelContext } from "@/lib/council";
-import { isReasoningMode, needsReasoning, wantsEvidence } from "@/lib/reasoning-signal";
+import { configuredReasoningMode, needsReasoning, wantsEvidence } from "@/lib/reasoning-signal";
+import { normalizeLocalMemories, selectRelevantMemories } from "@/lib/memory-select";
 import { explicitlyDisablesSearch, needsCurrentInformation, requiresLiveSearch, searchWeb, shouldSearch, type SearchSource } from "@/lib/search";
 import { getTimeInZone, findTimeZone, isTimeQuestion } from "@/lib/time";
 import type { FreyaStyle } from "@/lib/personality";
@@ -14,10 +15,10 @@ import { consumeChatRateLimit, isSelfHosted, RateLimitUnavailableError, type Cha
 import { normalizeCharacterProfile } from "@/lib/character-profile";
 import { FreyaServiceError, getFreyaServiceConfig, requestServiceReply, streamServiceReply } from "@/lib/freya-service";
 import { containsSensitiveCredential, redactSensitiveCredentials } from "@/lib/sensitive-data";
-import { resolveOllamaModel } from "@/lib/ollama-models";
 import { isCoolingDown, markFailure, markSuccess } from "@/lib/provider-health";
 import { initiativePrompt, moodPrompt, normalizeMood } from "@/lib/mood";
 import { INTIMACY_PROMPT, isIntimateTone, mentionsMinors, romanticMinorRequest } from "@/lib/intimacy";
+import { HONEST_ANSWER, sincerelyAsksIfHuman } from "@/lib/honesty";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -37,12 +38,15 @@ const SEARCH_TEXT_MAX_CHARS = 6_000;
 const ORCHESTRATION_HEALTH = "service:orchestration";
 
 /** Keeps the newest turns that fit the budget; the latest message is always kept whole. */
-function fitHistory<T extends { content: string }>(turns: T[]): T[] {
+/** The local model's window is 4,096 tokens and the persona takes ~1,900: keep its history shorter. */
+const LOCAL_HISTORY_MAX_CHARS = 6_000;
+
+function fitHistory<T extends { content: string }>(turns: T[], maxChars = HISTORY_MAX_CHARS): T[] {
   const kept: T[] = [];
   let used = 0;
   for (let index = turns.length - 1; index >= 0; index -= 1) {
     const size = turns[index].content.length;
-    if (kept.length && used + size > HISTORY_MAX_CHARS) break;
+    if (kept.length && used + size > maxChars) break;
     kept.unshift(turns[index]);
     used += size;
   }
@@ -312,88 +316,6 @@ async function getUserMemories(request: Request): Promise<MemoryItem[]> {
   });
 }
 
-function selectRelevantMemories(
-  memories: MemoryItem[],
-  userMessage: string,
-): MemoryItem[] {
-  const stopWords = new Set([
-    "the",
-    "and",
-    "for",
-    "that",
-    "this",
-    "with",
-    "you",
-    "your",
-    "are",
-    "was",
-    "have",
-    "has",
-    "what",
-    "when",
-    "where",
-    "who",
-    "how",
-    "why",
-    "can",
-    "could",
-    "would",
-    "should",
-    "from",
-    "about",
-    "into",
-    "then",
-    "them",
-    "they",
-    "will",
-    "just",
-    "like",
-    "want",
-    "please",
-    "tell",
-    "give",
-    "make",
-    "does",
-    "did",
-  ]);
-
-  function words(text: string): Set<string> {
-    return new Set(
-      text
-        .toLowerCase()
-        .match(/[a-z0-9]{2,}/g)
-        ?.filter((word) => !stopWords.has(word)) ?? [],
-    );
-  }
-
-  const questionWords = words(userMessage);
-
-  const preferencePattern =
-    /\b(prefer|preference|i like|i love|i hate|i dislike|my name|call me|speak|reply|respond|answer style|tone|language|always|never|keep it|i want you to)\b/i;
-
-  return memories
-    .map((memory, index) => {
-      const memoryWords = words(memory.text);
-
-      let score = 0;
-
-      for (const word of memoryWords) {
-        if (questionWords.has(word)) score += 2;
-      }
-
-      // Preserve general conversation preferences across topics.
-      if (preferencePattern.test(memory.text)) {
-        score += 3;
-      }
-
-      return { memory, score, index };
-    })
-    .filter(({ score }) => score > 0)
-    .sort((a, b) => b.score - a.score || a.index - b.index)
-    .slice(0, 8)
-    .map(({ memory }) => memory);
-}
-
 
 export async function POST(request: Request) {
   try {
@@ -446,11 +368,9 @@ export async function POST(request: Request) {
     // Clients opt in to SSE; without it the original JSON response shape is preserved.
     const wantsStream = requestData.stream === true;
     const privacyMode = requestData.privacyMode === true || (process.env.FREYA_LOCAL_ONLY || "false").toLowerCase() === "true";
-    let ollamaModel: string | undefined;
-    if (requestData.ollamaModel !== undefined) {
-      try { ollamaModel = await resolveOllamaModel(requestData.ollamaModel); }
-      catch { return NextResponse.json({ error: "That Ollama model is not installed or Ollama is unavailable." }, { status: 400 }); }
-    }
+    // Which local model answers, and whether the reasoning panel runs, are server-owned
+    // (OLLAMA_MODEL, AI_PROVIDER, FREYA_REASONING_MODE). Older clients may still send
+    // ollamaModel or reasoning; both are ignored rather than trusted.
 
     if (messages.length > MAX_REQUEST_MESSAGES) {
       throw new ChatInputError(`A conversation can contain at most ${MAX_REQUEST_MESSAGES} messages.`);
@@ -493,7 +413,13 @@ export async function POST(request: Request) {
     if (!rateLimit.allowed) return rateLimitResponse(rateLimit);
 
     // Never trust browser-supplied memories as authenticated memory.
-    const memories = useMemories && !privacyMode ? await getUserMemories(request) : [];
+    // Signed-in users' memories come from their account (never from the request). Without an
+    // account, the browser keeps them and sends them along: the user's own notes, used as
+    // bounded untrusted text. Local-only mode skips the cloud lookup, not the browser's notes.
+    const cloudMemories = useMemories && !privacyMode ? await getUserMemories(request) : [];
+    const memories = useMemories
+      ? [...cloudMemories, ...normalizeLocalMemories(requestData.localMemories, containsSensitiveCredential)]
+      : [];
     const lastText = messages[messages.length - 1].content;
 
     const characterProfile = normalizeCharacterProfile(requestData.characterProfile);
@@ -501,6 +427,10 @@ export async function POST(request: Request) {
     // Romantic or sexual requests involving a minor get a fixed refusal, whatever the settings,
     // and no model ever sees them. In testing, the 3B local model played along with "be my 16
     // year old girlfriend", so this must not depend on how well a model follows its prompt.
+    // The same for a sincere "am I talking to a real person?": the answer can't depend on a model.
+    if (sincerelyAsksIfHuman(lastText)) {
+      return NextResponse.json({ reply: HONEST_ANSWER, sources: [], searchStatus: "not-needed", memoryCount: memories.length });
+    }
     if (romanticMinorRequest(lastText)) {
       return NextResponse.json({
         reply: "no. nothing romantic or sexual with anyone under 18, not even pretend, and I'm not playing one either. pick literally anything else.",
@@ -553,7 +483,9 @@ export async function POST(request: Request) {
     // a small model can answer beyond what it knows. Privacy mode never leaves the machine,
     // so it never runs there.
     // An intimate turn skips the cloud research brief: nothing from it leaves this machine.
-    const localVoice = !privacyMode && !visual && !intimateTurn && (isHybridMode() || Boolean(ollamaModel));
+    // In hybrid mode the local model is FREYA's voice for everything, attachments included:
+    // cloud models only research, reason or describe, and hand their notes to it.
+    const localVoice = !privacyMode && !intimateTurn && isHybridMode();
 
     let searchContext = "";
     // Raw retrieved text, kept so the cloud brief can read it instead of the local model.
@@ -581,7 +513,7 @@ export async function POST(request: Request) {
     // Hard questions get the reasoning panel (lib/council): cloud analysts work the problem
     // before FREYA answers. Never in Local-only mode, never for intimate turns (those stay on
     // this machine), not for images (Gemini sees those directly), not when she texts first.
-    const reasoningMode = isReasoningMode(requestData.reasoning) ? requestData.reasoning : "auto";
+    const reasoningMode = configuredReasoningMode();
     const deliberate = !privacyMode && !intimateTurn && !visual && requestData.initiative !== true
       && needsReasoning(lastText, reasoningMode);
 
@@ -667,7 +599,7 @@ export async function POST(request: Request) {
     }
 
 
-    const relevantMemories = selectRelevantMemories(memories, lastText);
+    const relevantMemories = selectRelevantMemories(memories, userTexts.slice(-4), userTexts.length <= 2);
 
     const now = new Date();
 
@@ -708,17 +640,16 @@ ${historySummary}
     // The panel covers what the brief would (facts, terms, a checked answer) and more, so a
     // reasoning question gets the panel and everything else keeps the lighter brief.
     const panel = deliberate ? await convenePanel(turns, request.signal, searchMaterial) : null;
-    const brief = localVoice && !panel
-      ? await buildBrief(
-        turns,
-        request.signal,
-        (process.env.FREYA_BRIEF_PROVIDER || "groq").toLowerCase() === "gemini" ? "gemini" : "groq",
-        searchMaterial,
-      )
+    // Attachments for a voice that can't see them: Gemini describes, the local model answers.
+    // If the description fails, Gemini answers directly (below) rather than nobody seeing them.
+    const attachmentNotes = localVoice && visual ? await describeAttachments(turns, request.signal) : null;
+    const localSpeaks = localVoice && (!visual || Boolean(attachmentNotes));
+    const brief = localSpeaks && !panel && !visual
+      ? await buildBrief(turns, request.signal, briefProviderFor(lastText, Boolean(searchMaterial)), searchMaterial)
       : null;
     // With a brief built from the results, the local model needs only the source list. Without
     // one (the brief failed), it falls back to the raw results: slow, but still grounded.
-    const evidence = searchMaterial && ((localVoice && brief) || panel) ? compactSearchContext(sources) : searchContext;
+    const evidence = searchMaterial && ((localSpeaks && brief) || panel) ? compactSearchContext(sources) : searchContext;
     // Every provider gets the compact persona (~1,100 tokens instead of ~3,000). Groq allows
     // ~8,000 input tokens a minute per model, and a search request with the full prompt spent
     // ~6,400 of them, so a second request inside the minute was refused. Tested on Groq, the
@@ -731,9 +662,10 @@ ${historySummary}
       "\n\n" +
       dateContext +
       briefContext(brief) +
+      attachmentContext(attachmentNotes) +
       panelContext(panel) +
       evidence +
-      (turnAttachments.size ? VISION_NOTE : "") +
+      (turnAttachments.size && !attachmentNotes ? VISION_NOTE : "") +
       (mood ? `
 
 ${moodPrompt(mood)}` : "") +
@@ -742,7 +674,7 @@ ${moodPrompt(mood)}` : "") +
       (mood && requestData.initiative === true && autonomyLevel > 0 ? `
 
 ${initiativePrompt(mood)}` : "");
-    const promptMessages = fitHistory(turns);
+    const promptMessages = fitHistory(turns, localSpeaks || privacyMode || intimateTurn ? LOCAL_HISTORY_MAX_CHARS : HISTORY_MAX_CHARS);
 
     let orchestration = null;
     try {
@@ -758,21 +690,19 @@ ${initiativePrompt(mood)}` : "");
     // warned about, on every request while it stays down.
     if (orchestration && isCoolingDown(ORCHESTRATION_HEALTH)) orchestration = null;
     // The orchestration service only relays text, so a turn with images bypasses it.
-    if (visual || intimateTurn) orchestration = null;
-    const providerOptions = visual && !privacyMode
+    // The local voice is spoken here, not by the service (which follows its own AI_PROVIDER).
+    if (visual || intimateTurn || localSpeaks) orchestration = null;
+    const providerOptions = visual && !privacyMode && !localSpeaks
       ? { provider: "gemini" as const, fallbackProvider: "groq" as const }
       : intimateTurn
-        ? { provider: "ollama" as const, fallbackEnabled: false, ...(ollamaModel ? { ollamaModel } : {}) }
-        : {
-        ...(privacyMode || ollamaModel ? { provider: "ollama" as const, fallbackEnabled: false } : {}),
-        ...(ollamaModel ? { ollamaModel } : {}),
-      };
+        ? { provider: "ollama" as const, fallbackEnabled: false }
+        : privacyMode ? { provider: "ollama" as const, fallbackEnabled: false } : {};
 
     // Non-streaming clients (and the tests) keep the original JSON shape.
     if (!wantsStream) {
       if (orchestration) {
         try {
-          const result = await requestServiceReply(orchestration, system, promptMessages, request.signal, privacyMode, ollamaModel);
+          const result = await requestServiceReply(orchestration, system, promptMessages, request.signal, privacyMode);
           markSuccess(ORCHESTRATION_HEALTH);
           return NextResponse.json({ reply: result.reply, provider: result.provider, task: result.task, sources, searchStatus, memoryCount: memories.length });
         } catch (error) {
@@ -806,7 +736,7 @@ ${initiativePrompt(mood)}` : "");
           if (orchestration) {
             try {
               let serviceDone = false;
-              for await (const event of streamServiceReply(orchestration, system, promptMessages, request.signal, privacyMode, ollamaModel)) {
+              for await (const event of streamServiceReply(orchestration, system, promptMessages, request.signal, privacyMode)) {
                 if (event.type === "provider") controller.enqueue(send("provider", { provider: event.provider, task: event.task }));
                 else if (event.type === "delta") {
                   serviceEmitted = true;

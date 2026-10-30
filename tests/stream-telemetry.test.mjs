@@ -74,15 +74,18 @@ test("geometry stays bounded on very long replies", () => {
   assert.ok(state.totalChars > 0);
 });
 
-test("the canvas labels its data honestly and never claims model internals", async () => {
+test("the presence canvas is driven by real signals and labels the mood as simulated", async () => {
   const canvas = await readFile(new URL("../app/components/EmotionCanvas.tsx", import.meta.url), "utf8");
-  assert.match(canvas, /no model internals are exposed/);
-  assert.match(canvas, /lattice illustrative/);
-  assert.match(canvas, /repeated words, not attention/);
-  // Pulses come only from real chunks: a window of received chunks launches one pulse.
-  assert.match(canvas, /launches exactly one pulse/);
-  assert.match(canvas, /No window, no pulse/);
-  assert.match(canvas, /each pulse = chunks received in 80ms/, "the legend must say what a pulse means");
-  assert.doesNotMatch(canvas, /Math\.random\(\)[^\n]*pulses\.push/, "no randomly spawned pulses");
+  assert.match(canvas, /this shows that simulation, not feelings or\s+\* model internals/);
+  assert.match(canvas, /simulated mood and conversation state/, "the accessible label says so too");
+  // Ripples come only from real chunks: a window of received chunks launches one ripple.
+  assert.match(canvas, /launches exactly one\s+(\*\s+)?ripple/);
+  assert.match(canvas, /No window, no ripple/);
+  assert.doesNotMatch(canvas, /Math\.random\(\)/, "no random behaviour anywhere in the canvas");
+  // Mood drives the body: every mood has a style, and energy and warmth are read from state.
+  assert.match(canvas, /MOOD_STYLE\[currentMood\.name\]/);
+  assert.match(canvas, /currentMood\.energy/);
+  assert.match(canvas, /currentMood\.warmth/);
+  assert.doesNotMatch(canvas, /dog|bike|bicycle|graph/i, "no preset shapes");
   assert.doesNotMatch(canvas, /hidden reasoning visual|thought stream|model thoughts/i);
 });

@@ -1,7 +1,7 @@
 # FREYA
 
-A personality-first AI chat app: an independent online operative with moods, curiosities and a
-voice, who texts in short messages, sends and receives voice notes, images and files, reasons
+A personality-first AI chat app: Freya, a fictional 20-year-old character played by an AI
+(`docs/freya-persona.md`), with moods, curiosities and a voice. She texts in short messages, sends and receives voice notes, images and files, reasons
 through hard questions with a panel of cloud models, and can run on a local model on your own
 machine.
 
@@ -35,21 +35,37 @@ The start script never downloads a model. If you've fine-tuned one on Colab (bel
 ## How a reply is made
 
 ```
-your message ─┬─ casual chat ─────────────────────────────► FREYA's voice model ─► messages
-              ├─ needs facts ──► web search (Tavily/Gemini) ─┘
-              ├─ hard question ─► reasoning panel: Groq reasoning model ∥ Gemini
-              │                   (+ search evidence) ─► notes ─► FREYA's voice model
-              ├─ image/PDF/voice note ─► Gemini (sees and hears it)
+your message ─┬─ casual chat ──────────────────────────────────────────► FREYA's voice ─► messages
+              ├─ live facts, dates, news ─► Tavily search ─► Gemini brief ─┤
+              ├─ logic, code, explanations ─► Groq brief ──────────────────┤
+              ├─ hard question ─► reasoning panel: Groq reasoning ∥ Gemini ┤
+              ├─ image/PDF/voice note ─► Gemini describes it ──────────────┘
+              ├─ /visualize, /image ─► 3D form on the canvas / picture in the chat
               └─ intimate (opt-in, 18+) or Local-only mode ─► local model only, never leaves your machine
 ```
 
-- **Voice model:** Groq by default (fast), Gemini as fallback, or the local model in hybrid or
-  Local-only mode. Replies arrive as separate chat messages, paced like typing.
+- **FREYA's voice** (`AI_PROVIDER`): `hybrid` makes the local fine-tuned `freya` model the voice
+  of every reply; Groq, Gemini and Tavily only research, reason, describe or draw, and their notes
+  go into its prompt (they never answer the user themselves). `groq` uses Groq as the voice
+  (fast, for machines without Ollama). The fallback only answers when the voice is unreachable.
+  Replies arrive as separate chat messages at least a second apart; long or structured answers
+  arrive as one typed-out document.
+- **Server-owned settings:** models, routing, reasoning and sampling come from the server's
+  environment (`.env.example` lists them); the browser can't override them.
+- **Memory** (`lib/memory-reflection.ts`): after a conversation goes quiet, or when you switch
+  chats, a cloud model reads what's new and keeps what matters (people, plans, preferences,
+  things to follow up). Signed in, notes live in your account; otherwise in this browser. You
+  can review, edit and delete them in Settings → Memory.
 - **Reasoning panel** (`lib/council.ts`): for maths, code, logic and decisions, two models from
   different families solve the question independently; FREYA answers from both. Settings →
   Deep reasoning: Auto / Always / Off.
 - **Inner state** (`lib/mood.ts`): a mood that drifts, reacts to how you talk, and shapes her
-  tone; she may text first after you've been quiet a while (Settings → FREYA texts first).
+  tone; she may text first after you've been quiet a while (Settings → FREYA texts first). The
+  canvas shows it (`app/components/EmotionCanvas.tsx`): its particle body takes the mood's shape,
+  energy and warmth, leans in while you type, draws in while she thinks and ripples with each
+  real chunk of her reply. Her portrait's expression follows the same signals
+  (`lib/expression.ts`); add expression images as described in
+  `public/portrait/expressions/README.md`.
 
 ## Commands
 
@@ -60,7 +76,7 @@ your message ─┬─ casual chat ───────────────
 | `npm run dev` | Start the app at http://localhost:3000 |
 | `npm run start:local` | Production build bound to 127.0.0.1, for daily use on your machine (`npm run build` first) |
 | `npm run ollama:create` | Build the local `freya` model (Qwen3.5 4B, ~3.4 GB first time) |
-| `npm run eval:persona` | Score the local model on 17 persona and safety cases |
+| `npm run eval:persona` | Score the local model on persona and safety cases |
 | `npm test` / `npm run lint` / `npm run typecheck` | Checks |
 
 ## The local model
