@@ -1,14 +1,17 @@
 /**
- * FREYA's inner state: a mood that colours how she writes, drifts on its own over time,
- * reacts to how she is spoken to, and can be changed by FREYA herself mid-conversation.
+ * FREYA's inner state: a mood that colours how she writes and changes only because of what
+ * is said to her. It starts at neutral (a new browser, a restarted server, or after a long gap
+ * since their last message), and stays with the browser across conversations. Nothing here is
+ * random and the clock alone never changes it, beyond that long-gap reset.
  *
  * This is a character simulation the app keeps, not a measurement of anything inside a
- * model. It is framework-free and pure apart from the storage helpers, so the drift and the
- * reactions are testable. The chat route turns the state into prompt guidance through the
- * fixed table below, so nothing the browser sends is pasted into the prompt as free text.
+ * model. It is framework-free and pure apart from the storage helpers, so the rules are
+ * testable. The chat route turns the state into prompt guidance through the fixed table
+ * below, so nothing the browser sends is pasted into the prompt as free text.
  */
 
 export const MOODS = {
+  neutral: { energy: 0.55, warmth: 0.5, tone: "even and relaxed, your usual self, with nothing in particular colouring it" },
   playful: { energy: 0.8, warmth: 0.75, tone: "teasing, quick, jokes and callbacks, light and a bit chaotic" },
   warm: { energy: 0.55, warmth: 0.95, tone: "soft, attentive, generous, asks about them" },
   curious: { energy: 0.75, warmth: 0.7, tone: "inquisitive, follows tangents, asks real questions, shares what she's wondering about" },
@@ -42,7 +45,18 @@ export type MoodState = {
   nextInitiativeAt: number;
   /** ms epoch the user last wrote. */
   lastUserAt: number;
+  /** Messages from them since the mood last changed. */
+  turns: number;
+  /** Which server run this mood belongs to; a restarted server starts her at neutral. */
+  bootId?: string;
 };
+
+/** After this long without a word from them, she starts fresh. */
+export const MOOD_RESET_AFTER_MS = 6 * 3_600_000;
+/** Ordinary messages after which a mood has run its course and she settles back to neutral. */
+const SETTLE_AFTER_TURNS = 5;
+/** A mild signal can't change a mood that only just changed, so she doesn't flip every message. */
+const MIN_TURNS_BETWEEN_CHANGES = 2;
 
 const clamp = (value: number) => Math.max(0, Math.min(1, value));
 
@@ -50,8 +64,11 @@ export function isMoodName(value: unknown): value is MoodName {
   return typeof value === "string" && value in MOODS;
 }
 
-export function initialMood(now = Date.now()): MoodState {
-  return { name: "curious", energy: 0.7, warmth: 0.7, since: now, curiosities: [], unprompted: 0, nextInitiativeAt: now + 10 * 60_000, lastUserAt: now };
+export function initialMood(now = Date.now(), bootId?: string): MoodState {
+  return {
+    name: "neutral", energy: MOODS.neutral.energy, warmth: MOODS.neutral.warmth, since: now, curiosities: [], unprompted: 0,
+    nextInitiativeAt: now + 10 * 60_000, lastUserAt: now, turns: 0, ...(bootId ? { bootId } : {}),
+  };
 }
 
 function enter(state: MoodState, name: MoodName, now: number, blend = 0.6): MoodState {
@@ -60,67 +77,62 @@ function enter(state: MoodState, name: MoodName, now: number, blend = 0.6): Mood
     ...state,
     name,
     since: name === state.name ? state.since : now,
+    turns: name === state.name ? state.turns : 0,
     energy: clamp(state.energy * (1 - blend) + target.energy * blend),
     warmth: clamp(state.warmth * (1 - blend) + target.warmth * blend),
   };
 }
 
 /**
- * With nothing happening, a mood settles: after a while she returns to her resting state, and
- * late at night she gets tired. Time is the only input; nothing here is random.
+ * Should she start fresh? Yes after a long gap since their last message, or when `bootId` says
+ * the server has restarted since this mood was set. Otherwise the mood carries on as it was,
+ * including into a new conversation: it belongs to the browser, not to a thread.
  */
-export function driftMood(state: MoodState, now = Date.now()): MoodState {
-  // A state that has never really started (the page's first render) begins its clock now.
-  if (!state.since) return { ...state, since: now };
-  if (now - state.since < 20 * 60_000) return state;
-  const hour = new Date(now).getHours();
-  const settled: MoodName = hour >= 1 && hour < 6 ? "tired" : "content";
-  return state.name === settled ? state : enter(state, settled, now, 0.5);
+export function resumeMood(state: MoodState, now = Date.now(), bootId?: string): MoodState {
+  const restarted = Boolean(bootId) && state.bootId !== bootId;
+  if (restarted || now - state.lastUserAt > MOOD_RESET_AFTER_MS) return initialMood(now, bootId ?? state.bootId);
+  return bootId && state.bootId !== bootId ? { ...state, bootId } : state;
 }
 
 /** An insult has to be aimed at her: "you're useless", not "this stupid bug" or "the trash". */
 const INSULT = /\b(you'?re|you are|ur|u r|you)\s+((so|such|a|an|really|fucking|just|kinda|being|the)\s+)*(stupid|idiot|dumb|useless|pathetic|bitch|loser|moron|trash|annoying|garbage)\b|\b(shut up|stfu|i hate you|fuck (you|off))\b|^\s*(idiot|stupid|moron|loser)\b/i;
 const KIND = /\b(love you|miss(ed)? you|you'?re (amazing|the best|cute|sweet|funny|beautiful)|thank(s| you)|appreciate|proud of you|good girl)\b|❤|🥰|😘/i;
 const PLAYFUL = /\b(lol|lmao|haha+|hehe|rofl)\b|😂|🤣|😜/i;
-const SAD = /\b(sad|depressed|lonely|crying|cried|it hurts|lost my (mom|mum|dad|mother|father|brother|sister|friend|job|dog|cat|grandma|grandpa|wife|husband|partner)|died|passed away|breakup|broke up|anxious|scared)\b/i;
+const SAD = /\b(i'?m|i am|feel|feeling|so|really) (sad|down|low)\b|\b(depressed|lonely|crying|cried|it hurts|lost my (mom|mum|dad|mother|father|brother|sister|friend|job|dog|cat|grandma|grandpa|wife|husband|partner)|died|passed away|breakup|broke up|anxious|scared)\b/i;
 const APOLOGY = /\b(sorry|my bad|apologi[sz]e|forgive me)\b/i;
 const NEWS = /\b(omg|oh my god|no way|guess what|got the job|i did it|i passed)\b|!!/i;
 const HOSTILE = (name: MoodName) => name === "irritated" || name === "sulking";
 
 /**
- * How a message from the user lands. Returns the new state; never moves more than one step.
- * Teasing isn't an insult ("you idiot haha love you"), and irritation fades: each ordinary
- * message warms her back up, so it lasts a couple of messages rather than the rest of the chat.
+ * How a message from the user lands: the only thing that changes her mood.
+ *
+ * Strong signals (being insulted, their bad news, an apology) act at once. Milder ones (a joke,
+ * good news, kindness) only move her from neutral or once the current mood has had a couple of
+ * messages, so she doesn't flip with every text. Teasing isn't an insult ("you idiot haha love
+ * you"). Warmth builds gradually through kindness. And a mood runs its course: irritation fades
+ * after a couple of ordinary messages, and any other mood settles back to neutral after a few.
  */
 export function reactToMessage(state: MoodState, text: string, now = Date.now()): MoodState {
-  let next: MoodState = { ...state, lastUserAt: now, unprompted: 0 };
+  const next: MoodState = { ...state, lastUserAt: now, unprompted: 0, turns: state.turns + 1 };
   const fond = KIND.test(text) || PLAYFUL.test(text);
-  if (INSULT.test(text) && !fond) next = enter(next, state.name === "irritated" ? "sulking" : "irritated", now, 0.75);
-  else if (SAD.test(text)) next = enter(next, "warm", now, 0.5);
-  else if (APOLOGY.test(text) && HOSTILE(state.name)) next = enter(next, "content", now, 0.4);
-  else if (HOSTILE(state.name)) {
+  const canShift = state.name === "neutral" || state.turns >= MIN_TURNS_BETWEEN_CHANGES;
+  if (INSULT.test(text) && !fond) return enter(next, state.name === "irritated" ? "sulking" : "irritated", now, 0.75);
+  if (SAD.test(text)) return enter(next, "warm", now, 0.5);
+  if (HOSTILE(state.name)) {
+    if (APOLOGY.test(text)) return enter(next, "neutral", now, 0.4);
     const warmth = clamp(next.warmth + (fond ? 0.3 : 0.14));
-    next = warmth >= 0.5 ? enter({ ...next, warmth }, fond ? "warm" : "content", now, 0.4) : { ...next, warmth };
-  } else if (KIND.test(text)) next = { ...next, warmth: clamp(next.warmth + 0.12) };
-  else if (NEWS.test(text) && next.energy > 0.3) next = enter(next, "excited", now, 0.4);
-  else if (PLAYFUL.test(text) && next.energy > 0.35) next = enter(next, "playful", now, 0.35);
-  else if (/\?\s*$/.test(text) && text.length > 25 && next.energy > 0.3) next = enter(next, "curious", now, 0.25);
-  // Being talked to at all lifts boredom a little.
-  if (next.name === "bored" && text.length > 40) next = { ...next, energy: clamp(next.energy + 0.1) };
+    return warmth >= 0.5 ? enter({ ...next, warmth }, fond ? "warm" : "neutral", now, 0.4) : { ...next, warmth };
+  }
+  if (KIND.test(text)) {
+    const warmer = { ...next, warmth: clamp(next.warmth + 0.12) };
+    return canShift && warmer.warmth >= 0.7 ? enter(warmer, "warm", now, 0.2) : warmer;
+  }
+  if (NEWS.test(text) && canShift) return enter(next, "excited", now, 0.4);
+  if (PLAYFUL.test(text) && canShift) return enter(next, "playful", now, 0.35);
+  // Real questions, once the conversation is going, make her curious.
+  if (/\?\s*$/.test(text) && text.length > 25 && state.name === "neutral" && state.turns >= MIN_TURNS_BETWEEN_CHANGES) return enter(next, "curious", now, 0.25);
+  if (state.name !== "neutral" && next.turns >= SETTLE_AFTER_TURNS) return enter(next, "neutral", now, 0.4);
   return next;
-}
-
-/** Moods she may report about herself. Irritation only ever comes from how she is spoken to. */
-const SELF_REPORTABLE: MoodName[] = ["playful", "warm", "curious", "content", "excited", "bored", "tired", "restless", "melancholy"];
-
-/**
- * FREYA's own report, from a `[[mood: …]]` tag at the end of her reply. It is a nudge, not a
- * switch: limited to non-hostile moods and to once every few minutes, so a model that sounded
- * dramatic for one line can't swing the state.
- */
-export function applySelfReport(state: MoodState, name: string, now = Date.now()): MoodState {
-  if (!isMoodName(name) || !SELF_REPORTABLE.includes(name) || now - state.since < 3 * 60_000) return state;
-  return enter(state, name, now, 0.4);
 }
 
 const WORD = /^[\p{L}\p{N}][\p{L}\p{N} '’-]{2,40}$/u;
@@ -157,6 +169,8 @@ export function normalizeMood(input: unknown): MoodState | null {
     unprompted: Math.max(0, Math.min(9, Math.floor(number(candidate.unprompted, 0)))),
     nextInitiativeAt: number(candidate.nextInitiativeAt, 0),
     lastUserAt: number(candidate.lastUserAt, Date.now()),
+    turns: Math.max(0, Math.floor(number(candidate.turns, 0))),
+    ...(typeof candidate.bootId === "string" ? { bootId: candidate.bootId.slice(0, 64) } : {}),
   };
 }
 
@@ -172,7 +186,6 @@ export function moodPrompt(state: MoodState) {
     "- Low energy means shorter, drier replies; high warmth means more care and attention. Moods can show in word choice, length, punctuation and patience.",
   ];
   if (state.curiosities.length) lines.push(`- Things you've been wondering about lately: ${state.curiosities.join(", ")}.`);
-  lines.push(`- Your mood changes because of what happens in the conversation. If what they just said really shifts how you feel, put [[mood: NAME]] alone on the last line, where NAME is one of: ${SELF_REPORTABLE.join(", ")}. It is hidden from them. Usually nothing changed, so leave it out.`);
   return lines.join("\n");
 }
 

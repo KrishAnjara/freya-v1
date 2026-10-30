@@ -91,10 +91,10 @@ def main():
 
     # Unsloth names its export differently between versions; the model is the largest .gguf
     # that isn't the vision projector. It is renamed to the one name the laptop looks for.
-    files = [path for path in glob.glob(os.path.join(ROOT, "training", "freya-gguf", "*.gguf")) if "mmproj" not in path.lower()]
+    files = [path for path in glob.glob(os.path.join(ROOT, "training", "freya-gguf_gguf", "*.gguf")) if "mmproj" not in path.lower()]
     if not files:
         sys.exit("Training finished but no .gguf was exported. See the output above.")
-    model = os.path.join(ROOT, "training", "freya-gguf", "freya-trained.gguf")
+    model = os.path.join(ROOT, "training", "freya-gguf_gguf", "freya-trained.gguf")
     source = max(files, key=os.path.getsize)
     if os.path.abspath(source) != os.path.abspath(model):
         shutil.move(source, model)
@@ -111,7 +111,7 @@ def main():
                 if ollama_ready():
                     break
                 time.sleep(1)
-        run(f"npx -y tsx scripts/ollama-create.mjs --base training/freya-gguf/freya-trained.gguf --name freya-trained --format {chat_format}")
+        run(f"npx -y tsx scripts/ollama-create.mjs --base training/freya-gguf_gguf/freya-trained.gguf --name freya-trained --format {chat_format}")
         run("npx -y tsx scripts/eval-persona.mjs freya-trained")
 
     step("6/6 Save")

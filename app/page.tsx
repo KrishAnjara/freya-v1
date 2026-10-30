@@ -18,7 +18,7 @@ import { AUDIO_MIMES, AttachmentError, MAX_ATTACHMENTS, type AttachmentKind, typ
 import { deleteAttachments, getAttachment, putAttachment } from "@/lib/attachment-store";
 import { prepareAttachment } from "@/lib/prepare-attachment";
 import { becomesLongForm, bubbleDelay, chopCasually, isAside, takeCompleteParts, wantsLongForm } from "@/lib/reply-parts";
-import { addCuriosity, applySelfReport, driftMood, extractMoodTag, initialMood, loadMood, reactToMessage, saveMood, type MoodState } from "@/lib/mood";
+import { addCuriosity, extractMoodTag, initialMood, loadMood, reactToMessage, resumeMood, saveMood, type MoodState } from "@/lib/mood";
 import { contentWords } from "@/lib/stream-telemetry";
 import { isReasoningMode, needsReasoning, type ReasoningMode } from "@/lib/reasoning-signal";
 import LongformMessage from "@/app/components/LongformMessage";
@@ -473,6 +473,7 @@ export default function Home() {
   /** Messages the running reply has put on screen; 0 means it can still be called off. */
   const activePostedRef = useRef(0);
   const moodRef = useRef<MoodState>(mood);
+  const moodLoadedRef = useRef(false);
   const initiativeRef = useRef({ on: true, autonomy: 1 as 0 | 1 | 2 });
   const baseTitleRef = useRef("");
 
@@ -480,7 +481,9 @@ export default function Home() {
   useEffect(() => { conversationsRef.current = conversations; }, [conversations]);
   useEffect(() => { notificationsRef.current = notificationsOn; }, [notificationsOn]);
   useEffect(() => { soundRef.current = soundOn; }, [soundOn]);
-  useEffect(() => { moodRef.current = mood; if (hydrated) saveMood(mood); }, [mood, hydrated]);
+  // Saved only once the stored mood has been read: saving first overwrote it with the blank
+  // starting state, so her mood was lost on every reload.
+  useEffect(() => { moodRef.current = mood; if (moodLoadedRef.current) saveMood(mood); }, [mood]);
   useEffect(() => { initiativeRef.current = { on: initiativeOn, autonomy: autonomyLevel }; }, [initiativeOn, autonomyLevel]);
 
   // Chrome fills the voice list asynchronously, so prime it before the first Speak press.
@@ -500,9 +503,19 @@ export default function Home() {
       setInitiativeOn(localStorage.getItem(INITIATIVE_KEY) !== "false");
       setSoundOn(localStorage.getItem(SOUND_KEY) !== "false");
       setIntimateMode(localStorage.getItem(INTIMATE_KEY) === "true");
-      setMood(loadMood());
+      moodLoadedRef.current = true;
+      setMood(resumeMood(loadMood()));
     } catch { /* Defaults remain safe when local settings storage is unavailable. */ }
   }, [hydrated]);
+
+  // A restarted server means she starts again at neutral (lib/mood resumeMood).
+  const checkServerRun = useCallback(() => {
+    fetch("/api/session", { cache: "no-store" })
+      .then((response) => response.ok ? response.json() : null)
+      .then((payload) => { if (typeof payload?.bootId === "string") setMood((current) => resumeMood(current, Date.now(), payload.bootId)); })
+      .catch(() => { /* Server unreachable: nothing to compare yet. */ });
+  }, []);
+  useEffect(() => { if (hydrated) checkServerRun(); }, [hydrated, checkServerRun]);
 
   useEffect(() => {
     if (!hydrated) return;
@@ -906,7 +919,9 @@ export default function Home() {
   useEffect(() => {
     if (!hydrated) return;
     const tick = () => {
-      setMood((current) => driftMood(current));
+      // Her mood only changes with the conversation; the clock only checks for a long gap or a restart.
+      checkServerRun();
+      setMood((current) => resumeMood(current));
       const state = moodRef.current;
       const now = Date.now();
       const { on, autonomy } = initiativeRef.current;
@@ -1421,10 +1436,9 @@ export default function Home() {
         announceReply(job.conversationId, message, posted.length === 1 && !job.turn);
       });
     };
-    let moodShift = "";
     const post = (raw: string) => {
-      const { text, mood: reported } = extractMoodTag(raw);
-      if (reported) moodShift = reported;
+      // The fine-tuned model may still write the old hidden tag; it's removed and ignored.
+      const { text } = extractMoodTag(raw);
       if (!text) return;
       // A reply that turns out substantial (a structured explanation, or simply long) becomes one
       // document from here on, rather than a stack of bubbles. What's already sent stays.
@@ -1511,10 +1525,7 @@ export default function Home() {
       finishStream(truncated);
       await finishPiece();
       // Her own feelings: a mood she reported, and one more unanswered text if she went first.
-      setMood((current) => {
-        const next = moodShift ? applySelfReport(current, moodShift) : current;
-        return initiative ? { ...next, unprompted: next.unprompted + 1 } : next;
-      });
+      if (initiative) setMood((current) => ({ ...current, unprompted: current.unprompted + 1 }));
       // The provider is only known for sure once the stream ends; sources go under the last part.
       const lastPart = posted[posted.length - 1];
       patchConversation(job.conversationId, (messages) => messages.map((message) => posted.includes(message.id)
@@ -1565,7 +1576,7 @@ export default function Home() {
   /** How a message from them lands on her: mood, and sometimes a new thing to wonder about. */
   function feel(text: string) {
     setMood((current) => {
-      let next = reactToMessage(current, text);
+      let next = reactToMessage(resumeMood(current), text);
       const words = contentWords(text).filter((word) => word.length >= 6);
       if (words.length && Math.random() < 0.35) next = addCuriosity(next, words[Math.floor(Math.random() * words.length)]);
       return next;

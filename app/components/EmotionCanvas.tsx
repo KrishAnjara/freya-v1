@@ -34,6 +34,7 @@ const RIPPLE_WINDOW_MS = 80;
 /** Each mood's body: how it is shaped and how it moves. Values are small on purpose. */
 type MoodStyle = { scale: number; squash: number; sink: number; wave: number; waveSpeed: number; jag: number; drift: number; lean: number; glow: number; tint: [number, number, number] };
 const MOOD_STYLE: Record<MoodName, MoodStyle> = {
+  neutral: { scale: 1, squash: 1, sink: 0, wave: 0.012, waveSpeed: 0.6, jag: 0, drift: 0, lean: 0, glow: 0.8, tint: [0.76, 0.76, 0.74] },
   playful: { scale: 1, squash: 1, sink: 0, wave: 0.08, waveSpeed: 2.6, jag: 0, drift: 0.02, lean: 0, glow: 1, tint: [0.92, 0.7, 0.52] },
   warm: { scale: 1.05, squash: 1, sink: 0, wave: 0.02, waveSpeed: 0.8, jag: 0, drift: 0, lean: 0, glow: 1, tint: [0.95, 0.66, 0.5] },
   curious: { scale: 1, squash: 1, sink: 0, wave: 0.03, waveSpeed: 1.4, jag: 0, drift: 0.01, lean: 0.18, glow: 0.95, tint: [0.72, 0.78, 0.82] },
@@ -187,9 +188,9 @@ export default function EmotionCanvas({ signal, mood, form = null, onClearForm }
     let windowChars = 0;
     let windowOpenedAt = 0;
     // Smoothed state, so moods and activities blend instead of jumping.
-    const style = { ...MOOD_STYLE.curious };
-    let energy = 0.7;
-    let warmth = 0.7;
+    const style = { ...MOOD_STYLE.neutral };
+    let energy = 0.55;
+    let warmth = 0.5;
     let listen = 0;
     let think = 0;
     let shiver = 0;
@@ -236,7 +237,7 @@ export default function EmotionCanvas({ signal, mood, form = null, onClearForm }
 
       // Mood: ease towards the current mood's body, energy and warmth.
       const currentMood = moodRef.current;
-      const target = MOOD_STYLE[currentMood.name] ?? MOOD_STYLE.curious;
+      const target = MOOD_STYLE[currentMood.name] ?? MOOD_STYLE.neutral;
       for (const key of Object.keys(target) as (keyof MoodStyle)[]) {
         if (key === "tint") style.tint = style.tint.map((value, channel) => value + (target.tint[channel] - value) * blend) as MoodStyle["tint"];
         else (style[key] as number) += ((target[key] as number) - (style[key] as number)) * blend;

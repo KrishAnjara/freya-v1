@@ -59,8 +59,9 @@ your message ─┬─ casual chat ───────────────
 - **Reasoning panel** (`lib/council.ts`): for maths, code, logic and decisions, two models from
   different families solve the question independently; FREYA answers from both. Settings →
   Deep reasoning: Auto / Always / Off.
-- **Inner state** (`lib/mood.ts`): a mood that drifts, reacts to how you talk, and shapes her
-  tone; she may text first after you've been quiet a while (Settings → FREYA texts first). The
+- **Inner state** (`lib/mood.ts`): a mood that starts at neutral (new browser, restarted server,
+  or 6 hours since your last message), changes only because of what you say, follows you across
+  conversations in the same browser, and settles back as the talk moves on. It shapes her tone; she may text first after you've been quiet a while (Settings → FREYA texts first). The
   canvas shows it (`app/components/EmotionCanvas.tsx`): its particle body takes the mood's shape,
   energy and warmth, leans in while you type, draws in while she thinks and ripples with each
   real chunk of her reply. Her portrait's expression follows the same signals

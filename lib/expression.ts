@@ -31,6 +31,7 @@ export const POSES: Record<Expression, Pose> = {
 };
 
 const MOOD_EXPRESSION: Record<MoodName, Expression> = {
+  neutral: "neutral",
   playful: "smile",
   warm: "affectionate",
   curious: "curious",
