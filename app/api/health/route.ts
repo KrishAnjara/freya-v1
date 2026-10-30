@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { grokComplete, grokModel, hasGrok } from "@/lib/grok";
+import { getOllamaEndpoint, ollamaContextLength, ollamaHeaders, ollamaIsLocal } from "@/lib/ollama-models";
 import { groqModels, groqReasoningEffort, ollamaThinking } from "@/lib/llm";
 import { getFreyaServiceConfig, requestServiceReply } from "@/lib/freya-service";
 import { isSelfHosted } from "@/lib/rate-limit";
@@ -93,15 +94,28 @@ const grokCheck: Check = async () => {
   return "working";
 };
 
-const ollamaCheck: Check = async () => {
-  const base = (process.env.OLLAMA_BASE_URL || "http://127.0.0.1:11434").replace(/\/+$/, "");
-  const model = process.env.OLLAMA_MODEL || "freya";
-  const response = await fetch(`${base}/api/chat`, {
+const voiceServerCheck: Check = async () => {
+  const base = process.env.VOICE_BASE_URL?.trim().replace(/\/+$/, "");
+  if (!base) return "not configured";
+  const key = process.env.VOICE_API_KEY?.trim();
+  const response = await fetch(`${base}/chat/completions`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...(key ? { Authorization: `Bearer ${key}` } : {}) },
+    body: JSON.stringify({ model: process.env.VOICE_MODEL, max_tokens: 16, messages: [{ role: "user", content: PROMPT }] }),
+    signal: AbortSignal.timeout(OLLAMA_TIMEOUT_MS), cache: "no-store",
+  });
+  const payload = await response.json().catch(() => null);
+  return response.ok && said(payload?.choices?.[0]?.message?.content) ? "working" : "not working";
+};
+
+const ollamaCheck: Check = async () => {
+  const model = process.env.OLLAMA_MODEL || "freya";
+  const response = await fetch(`${getOllamaEndpoint()}/api/chat`, {
+    method: "POST",
+    headers: ollamaHeaders(),
     body: JSON.stringify({
       model, stream: false, keep_alive: process.env.OLLAMA_KEEP_ALIVE?.trim() || "30m", think: ollamaThinking(),
-      messages: [{ role: "user", content: PROMPT }], options: { num_predict: 16 },
+      messages: [{ role: "user", content: PROMPT }], options: { num_ctx: ollamaContextLength(), num_predict: 16 },
     }),
     signal: AbortSignal.timeout(OLLAMA_TIMEOUT_MS), cache: "no-store",
   });
@@ -183,7 +197,8 @@ async function runChecks(): Promise<HealthReport> {
     ...(hasGrok() ? [[`cloud: grok ${grokModel()}`, grokCheck] as [string, Check]] : []),
     ...groqModels().map((model): [string, Check] => [`cloud: groq ${model}`, groqCheck(model)]),
     [`cloud: gemini ${process.env.GEMINI_MODEL || "gemini-2.5-flash"}`, geminiCheck],
-    [`local: ollama ${process.env.OLLAMA_MODEL || "freya"}`, ollamaCheck],
+    ...(process.env.VOICE_BASE_URL?.trim() ? [[`voice server: ${process.env.VOICE_MODEL}`, voiceServerCheck] as [string, Check]] : []),
+    [`${ollamaIsLocal() ? "local" : "voice server"}: ollama ${process.env.OLLAMA_MODEL || "freya"}`, ollamaCheck],
     ["api: tavily search", tavilyCheck],
     ["api: groq whisper (voice transcription)", whisperCheck],
     ["service: orchestration", orchestrationCheck],

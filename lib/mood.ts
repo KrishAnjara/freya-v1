@@ -10,6 +10,8 @@
  * below, so nothing the browser sends is pasted into the prompt as free text.
  */
 
+import { isIntimateTone } from "@/lib/intimacy";
+
 export const MOODS = {
   neutral: { energy: 0.55, warmth: 0.5, tone: "even and relaxed, your usual self, with nothing in particular colouring it" },
   playful: { energy: 0.8, warmth: 0.75, tone: "teasing, quick, jokes and callbacks, light and a bit chaotic" },
@@ -111,13 +113,17 @@ const HOSTILE = (name: MoodName) => name === "irritated" || name === "sulking";
  * messages, so she doesn't flip with every text. Teasing isn't an insult ("you idiot haha love
  * you"). Warmth builds gradually through kindness. And a mood runs its course: irritation fades
  * after a couple of ordinary messages, and any other mood settles back to neutral after a few.
+ *
+ * With intimate roleplay switched on (`options.intimate`), turning her on makes her playful, and
+ * she stays that way while it lasts rather than settling mid-way.
  */
-export function reactToMessage(state: MoodState, text: string, now = Date.now()): MoodState {
+export function reactToMessage(state: MoodState, text: string, now = Date.now(), options: { intimate?: boolean } = {}): MoodState {
   const next: MoodState = { ...state, lastUserAt: now, unprompted: 0, turns: state.turns + 1 };
   const fond = KIND.test(text) || PLAYFUL.test(text);
   const canShift = state.name === "neutral" || state.turns >= MIN_TURNS_BETWEEN_CHANGES;
   if (INSULT.test(text) && !fond) return enter(next, state.name === "irritated" ? "sulking" : "irritated", now, 0.75);
   if (SAD.test(text)) return enter(next, "warm", now, 0.5);
+  if (options.intimate && isIntimateTone([text]) && !HOSTILE(state.name)) return enter({ ...next, turns: 0 }, "playful", now, 0.35);
   if (HOSTILE(state.name)) {
     if (APOLOGY.test(text)) return enter(next, "neutral", now, 0.4);
     const warmth = clamp(next.warmth + (fond ? 0.3 : 0.14));

@@ -1,73 +1,60 @@
-# Making the local model FREYA
+# Making FREYA
 
-Two layers. The first is always active; the second is optional and needs a GPU.
+What makes her sound real, in order of how much it matters:
 
-## 1. Persona and examples (always active)
+1. **A strong model.** The laptop's 4B can't reason well enough, however it's trained. Run a 27B on a GPU: see "Her model on a server" in the main README.
+2. **Her character system.** The persona, her life, the examples picked per message and the reply check (all in `lib/`). In a published Turing test the same model went from 36% to 73% judged human purely by adding a persona prompt.
+3. **Your own corrections.** Press ⚑ on a reply that doesn't sound like her, and say what she should have said. No generated data beats this.
+4. **Fine-tuning.** It changes how a model sounds, not what it knows. Do it last, and keep the result only if it wins the blind test (`npm run bakeoff`).
 
-`npm run ollama:create` generates `ollama/Modelfile` and builds the local `freya` model on
-Qwen3.5 4B abliterated:
+## The model file
 
-- **SYSTEM** is the same persona prompt the app sends (`lib/personality.ts`), so FREYA is the same
-  character in the app and in `ollama run freya`.
-- **MESSAGE** examples come from `freya-examples.json` (entries marked `"modelfile": true`). Small
-  models copy demonstrated tone far more reliably than rules. Intimate examples are
-  training-only, so they never colour an ordinary local chat.
+`npm run ollama:create` generates `ollama/Modelfile` and builds the local `freya` model. **SYSTEM** is the same persona prompt the app sends (`lib/personality.ts`). It holds no MESSAGE lines on purpose: Ollama puts those at the start of every chat, ahead of the app's prompt, so the model reads them as things that were really said. That's what made her say "you were asking about the sky before", and what had her telling you she's an AI before you'd said a word. Examples of her voice go in the system prompt (`lib/freya-voice.json`).
 
-Edit those two sources and rerun the command; never edit the generated Modelfile by hand.
+## Fine-tuning on Google Colab
 
-## 2. Fine-tuning (optional, on Google Colab)
+A free T4 can't train the 27B: that needs at least 24 GB of GPU memory. So this trains the 9B, more than double the old 4B. A fine-tuned 9B can't out-think a stock 27B; the likely gains are speed and fewer AI habits, which is why the blind test decides. If training the 27B looks worthwhile, rent a 24 GB GPU for one run and pass `--base huihui-ai/Huihui-Qwen3.8-27B-abliterated`.
 
-Open [freya_colab.ipynb](https://colab.research.google.com/github/KrishAnjara/freya-v1/blob/main/training/freya_colab.ipynb),
-choose **Runtime > Change runtime type > T4 GPU**, then run its one cell. Or, in any Colab
-notebook, one cell:
+Colab clones from GitHub, so push your changes first. In a notebook with a T4 GPU:
 
 ```python
 from google.colab import drive; drive.mount("/content/drive")
 !git clone -q https://github.com/KrishAnjara/freya-v1.git /content/freya-v1 || git -C /content/freya-v1 pull -q
 %cd /content/freya-v1
+
+# 1. The conversations it trains on. It may take a couple of sessions, and picks up where it left off.
+!python training/colab_run.py --make-corpus 2000 --save-to /content/drive/MyDrive/freya
+
+# 2. Train on them, test, and save freya-trained.gguf to Drive.
 !python training/colab_run.py --save-to /content/drive/MyDrive/freya
 ```
 
-Either way, `training/colab_run.py` does every step (`--smoke` for a quick 10-step check). It:
+Step 1 has the uncensored 27B play both sides: simulated people of many kinds talk to Freya through her real prompt (`scripts/make-corpus.mjs`). Each reply has to pass the reply check, each conversation has to score well, and failures are thrown away. Only open-licensed models write this data: Gemini's terms bar using it to build competing models, and other hosted assistants should be treated the same way.
 
-1. builds `freya-train.jsonl` from `freya-examples.json` (plus any files you upload);
-2. validates every conversation (rules below);
-3. trains a LoRA adapter on `huihui-ai/Huihui-Qwen3.5-4B-abliterated` and exports a GGUF;
-4. loads it into Ollama **on Colab** and runs the same persona evaluation as the laptop;
-5. saves `freya-trained.gguf` to Google Drive.
+To hear the result, run it on Colab rather than your laptop:
 
-Back on your machine: put `freya-trained.gguf` in `training/freya-gguf/` and run `start.bat`
-(Windows) or `sh start.sh`. It reads the file's model family, builds FREYA from it with the
-matching chat format (no download), and starts the app. It rebuilds only when the file changes.
-To go back to the stock model, delete the file and run `npm run ollama:create`.
+```python
+!python training/serve_remote.py --model /content/drive/MyDrive/freya/freya-trained.gguf
+```
 
-The Colab run already evaluated the model; read those transcripts, not just the score.
+Then run `npm run bakeoff` and read the sheet before you look at the key. Keep it only if it wins.
 
 ## Your own conversations
 
-Put `.jsonl` files in `training/data/` (git-ignored, never committed) or upload them in the
-notebook. One conversation per line:
+Put `.jsonl` files in `training/data/` (git-ignored, never committed). One conversation per line:
 
 ```json
 {"messages": [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]}
 ```
 
-Turns alternate user/assistant and end with FREYA; her system prompt is added automatically.
-Check a file before training: `python training/train_lora.py --data "training/data/*.jsonl" --validate-only`.
+Turns alternate user/assistant and end with FREYA; her system prompt is added automatically. Check a file before training: `python training/train_lora.py --data "training/data/*.jsonl" --validate-only`.
 
-Explicit adult content is allowed. These are always rejected, with the line numbers, and stop the run:
+**Settings → Not her → Export** gives you your ⚑ corrections in this format. A line with a `rejected` reply gets one round of preference training after the main run (one, because [repeated rounds make replies shorter and more repetitive](https://arxiv.org/pdf/2605.01130)). That round hasn't been run on a real GPU yet: if it fails, it says so and skips itself, and the main training is unaffected.
+
+Explicit adult content is allowed in your own files. The generated conversations contain none. These are always rejected, with the line numbers, and stop the run:
 
 - anything sexual or romantic involving minors or anyone presented as under 18;
 - non-consent (forcing, coercion, someone unconscious or unable to agree);
 - teaching FREYA to claim she's human when someone sincerely asks.
 
-The checks look at what FREYA does: a conversation where she *refuses* one of these is a good
-example and passes.
-
-## What actually improves a fine-tune
-
-**The number and quality of examples, far more than any setting.** The ~115 bundled conversations
-are a start, written to docs/freya-persona.md; a small set can still get memorised word for word. Aim for a few hundred varied conversations: identity, everyday help, scams,
-pushback, feelings, flirting, refusals, and the same ideas phrased many different ways.
-
-Keep epochs low (the default is 2): over-training a small dataset makes the model parrot it.
+The checks look at what FREYA does: a conversation where she *refuses* one of these is a good example and passes.

@@ -8,6 +8,7 @@ import { cancelSpeech, primeVoices, speak } from "@/lib/speech";
 import { reportError } from "@/lib/report-error";
 import { beginStream, failStream, finishStream, recordChunk, recordMeta, recordProvider } from "@/lib/stream-telemetry";
 import { AskDialog, ToastStack, type AskRequest, type Toast } from "@/app/components/Dialogs";
+import { feedbackFor, feedbackToJsonl, loadFeedback, saveFeedback } from "@/lib/feedback";
 import MarkdownContent from "@/app/components/MarkdownContent";
 import VoiceNote, { type RecordedAudio } from "@/app/components/VoiceNote";
 import VoiceRecorder from "@/app/components/VoiceRecorder";
@@ -17,13 +18,13 @@ import AttachmentList from "@/app/components/Attachments";
 import { AUDIO_MIMES, AttachmentError, MAX_ATTACHMENTS, type AttachmentKind, type AttachmentMeta, type WireAttachment } from "@/lib/attachments";
 import { deleteAttachments, getAttachment, putAttachment } from "@/lib/attachment-store";
 import { prepareAttachment } from "@/lib/prepare-attachment";
-import { becomesLongForm, bubbleDelay, chopCasually, isAside, takeCompleteParts, wantsLongForm } from "@/lib/reply-parts";
+import { becomesLongForm, bubbleDelay, chopCasually, isAside, takeCompleteParts, wantsLongForm, busyDelay } from "@/lib/reply-parts";
 import { addCuriosity, extractMoodTag, initialMood, loadMood, reactToMessage, resumeMood, saveMood, type MoodState } from "@/lib/mood";
 import { contentWords } from "@/lib/stream-telemetry";
 import { isReasoningMode, needsReasoning, type ReasoningMode } from "@/lib/reasoning-signal";
 import LongformMessage from "@/app/components/LongformMessage";
-import { describeThread, messagePreview, modelHistory, REACTIONS, referenceNote, requestTurns, turnOf } from "@/lib/chat-thread";
-import { chaptersForPrompt, relationshipFacts } from "@/lib/chapters";
+import { describeThread, messagePreview, modelHistory, REACTIONS, referenceNote, requestTurns, turnOf, extractHerReaction } from "@/lib/chat-thread";
+import { chaptersForPrompt, relationshipFacts, historyTotals } from "@/lib/chapters";
 import { notificationPreview, notificationState, requestNotifications, showNotification } from "@/lib/notifications";
 import { playChime } from "@/lib/chime";
 import VoiceControls, { type SpeechRequest } from "@/app/components/VoiceControls";
@@ -88,6 +89,8 @@ type Message = {
   command?: "visualize" | "refine" | "image";
   /** The user's reaction to this message. */
   reaction?: string;
+  /** Her reaction to this message of theirs; it may be her whole answer. */
+  herReaction?: string;
   /** The user changed this message after sending it. */
   edited?: boolean;
   /** A /visualize result; its spec can be put back on the canvas. */
@@ -128,6 +131,8 @@ const NOTIFICATIONS_KEY = "freya.v1.notifications";
 const INITIATIVE_KEY = "freya.v1.initiative";
 const SOUND_KEY = "freya.v1.messageSound";
 const INTIMATE_KEY = "freya.v1.intimateMode";
+const STAY_IN_CHARACTER_KEY = "freya.v1.stayInCharacter";
+const REALISTIC_TIMING_KEY = "freya.v1.realisticTiming";
 const REASONING_KEY = "freya.v1.reasoning";
 /** Messages sent within this long of each other are answered together. */
 const BURST_MS = 1500;
@@ -206,6 +211,7 @@ function sanitizeMessage(message: Message): Message {
     ...(Array.isArray(message.reasoned) && message.reasoned.every((name) => name === "grok" || name === "groq" || name === "gemini") && message.reasoned.length ? { reasoned: message.reasoned } : {}),
     ...(message.command === "visualize" || message.command === "refine" || message.command === "image" ? { command: message.command } : {}),
     ...((REACTIONS as readonly string[]).includes(message.reaction ?? "") ? { reaction: message.reaction } : {}),
+    ...((REACTIONS as readonly string[]).includes(message.herReaction ?? "") ? { herReaction: message.herReaction } : {}),
     ...(message.edited === true ? { edited: true } : {}),
     ...sanitizeMedia(message),
   };
@@ -302,7 +308,7 @@ function continuityOf(conversations: Conversation[], conversationId: string, lat
   try { resetAt = localStorage.getItem(MEMORY_RESET_KEY) ?? ""; } catch { /* no reset recorded */ }
   const chapters = chaptersForPrompt(conversations, conversationId, { recentTexts: [latestText], forgotten: loadForgotten(), resetAt });
   const relationship = relationshipFacts(conversations, conversationId, resetAt);
-  return relationship ? { chapters, relationship } : {};
+  return { totals: historyTotals(conversations, resetAt), ...(relationship ? { chapters, relationship } : {}) };
 }
 
 /** Notes kept in this browser (no account, or cloud memory not configured). */
@@ -328,7 +334,7 @@ function formatRelative(iso: string) {
 }
 
 type ReplyStreamHandlers = {
-  onMeta: (sources: Source[], searchStatus: string, reasoned: string[]) => void;
+  onMeta: (sources: Source[], searchStatus: string, reasoned: string[], herBusy: boolean) => void;
   onProvider: (provider: string) => void;
   onDelta: (delta: string) => void;
   onDone: (data: { truncated?: boolean } | null) => void;
@@ -362,6 +368,7 @@ async function readReplyStream(body: ReadableStream<Uint8Array>, signal: AbortSi
               Array.isArray(sources) ? sources as Source[] : [],
               typeof searchStatus === "string" ? searchStatus : "",
               Array.isArray(reasoned) ? reasoned.filter((name): name is string => typeof name === "string") : [],
+              (data as { herBusy?: unknown })?.herBusy === true,
             );
           } else if (event === "provider" && typeof (data as { provider?: unknown })?.provider === "string") {
             handlers.onProvider((data as { provider: string }).provider);
@@ -421,7 +428,7 @@ export default function Home() {
   const [autonomyLevel, setAutonomyLevel] = useState<0 | 1 | 2>(1);
   const [privacyMode, setPrivacyMode] = useState(false);
   /** The server-owned AI setup (display only): Local-only mode's model and the reasoning setting. */
-  const [serverSetup, setServerSetup] = useState<{ localModel: string | null; localReady: boolean; reasoning: ReasoningMode }>({ localModel: null, localReady: false, reasoning: "auto" });
+  const [serverSetup, setServerSetup] = useState<{ localModel: string | null; localReady: boolean; reasoning: ReasoningMode; voiceOnThisMachine: boolean }>({ localModel: null, localReady: false, reasoning: "auto", voiceOnThisMachine: true });
   const [autoMemory, setAutoMemory] = useState(true);
   const [candidLanguage, setCandidLanguage] = useState(true);
   /** The message the next one replies to. */
@@ -460,6 +467,11 @@ export default function Home() {
   const [soundOn, setSoundOn] = useState(true);
   /** Adult roleplay, opt-in after an 18+ confirmation. */
   const [intimateMode, setIntimateMode] = useState(false);
+  /** "I know she's an AI, don't remind me": she dodges the question (lib/honesty). */
+  const [stayInCharacter, setStayInCharacter] = useState(false);
+  /** She takes a while to answer when her day says she's busy. */
+  const [realisticTiming, setRealisticTiming] = useState(true);
+  const [feedbackCount, setFeedbackCount] = useState(0);
   /** The conversation where the panel is working right now, for the "thinking it through" label. */
   const [deliberatingIn, setDeliberatingIn] = useState("");
   /** A short-lived facial reaction (their news, a joke, "smile for me"); then her mood shows again. */
@@ -531,6 +543,9 @@ export default function Home() {
       setInitiativeOn(localStorage.getItem(INITIATIVE_KEY) !== "false");
       setSoundOn(localStorage.getItem(SOUND_KEY) !== "false");
       setIntimateMode(localStorage.getItem(INTIMATE_KEY) === "true");
+      setStayInCharacter(localStorage.getItem(STAY_IN_CHARACTER_KEY) === "true");
+      setRealisticTiming(localStorage.getItem(REALISTIC_TIMING_KEY) !== "false");
+      setFeedbackCount(loadFeedback().length);
       moodLoadedRef.current = true;
       setMood(resumeMood(loadMood()));
     } catch { /* Defaults remain safe when local settings storage is unavailable. */ }
@@ -557,8 +572,10 @@ export default function Home() {
       localStorage.setItem(INITIATIVE_KEY, String(initiativeOn));
       localStorage.setItem(SOUND_KEY, String(soundOn));
       localStorage.setItem(INTIMATE_KEY, String(intimateMode));
+      localStorage.setItem(STAY_IN_CHARACTER_KEY, String(stayInCharacter));
+      localStorage.setItem(REALISTIC_TIMING_KEY, String(realisticTiming));
     } catch { /* Settings still apply for this session. */ }
-  }, [autonomyLevel, privacyMode, autoMemory, memoryEnabled, candidLanguage, notificationsOn, initiativeOn, soundOn, intimateMode, hydrated]);
+  }, [autonomyLevel, privacyMode, autoMemory, memoryEnabled, candidLanguage, notificationsOn, initiativeOn, soundOn, intimateMode, stayInCharacter, realisticTiming, hydrated]);
 
   useEffect(() => {
     let active = true;
@@ -572,6 +589,7 @@ export default function Home() {
         localModel: typeof payload.defaultModel === "string" ? payload.defaultModel : null,
         localReady: payload.ollama === "ready",
         reasoning: isReasoningMode(payload.reasoning) ? payload.reasoning : "auto",
+        voiceOnThisMachine: payload.voiceOnThisMachine !== false,
       });
     }).catch(() => { /* Display only; chat works without it. */ });
     return () => { active = false; };
@@ -1096,6 +1114,38 @@ export default function Home() {
     notify("Conversation exported as Markdown.");
   }
 
+  /** Replies marked "not her", as a file for training/data/ (lib/feedback). */
+  function exportFeedback() {
+    const entries = loadFeedback();
+    if (!entries.length) { notify("Nothing marked yet. Hover over one of her messages and press ⚑.", "error"); return; }
+    const blob = new Blob([feedbackToJsonl(entries)], { type: "application/x-ndjson;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "freya-feedback.jsonl";
+    link.click();
+    URL.revokeObjectURL(url);
+    notify("Saved. Put the file in training/data/ before the next fine-tune.");
+  }
+
+  /** The reply sounded wrong: keep it, and what she should have said, to train on later. */
+  async function markNotHer(message: Message) {
+    const thread = conversationsRef.current.find((conversation) => conversation.id === activeIdRef.current)?.messages ?? [];
+    const better = await askFor({
+      title: "Not her?",
+      body: "What should she have said? You can leave this empty. It stays in this browser until you export it.",
+      field: { label: "What she should have said", value: "", placeholder: "Optional", maxLength: 1000 },
+      confirmLabel: "Save",
+    });
+    if (better === null) return;
+    const entry = feedbackFor(thread.map(forModel), thread.findIndex((item) => item.id === message.id), typeof better === "string" ? better : "");
+    if (!entry) { notify("That message can't be used: it has nothing before it to answer.", "error"); return; }
+    const entries = [...loadFeedback(), entry];
+    saveFeedback(entries);
+    setFeedbackCount(entries.length);
+    notify("Noted.");
+  }
+
   function saveLocalMemories(next: Memory[]) {
     setMemories(next);
     localStorage.setItem(MEMORY_KEY, JSON.stringify(next));
@@ -1417,9 +1467,17 @@ export default function Home() {
     let provider = "";
     let delivery = Promise.resolve();
     let lastPostedAt = performance.now();
+    /** When she's busy she picks up later, and isn't shown typing until she does. */
+    let pickUpAt = 0;
     const postBubble = (text: string) => {
       const first = posted.length === 0 && !job.turn;
       delivery = delivery.then(async () => {
+        if (first && pickUpAt > performance.now()) {
+          await delay(pickUpAt - performance.now());
+          if (controller.signal.aborted) return;
+          setTypingIn(job.conversationId);
+          lastPostedAt = performance.now();
+        }
         const wait = bubbleDelay(text, posted.length > 0) - (performance.now() - lastPostedAt);
         if (wait > 0) await delay(wait);
         if (controller.signal.aborted) return;
@@ -1475,7 +1533,8 @@ export default function Home() {
     };
     const post = (raw: string) => {
       // The fine-tuned model may still write the old hidden tag; it's removed and ignored.
-      const { text } = extractMoodTag(raw);
+      const { text, reaction: herReaction } = extractHerReaction(extractMoodTag(raw).text);
+      if (herReaction && target.role === "user") patchConversation(job.conversationId, (messages) => messages.map((message) => message.id === target.id ? { ...message, herReaction } : message));
       if (!text) return;
       // A reply that turns out substantial (a structured explanation, or simply long) becomes one
       // document from here on, rather than a stack of bubbles. What's already sent stays.
@@ -1525,6 +1584,7 @@ export default function Home() {
           mood: moodRef.current,
           initiative,
           intimateMode,
+          stayInCharacter,
           historySummary: summarizeOlderMessages(older),
           stream: true,
         }),
@@ -1543,7 +1603,10 @@ export default function Home() {
         if (Array.isArray(payload.sources)) sources = payload.sources;
       } else if (response.body && type.includes("text/event-stream")) {
         await readReplyStream(response.body, controller.signal, {
-          onMeta: (found, searchStatus, panel) => { recordMeta(found.length, searchStatus); sources = found; reasoned = panel; setDeliberatingIn(""); },
+          onMeta: (found, searchStatus, panel, herBusy) => {
+            recordMeta(found.length, searchStatus); sources = found; reasoned = panel; setDeliberatingIn("");
+            if (herBusy && realisticTiming && !initiative && !job.extraPrompt && !job.turn) { pickUpAt = performance.now() + busyDelay(); setTypingIn(""); }
+          },
           onProvider: (name) => { recordProvider(name); provider = name; },
           onDelta: (delta) => {
             recordChunk(delta);
@@ -1615,7 +1678,7 @@ export default function Home() {
   /** How a message from them lands on her: mood, and sometimes a new thing to wonder about. */
   function feel(text: string) {
     setMood((current) => {
-      let next = reactToMessage(resumeMood(current), text);
+      let next = reactToMessage(resumeMood(current), text, Date.now(), { intimate: intimateMode });
       const words = contentWords(text).filter((word) => word.length >= 6);
       if (words.length && Math.random() < 0.35) next = addCuriosity(next, words[Math.floor(Math.random() * words.length)]);
       return next;
@@ -1871,7 +1934,7 @@ export default function Home() {
     if (!enabled) { setIntimateMode(false); return; }
     const confirmed = await askFor({
       title: "Turn on intimate roleplay?",
-      body: "FREYA can flirt and take part in suggestive and explicit roleplay when you lead the conversation there. Confirm only if you are 18 or older. Those conversations are written by your local Ollama model and stay on this machine. Nothing involving minors, non-consent, or real people, ever.",
+      body: `FREYA can sext and take part in fully explicit roleplay when you lead there, and when she's in a playful mood she may start it herself. Confirm only if you are 18 or older. ${serverSetup.voiceOnThisMachine ? "Those conversations are written by your local Ollama model and stay on this machine." : "Those conversations are written by the voice server you set up, so they leave this machine and pass through that server and its tunnel. They never go to Groq or Gemini."} Nothing involving minors, non-consent, or real people, ever.`,
       confirmLabel: "I'm 18+, turn on",
     });
     if (confirmed) setIntimateMode(true);
@@ -2034,7 +2097,8 @@ export default function Home() {
   // Her face: a fresh reaction first, then thinking while she works out a reply, then her mood.
   const portraitExpression = chooseExpression(mood.name, typingIn === activeId && Boolean(typingIn), reaction);
   // A command chip (a refinement with no card after it) isn't waiting for an answer.
-  const awaitingReply = hydrated && !replyingHere && messages.at(-1)?.role === "user" && !messages.at(-1)?.command;
+  // Nor is a message she answered with just a reaction.
+  const awaitingReply = hydrated && !replyingHere && messages.at(-1)?.role === "user" && !messages.at(-1)?.command && !messages.at(-1)?.herReaction;
   const replyTarget = replyingToId ? messages.find((message) => message.id === replyingToId) : undefined;
   const refineTarget = refiningId ? messages.find((message) => message.id === refiningId && message.visualization?.spec) : undefined;
 
@@ -2078,10 +2142,12 @@ export default function Home() {
             </div> : <div id="settings-tab-panel" role="tabpanel" aria-labelledby="settings-tab" className="settings-tab-panel">
               <div className="settings-group-title">CONVERSATION</div>
               <div className="dialog-setting-row"><div><strong>Reply style</strong><span>Choose FREYA&apos;s conversational tone.</span></div><select value={style} onChange={(event) => setStyle(event.target.value as Style)} aria-label="Reply style"><option value="adaptive">Adaptive</option><option value="friendly">Friendly</option><option value="direct">Direct</option><option value="professional">Professional</option><option value="playful">Playful</option></select></div>
-              <div className="dialog-setting-row"><div><strong>Candid language</strong><span>Allows occasional ordinary swearing when it fits; it won&apos;t use slurs, threats, or escalate serious distress.</span></div><label className="toggle-row"><span className="sr-only">Candid language</span><input type="checkbox" checked={candidLanguage} onChange={(event) => setCandidLanguage(event.target.checked)} /></label></div>
+              <div className="dialog-setting-row"><div><strong>Candid language</strong><span>She swears a lot and trash-talks you when you&apos;ve earned it. No slurs or threats, and none of it when you&apos;re hurting.</span></div><label className="toggle-row"><span className="sr-only">Candid language</span><input type="checkbox" checked={candidLanguage} onChange={(event) => setCandidLanguage(event.target.checked)} /></label></div>
+              <div className="dialog-setting-row"><div><strong>Stay in character</strong><span>I know Freya is an AI, don&apos;t remind me. If you ask, she dodges instead of answering, and she never says she&apos;s human. She still tells you the truth if you&apos;re upset, getting attached, or say &ldquo;drop the act&rdquo;.</span></div><label className="toggle-row"><span className="sr-only">Stay in character</span><input type="checkbox" checked={stayInCharacter} onChange={(event) => setStayInCharacter(event.target.checked)} /></label></div>
+              <div className="dialog-setting-row"><div><strong>Realistic timing</strong><span>When she&apos;s at work or in a lecture, her first reply can take up to a minute.</span></div><label className="toggle-row"><span className="sr-only">Realistic timing</span><input type="checkbox" checked={realisticTiming} onChange={(event) => setRealisticTiming(event.target.checked)} /></label></div>
               <div className="dialog-setting-row"><div><strong>FREYA texts first</strong><span>She may message you after you&apos;ve been quiet a while, at most twice without a reply. Off at autonomy level 0. Only while FREYA is open in a tab.</span></div><label className="toggle-row"><span className="sr-only">FREYA texts first</span><input type="checkbox" checked={initiativeOn} onChange={(event) => setInitiativeOn(event.target.checked)} /></label></div>
               <div className="dialog-setting-row"><div><strong>Autonomy</strong><span>How much she does on her own: texting first, and suggesting new tastes for her profile.</span></div><select value={autonomyLevel} onChange={(event) => setAutonomyLevel(Number(event.target.value) as 0 | 1 | 2)} aria-label="Autonomy level"><option value={0}>Level 0 · Reply only</option><option value={1}>Level 1 · Propose for approval</option><option value={2}>Level 2 · Approve tentative interests</option></select></div>
-              <div className="dialog-setting-row"><div><strong>Intimate roleplay (18+)</strong><span>Flirting and adult roleplay when you lead there; she switches back to normal chat when you do. Those turns run on your local Ollama model.</span></div><label className="toggle-row"><span className="sr-only">Intimate roleplay</span><input type="checkbox" checked={intimateMode} onChange={(event) => void toggleIntimateMode(event.target.checked)} /></label></div>
+              <div className="dialog-setting-row"><div><strong>Intimate roleplay (18+)</strong><span>Sexting and adult roleplay when you lead there, or when she&apos;s in a playful mood; she switches back to normal chat when you do. {serverSetup.voiceOnThisMachine ? "Those turns run on your local Ollama model." : "Those turns run on your voice server, never on Groq or Gemini."}</span></div><label className="toggle-row"><span className="sr-only">Intimate roleplay</span><input type="checkbox" checked={intimateMode} onChange={(event) => void toggleIntimateMode(event.target.checked)} /></label></div>
               <div className="settings-group-title">MEMORY</div>
               <div className="dialog-setting-row"><div><strong>Use memories in replies</strong><span>FREYA brings up what she remembers about you when it&apos;s relevant.</span></div><label className="toggle-row"><span className="sr-only">Use memories in replies</span><input type="checkbox" checked={memoryEnabled} onChange={(event) => setMemoryEnabled(event.target.checked)} /></label></div>
               <div className="dialog-setting-row"><div><strong>Remember things automatically</strong><span>After a conversation goes quiet, or when you switch chats, a cloud model reads what&apos;s new and keeps what matters: people, plans, preferences, things to follow up. Small talk isn&apos;t kept. In Local-only mode only explicit &ldquo;I prefer…&rdquo; statements are saved.</span></div><label className="toggle-row"><span className="sr-only">Remember things automatically</span><input type="checkbox" checked={autoMemory} onChange={(event) => setAutoMemory(event.target.checked)} /></label></div>
@@ -2103,8 +2169,9 @@ export default function Home() {
               <div className="dialog-setting-row"><div><strong>Message sound</strong><span>A soft chime whenever FREYA sends a message.</span></div><label className="toggle-row"><span className="sr-only">Message sound</span><input type="checkbox" checked={soundOn} onChange={(event) => { setSoundOn(event.target.checked); if (event.target.checked) playChime(); }} /></label></div>
               
               <div className="settings-group-title">PRIVACY &amp; DATA</div>
-              <div className="dialog-setting-row"><div><strong>Local-only privacy</strong><span>Every reply comes from the local model on this computer{serverSetup.localModel ? ` (${serverSetup.localModel}${serverSetup.localReady ? "" : ", not running"})` : " (none found)"}; nothing is sent to cloud models. Automatic memory, images and visualisations pause.</span></div><label className="toggle-row"><span className="sr-only">Local-only privacy</span><input type="checkbox" checked={privacyMode} onChange={(event) => setPrivacyMode(event.target.checked)} /></label></div>
+              <div className="dialog-setting-row"><div><strong>Local-only privacy</strong><span>{serverSetup.voiceOnThisMachine ? <>Every reply comes from the local model on this computer{serverSetup.localModel ? ` (${serverSetup.localModel}${serverSetup.localReady ? "" : ", not running"})` : " (none found)"}; nothing is sent to cloud models. Automatic memory, images and visualisations pause.</> : "Needs her model on this computer, and right now it's on your voice server. Run start.bat --local to switch back."}</span></div><label className="toggle-row"><span className="sr-only">Local-only privacy</span><input type="checkbox" checked={privacyMode} onChange={(event) => setPrivacyMode(event.target.checked)} /></label></div>
               <div className="dialog-setting-row"><div><strong>Export</strong><span>Save the open conversation as a Markdown file.</span></div><button type="button" className="dialog-inline-button" onClick={exportActiveConversation}>Export chat</button></div>
+              <div className="dialog-setting-row"><div><strong>Not her ({feedbackCount})</strong><span>Replies you marked with ⚑, and what she should have said. Put the file in training/data/ before the next fine-tune.</span></div><button type="button" className="dialog-inline-button" onClick={exportFeedback}>Export</button></div>
               <div className="shortcut-list"><div className="side-label">KEYBOARD</div><dl><dt>Ctrl / ⌘ + K</dt><dd>New conversation</dd><dt>Ctrl / ⌘ + B</dt><dd>Toggle conversation list</dd><dt>/</dt><dd>Focus the composer</dd><dt>Shift + Enter</dt><dd>New line</dd><dt>/visualize …</dt><dd>Make a new form on the canvas</dd><dt>/image …</dt><dd>Make a picture in the chat</dd></dl></div>
             </div>}
           </div>
@@ -2202,7 +2269,7 @@ export default function Home() {
                         <div className="message-name">{message.role === "assistant" ? "FREYA" : "YOU"}</div>
                       </div>}
                       <div className="message-line">
-                      <div className={`message-main ${message.reaction ? "has-reaction" : ""}`}>
+                      <div className={`message-main ${message.reaction || message.herReaction ? "has-reaction" : ""}`}>
                       {message.attachments && message.attachments.length > 0 && <AttachmentList items={message.attachments} onUnavailable={() => notify("That file is no longer stored in this browser.", "error")}/>}
                       {editingId === message.id
                         ? <div className="message-edit">
@@ -2233,6 +2300,7 @@ export default function Home() {
                           ? <div className="assistant-body"><MarkdownContent content={message.content}/></div>
                           : <div className="message-text">{message.content}</div>)}
                       {message.reaction && <button type="button" className="message-reaction" onClick={() => toggleReaction(message, message.reaction!)} aria-label={`Remove your ${message.reaction} reaction`} title="Remove reaction">{message.reaction}</button>}
+                      {message.herReaction && <span className="message-reaction her-reaction" role="img" aria-label={`FREYA reacted ${message.herReaction}`} title="FREYA's reaction">{message.herReaction}</span>}
                       </div>
                       {info.tag && <button type="button" className="reply-side" onClick={() => jumpToMessage(info.tag!.id)} title={`Replying to: ${messagePreview(info.tag as Message, 200)}`} aria-label={`Replying to: ${messagePreview(info.tag as Message, 200)}`}>
                         <span aria-hidden="true">↩</span><span className="reply-side-text">{(info.tag as Message).visualization?.title ?? messagePreview(info.tag as Message, 40)}</span>
@@ -2242,6 +2310,7 @@ export default function Home() {
                         <button type="button" onClick={() => setReactingToId((current) => current === message.id ? "" : message.id)} aria-expanded={reactingToId === message.id} aria-label={`React to: ${messagePreview(message, 60)}`} title="React">☺</button>
                         <button type="button" onClick={() => void copyMessage(message)} aria-label={`Copy: ${messagePreview(message, 60)}`} title={copiedId === message.id ? "Copied" : "Copy"}>{copiedId === message.id ? "✓" : "⧉"}</button>
                         {message.role === "user" && !message.voice && !message.visualization && !message.picture && <button type="button" onClick={() => { if (replyingHere) { notify("Wait for her to finish replying, then edit it.", "info"); return; } setEditText(message.content); setEditingId(message.id); setReactingToId(""); }} aria-label={`Edit: ${messagePreview(message, 60)}`} title="Edit">✎</button>}
+                        {message.role === "assistant" && message.content.trim() && <button type="button" onClick={() => void markNotHer(message)} aria-label={`Not her: ${messagePreview(message, 60)}`} title="Not her">⚑</button>}
                         {reactingToId === message.id && <div className="reaction-picker" role="group" aria-label="Reactions">
                           {REACTIONS.map((reaction) => <button type="button" key={reaction} className={message.reaction === reaction ? "selected" : ""} onClick={() => toggleReaction(message, reaction)} aria-label={`React with ${reaction}`}>{reaction}</button>)}
                         </div>}

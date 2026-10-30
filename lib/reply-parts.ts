@@ -157,6 +157,14 @@ export function typingDelay(part: string) {
   return Math.min(1600, 320 + part.length * 3);
 }
 
+/**
+ * How long she takes to pick up when she's in the middle of something (lib/her-day): a person at
+ * work doesn't answer in three seconds, but nobody should wait long enough to think it broke.
+ */
+export function busyDelay(random: () => number = Math.random) {
+  return 8000 + random() * 37_000;
+}
+
 /** Consecutive bubbles never land closer than this: a person sends one text, then the next. */
 export const MIN_BUBBLE_GAP_MS = 1000;
 

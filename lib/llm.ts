@@ -1,3 +1,4 @@
+import { getOllamaEndpoint, ollamaContextLength, ollamaHeaders, ollamaIsLocal } from "@/lib/ollama-models";
 import { redactSensitiveCredentials } from "@/lib/sensitive-data";
 import { isCoolingDown, markFailure, markSuccess, ProviderHttpError, retryAfterOf } from "@/lib/provider-health";
 
@@ -34,8 +35,12 @@ const MAX_MESSAGE_CHARS = 6000;
  */
 const MAX_PREPARED_MESSAGE_CHARS = 24_000;
 const PROVIDER_TIMEOUT_MS = 25000;
+const VOICE_SERVER_TIMEOUT_MS = 90_000;
 /**
- * How long to wait for a local Ollama model to start responding.
+ * How long to wait for an Ollama model to start responding. On a voice server elsewhere the model
+ * is already loaded on a GPU, so a long silence means it's gone, and the fallback should answer.
+ *
+ * On this machine it's different.
  *
  * Ollama sends nothing, not even headers, until it has read the whole prompt. On a laptop CPU
  * that is about 50 tokens a second, so FREYA's ~2,500-token persona takes ~50s the first time.
@@ -45,7 +50,18 @@ const PROVIDER_TIMEOUT_MS = 25000;
  * for a busy CPU: running out of it fails the message when the local model is FREYA's voice.
  */
 function ollamaTimeoutMs() {
-  return Math.max(10_000, Number(process.env.OLLAMA_TIMEOUT_MS) || 300_000);
+  return Math.max(10_000, Number(process.env.OLLAMA_TIMEOUT_MS) || (ollamaIsLocal() ? 300_000 : 90_000));
+}
+/** A voice server that just failed is skipped for a while instead of being waited on again. */
+const VOICE_SERVER_HEALTH = "voice-server";
+function voiceServerDown() {
+  return !ollamaIsLocal() && isCoolingDown(VOICE_SERVER_HEALTH);
+}
+function noteVoiceServer(error: unknown, signal?: AbortSignal) {
+  if (ollamaIsLocal() || signal?.aborted) return;
+  const status = error instanceof ProviderHttpError ? error.status : undefined;
+  markFailure(VOICE_SERVER_HEALTH, status);
+  noteFailure(VOICE_SERVER_HEALTH, status ?? "network");
 }
 /** Keeps the model and its prompt cache loaded between messages (Ollama's default is 5m). */
 function ollamaKeepAlive() {
@@ -253,25 +269,95 @@ async function geminiChatRaw(system: string, messages: ChatMessage[], signal?: A
 }
 
 async function ollamaChat(system: string, messages: ChatMessage[], signal?: AbortSignal, modelOverride?: string) {
-  const endpoint = (process.env.OLLAMA_BASE_URL || "http://127.0.0.1:11434").replace(/\/+$/, "");
+  if (voiceServerDown()) throw coolingDownError(VOICE_SERVER_HEALTH);
   const model = modelOverride || process.env.OLLAMA_MODEL || "freya";
-  const contextLength = Math.max(1024, Math.min(8192, Number(process.env.OLLAMA_NUM_CTX) || 4096));
-  const { response, payload } = await providerRequest(`${endpoint}/api/chat`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model,
-      stream: false,
-      keep_alive: ollamaKeepAlive(),
-      think: ollamaThinking(),
-      messages: [{ role: "system", content: system }, ...plainTurns(messages)],
-      options: { num_ctx: contextLength, num_predict: maxOutputTokens() },
-    }),
-  }, signal, ollamaTimeoutMs());
-  if (!response.ok) throw new Error(`Ollama request failed (${response.status}).`);
-  const text = payload?.message?.content;
-  if (typeof text !== "string" || !text.trim()) throw new Error("Ollama returned no text.");
-  return text.trim();
+  try {
+    const { response, payload } = await providerRequest(`${getOllamaEndpoint()}/api/chat`, {
+      method: "POST",
+      headers: ollamaHeaders(),
+      body: JSON.stringify({
+        model,
+        stream: false,
+        keep_alive: ollamaKeepAlive(),
+        think: ollamaThinking(),
+        messages: [{ role: "system", content: system }, ...plainTurns(messages)],
+        options: { num_ctx: ollamaContextLength(), num_predict: maxOutputTokens() },
+      }),
+    }, signal, ollamaTimeoutMs());
+    if (!response.ok) throw new ProviderHttpError(`Ollama request failed (${response.status}).`, response.status);
+    const text = payload?.message?.content;
+    if (typeof text !== "string" || !text.trim()) throw new Error("Ollama returned no text.");
+    return text.trim();
+  } catch (error) {
+    noteVoiceServer(error, signal);
+    throw error;
+  }
+}
+
+/**
+ * Any OpenAI-compatible server as FREYA's voice (AI_PROVIDER=server): a rented GPU running vLLM or
+ * llama.cpp, or a hosted API. VOICE_BASE_URL includes the /v1. Quick Cloudflare tunnels don't carry
+ * server-sent events, so there the reply comes in one piece (VOICE_STREAM=false does the same).
+ */
+function voiceRequest(system: string, messages: ChatMessage[], stream: boolean) {
+  const base = process.env.VOICE_BASE_URL?.trim().replace(/\/+$/, "");
+  const model = process.env.VOICE_MODEL?.trim();
+  if (!base || !model) throw new Error("VOICE_BASE_URL and VOICE_MODEL are needed for AI_PROVIDER=server.");
+  const key = process.env.VOICE_API_KEY?.trim();
+  return {
+    url: `${base}/chat/completions`,
+    init: {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...(key ? { Authorization: `Bearer ${key}` } : {}) },
+      body: JSON.stringify({ model, messages: [{ role: "system", content: system }, ...plainTurns(messages)], temperature: 0.85, max_tokens: maxOutputTokens(), ...(stream ? { stream: true } : {}) }),
+    } satisfies RequestInit,
+  };
+}
+
+function voiceCanStream() {
+  return process.env.VOICE_STREAM?.trim().toLowerCase() !== "false" && !/trycloudflare\.com/i.test(process.env.VOICE_BASE_URL ?? "");
+}
+
+async function voiceChat(system: string, messages: ChatMessage[], signal?: AbortSignal) {
+  if (isCoolingDown(VOICE_SERVER_HEALTH)) throw coolingDownError(VOICE_SERVER_HEALTH);
+  const { url, init } = voiceRequest(system, messages, false);
+  try {
+    const { response, payload } = await providerRequest(url, init, signal, VOICE_SERVER_TIMEOUT_MS);
+    if (!response.ok) throw new ProviderHttpError(`Voice server request failed (${response.status}).`, response.status, retryAfterOf(response));
+    const text = payload?.choices?.[0]?.message?.content;
+    if (typeof text !== "string" || !text.trim()) throw new Error("The voice server returned no text.");
+    markSuccess(VOICE_SERVER_HEALTH);
+    return text.trim();
+  } catch (error) {
+    if (!signal?.aborted) { markFailure(VOICE_SERVER_HEALTH, error instanceof ProviderHttpError ? error.status : undefined); noteFailure(VOICE_SERVER_HEALTH, error instanceof ProviderHttpError ? error.status : "network"); }
+    throw error;
+  }
+}
+
+async function* voiceStream(system: string, messages: ChatMessage[], signal?: AbortSignal, state?: StreamState) {
+  if (!voiceCanStream()) { yield await voiceChat(system, messages, signal); return; }
+  if (isCoolingDown(VOICE_SERVER_HEALTH)) throw coolingDownError(VOICE_SERVER_HEALTH);
+  const { url, init } = voiceRequest(system, messages, true);
+  try {
+    const { response, release } = await providerStream(url, init, signal, VOICE_SERVER_TIMEOUT_MS);
+    try {
+      if (!response.ok || !response.body) throw new ProviderHttpError(`Voice server request failed (${response.status}).`, response.status, retryAfterOf(response));
+      yield* readServerSentDeltas(
+        response.body,
+        (payload) => (payload as { choices?: { delta?: { content?: string } }[] })?.choices?.[0]?.delta?.content || "",
+        (payload) => {
+          const reason = (payload as { choices?: { finish_reason?: string }[] })?.choices?.[0]?.finish_reason;
+          if (reason && state) state.truncated = reason === "length";
+        },
+      );
+    } finally {
+      release();
+    }
+    markSuccess(VOICE_SERVER_HEALTH);
+  } catch (error) {
+    if (!signal?.aborted) { markFailure(VOICE_SERVER_HEALTH, error instanceof ProviderHttpError ? error.status : undefined); noteFailure(VOICE_SERVER_HEALTH, error instanceof ProviderHttpError ? error.status : "network"); }
+    throw error;
+  }
 }
 
 /** Set by a provider stream when the model stopped because it hit the token ceiling. */
@@ -441,23 +527,30 @@ async function* geminiStreamRaw(system: string, messages: ChatMessage[], signal?
 }
 
 async function* ollamaStream(system: string, messages: ChatMessage[], signal?: AbortSignal, state?: StreamState, modelOverride?: string) {
-  const endpoint = (process.env.OLLAMA_BASE_URL || "http://127.0.0.1:11434").replace(/\/+$/, "");
+  if (voiceServerDown()) throw coolingDownError(VOICE_SERVER_HEALTH);
   const model = modelOverride || process.env.OLLAMA_MODEL || "freya";
-  const contextLength = Math.max(1024, Math.min(8192, Number(process.env.OLLAMA_NUM_CTX) || 4096));
-  const { response, release } = await providerStream(`${endpoint}/api/chat`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model, stream: true,
-      keep_alive: ollamaKeepAlive(),
-      think: ollamaThinking(),
-      messages: [{ role: "system", content: system }, ...plainTurns(messages)],
-      options: { num_ctx: contextLength, num_predict: maxOutputTokens() },
-    }),
-  }, signal, ollamaTimeoutMs());
+  let release = () => {};
+  let response: Response;
   try {
-    if (!response.ok || !response.body) throw new Error(`Ollama request failed (${response.status}).`);
-    const reader = response.body.getReader();
+    ({ response, release } = await providerStream(`${getOllamaEndpoint()}/api/chat`, {
+      method: "POST",
+      headers: ollamaHeaders(),
+      body: JSON.stringify({
+        model, stream: true,
+        keep_alive: ollamaKeepAlive(),
+        think: ollamaThinking(),
+        messages: [{ role: "system", content: system }, ...plainTurns(messages)],
+        options: { num_ctx: ollamaContextLength(), num_predict: maxOutputTokens() },
+      }),
+    }, signal, ollamaTimeoutMs()));
+    if (!response.ok || !response.body) throw new ProviderHttpError(`Ollama request failed (${response.status}).`, response.status);
+  } catch (error) {
+    release();
+    noteVoiceServer(error, signal);
+    throw error;
+  }
+  try {
+    const reader = response.body!.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
     try {
@@ -488,8 +581,12 @@ async function* ollamaStream(system: string, messages: ChatMessage[], signal?: A
  * partial text, switching providers mid-reply would splice two different answers together.
  */
 /** What a finished stream reports back to its caller. */
-export type ProviderName = "groq" | "gemini" | "ollama";
-export type ProviderOptions = { provider?: ProviderName; fallbackEnabled?: boolean; fallbackProvider?: ProviderName; ollamaModel?: string; onProvider?: (provider: ProviderName) => void };
+export type ProviderName = "groq" | "gemini" | "ollama" | "server";
+export type ProviderOptions = {
+  provider?: ProviderName; fallbackEnabled?: boolean; fallbackProvider?: ProviderName; ollamaModel?: string; onProvider?: (provider: ProviderName) => void;
+  /** A different prompt for the fallback, when the main one holds things only the user's own model should see. */
+  fallbackSystem?: string;
+};
 
 const CLOUD_PROVIDERS = new Set<ProviderName>(["groq", "gemini"]);
 
@@ -510,11 +607,11 @@ export function resolveProviders(options: ProviderOptions = {}): { primary: Prov
     const fallback = CLOUD_PROVIDERS.has(requestedFallback) ? requestedFallback : "groq";
     return { primary: "ollama", fallback };
   }
-  if (configured !== "groq" && configured !== "gemini" && configured !== "ollama") {
-    throw new ChatInputError(`Unsupported AI_PROVIDER "${configured}". Use groq, gemini, ollama, or hybrid.`);
+  if (configured !== "groq" && configured !== "gemini" && configured !== "ollama" && configured !== "server") {
+    throw new ChatInputError(`Unsupported AI_PROVIDER "${configured}". Use groq, gemini, ollama, server, or hybrid.`);
   }
   const primary = configured as ProviderName;
-  const fallback = requestedFallback && requestedFallback !== primary && ["groq", "gemini", "ollama"].includes(requestedFallback)
+  const fallback = requestedFallback && requestedFallback !== primary && ["groq", "gemini", "ollama", "server"].includes(requestedFallback)
     ? requestedFallback
     : primary === "groq" ? "gemini" : "groq";
   return { primary, fallback };
@@ -523,6 +620,11 @@ export function resolveProviders(options: ProviderOptions = {}): { primary: Prov
 /** True when the configured mode puts the local model in front. */
 export function isHybridMode() {
   return (process.env.AI_PROVIDER || "").trim().toLowerCase() === "hybrid";
+}
+
+/** True when the voice is an OpenAI-compatible server of the user's own (AI_PROVIDER=server). */
+export function isServerMode() {
+  return (process.env.AI_PROVIDER || "").trim().toLowerCase() === "server";
 }
 export type StreamOutcome = { truncated: boolean; parts: number; provider?: ProviderName };
 
@@ -553,6 +655,7 @@ export async function* streamReply(
   const providers = {
     groq: groqStream,
     gemini: geminiStream,
+    server: voiceStream,
     ollama: (prompt: string, turns: ChatMessage[], requestSignal?: AbortSignal, state?: StreamState) =>
       ollamaStream(prompt, turns, requestSignal, state, options.ollamaModel),
   };
@@ -583,11 +686,13 @@ export async function* streamReply(
         answer += delta;
         yield delta;
       }
+      // Nothing at all, with no error: a safety filter blocked it, or a server had a bad moment.
+      if (!emitted) throw new Error("The model returned an empty response.");
     } catch (primaryError) {
       if (emitted || !fallbackEnabled || signal?.aborted) throw primaryError;
       if (outcome) outcome.provider = fallbackName;
       options.onProvider?.(fallbackName);
-      for await (const delta of secondary(system, turn, signal, state)) {
+      for await (const delta of secondary(options.fallbackSystem ?? system, turn, signal, state)) {
         emitted += delta.length;
         answer += delta;
         yield delta;
@@ -618,12 +723,13 @@ export async function generateReply(system: string, input: unknown, signal?: Abo
   const providers = {
     groq: groqChat,
     gemini: geminiChat,
+    server: voiceChat,
     ollama: (prompt: string, turns: ChatMessage[], requestSignal?: AbortSignal) =>
       ollamaChat(prompt, turns, requestSignal, options.ollamaModel),
   };
   const primary = providers[provider];
   const secondary = providers[fallbackName];
-  const providerLabels = { groq: "Groq", gemini: "Gemini", ollama: "Ollama" };
+  const providerLabels = { groq: "Groq", gemini: "Gemini", ollama: "Ollama", server: "Voice server" };
   const primaryName = providerLabels[provider];
   const secondaryName = providerLabels[fallbackName];
 
@@ -634,7 +740,7 @@ export async function generateReply(system: string, input: unknown, signal?: Abo
     if (!fallbackEnabled || signal?.aborted) throw primaryError;
     try {
       options.onProvider?.(fallbackName);
-      return await secondary(system, messages, signal);
+      return await secondary(options.fallbackSystem ?? system, messages, signal);
     } catch (fallbackError) {
       const primaryMessage = primaryError instanceof Error ? primaryError.message : String(primaryError);
       const fallbackMessage = fallbackError instanceof Error ? fallbackError.message : String(fallbackError);

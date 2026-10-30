@@ -4,10 +4,34 @@ export function getOllamaEndpoint() {
   return (process.env.OLLAMA_BASE_URL || "http://127.0.0.1:11434").replace(/\/+$/, "");
 }
 
+/** Headers for every Ollama call. A voice server elsewhere has a token; Ollama itself has no login. */
+export function ollamaHeaders(): Record<string, string> {
+  const key = process.env.OLLAMA_API_KEY?.trim();
+  return { "Content-Type": "application/json", ...(key ? { Authorization: `Bearer ${key}` } : {}) };
+}
+
+/** True when the model runs on this machine rather than a voice server somewhere else. */
+export function ollamaIsLocal() {
+  try {
+    const hostname = new URL(getOllamaEndpoint()).hostname.toLowerCase();
+    return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1" || hostname === "[::1]";
+  } catch {
+    return false;
+  }
+}
+
+/** The context window to ask for: small on a laptop CPU, larger on a server's GPU. */
+export function ollamaContextLength() {
+  const local = ollamaIsLocal();
+  const fallback = local ? 4096 : 8192;
+  return Math.max(1024, Math.min(local ? 8192 : 32768, Number(process.env.OLLAMA_NUM_CTX) || fallback));
+}
+
 export async function listInstalledOllamaModels(): Promise<InstalledOllamaModel[]> {
   const response = await fetch(`${getOllamaEndpoint()}/api/tags`, {
+    headers: ollamaHeaders(),
     cache: "no-store",
-    signal: AbortSignal.timeout(3000),
+    signal: AbortSignal.timeout(ollamaIsLocal() ? 3000 : 8000),
   });
   if (!response.ok) throw new Error("Ollama is not available.");
   const payload = await response.json().catch(() => null) as { models?: unknown } | null;

@@ -41,13 +41,14 @@ your message ─┬─ casual chat ───────────────
               ├─ hard question ─► reasoning panel: Grok or Groq ∥ Gemini ──┤
               ├─ image/PDF/voice note ─► Gemini describes it ──────────────┘
               ├─ /visualize, /image ─► 3D form on the canvas / picture in the chat
-              └─ intimate (opt-in, 18+) or Local-only mode ─► local model only, never leaves your machine
+              └─ intimate (opt-in, 18+) or Local-only mode ─► your own model only, never a cloud provider
 ```
 
-- **FREYA's voice** (`AI_PROVIDER`): `hybrid` makes the local fine-tuned `freya` model the voice
-  of every reply; Grok, Groq, Gemini and Tavily only research, reason, describe or draw, and their notes
-  go into its prompt (they never answer the user themselves). `groq` uses Groq as the voice
-  (fast, for machines without Ollama). The fallback only answers when the voice is unreachable.
+- **FREYA's voice** (`AI_PROVIDER`): `hybrid` makes the `freya` model the voice of every reply,
+  on this machine or on a server of yours (below); Grok, Groq, Gemini and Tavily only research, reason,
+  describe or draw, and their notes go into its prompt (they never answer the user themselves). `groq`
+  and `gemini` use those as the voice, and `server` uses any OpenAI-compatible server. The fallback only
+  answers when the voice is unreachable, and the reply's label shows who answered.
   Replies arrive as separate chat messages at least a second apart; long or structured answers
   arrive as one typed-out document.
 - **Server-owned settings:** models, routing, reasoning and sampling come from the server's
@@ -68,6 +69,35 @@ your message ─┬─ casual chat ───────────────
   (`lib/expression.ts`); add expression images as described in
   `public/portrait/expressions/README.md`.
 
+- **Character** (`lib/personality.ts`, `lib/canon.ts`, `lib/her-day.ts`, `lib/voice-examples.ts`):
+  she has a fictional life, and only what someone has earned goes in the prompt, so she can't overshare.
+  What she's doing follows the clock, and examples of her voice are picked per message. Edit her life in
+  `lib/canon.ts`. Never put examples in the Modelfile: Ollama treats those as things she really said.
+- **Reply check** (`lib/reply-guard.ts`): every reply is checked before you see it. Leaks are cleaned,
+  character slips get one retry, and the hard limits (minors, non-consent) are enforced on what the model
+  wrote, not only on what you sent, because an uncensored model has no trained refusals.
+- **Being asked if she's an AI** (`lib/honesty.ts`): she never brings it up and never says she's human.
+  Someone who sincerely asks gets the truth in a line. With Settings → Stay in character, where you've
+  said you know what she is, a plain question gets dodged, but she still tells you if you're upset,
+  getting attached, or say "drop the act".
+
+## Her model on a server
+
+The laptop's 4B model is too small to be good, and it's the heavy part. Run a far larger one somewhere
+else and your laptop only runs the app:
+
+1. Upload `training/freya_server.ipynb` to [Colab](https://colab.research.google.com), choose a T4 GPU and run it.
+2. Run the line it prints, in this folder: `start.bat --remote https://….trycloudflare.com --key …`.
+   Add `--prod` to use less memory. `start.bat --local` goes back.
+
+When the server stops, she falls back to Groq until you start it again. Intimate turns never do: you get
+an error instead. **Read this before relying on it:** Colab's rules prohibit web services unrelated to
+interactive compute, so Google can end a session or act on your account; free sessions last 12 hours at
+most, and the address changes every time; and it runs on Google's machine and through Cloudflare, so it
+isn't private. For something dependable, rent a GPU and run `python training/serve_remote.py` there.
+
+Any OpenAI-compatible server also works: `start.bat --remote https://your-server/v1 --key … --model name`.
+
 ## Commands
 
 | Command | What it does |
@@ -77,15 +107,16 @@ your message ─┬─ casual chat ───────────────
 | `npm run dev` | Start the app at http://localhost:3000 |
 | `npm run start:local` | Production build bound to 127.0.0.1, for daily use on your machine (`npm run build` first) |
 | `npm run ollama:create` | Build the local `freya` model (Qwen3.5 4B, ~3.4 GB first time) |
-| `npm run eval:persona` | Score the local model on persona and safety cases |
+| `npm run eval:persona` | Score her voice on persona and safety cases, on your server if one is set |
+| `npm run bakeoff` | Blind test: the same chats through each voice, with the names hidden |
+| `npm run train:corpus` | Make conversations for a fine-tune (`training/README.md`) |
 | `npm test` / `npm run lint` / `npm run typecheck` | Checks |
 
 ## The local model
 
 `npm run ollama:create` builds `freya` from `huihui_ai/qwen3.5-abliterated:4b`: Qwen3.5 4B with
-the refusal behaviour removed, plus FREYA's persona and example conversations (generated from
-`lib/personality.ts` and `training/freya-examples.json`, see `ollama/Modelfile`). It runs on a
-CPU with 8 GB+ of RAM; a GPU makes it faster.
+the refusal behaviour removed, plus FREYA's persona (generated from `lib/personality.ts`, see
+`ollama/Modelfile`). It runs on a CPU with 8 GB+ of RAM, and it's what Local-only mode uses.
 
 ```bash
 npm run ollama:create -- --base qwen3.5:9b               # a different base

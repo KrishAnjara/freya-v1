@@ -1229,6 +1229,7 @@ button.attachment-face:hover { border-color: rgba(176, 188, 186, .5); background
 .reaction-picker button:hover, .reaction-picker button:focus-visible, .reaction-picker button.selected { background: rgba(217, 209, 194, .12); }
 .message-reaction { position: absolute; right: 8px; bottom: -11px; z-index: 1; padding: 0 4px; border: 1px solid var(--line-soft); background: #0d1011; font-size: 11px; line-height: 17px; cursor: pointer; }
 .message.user .message-reaction { right: auto; left: 8px; }
+.message.user .message-reaction.her-reaction { right: 8px; left: auto; cursor: default; }
 .message-edit { width: min(420px, 100%); }
 .message-edit textarea { display: block; width: 100%; min-width: 240px; padding: 9px 11px; border: 1px solid var(--line); background: #0d1011; color: #e7e2d6; font: inherit; font-size: 13px; line-height: 1.5; resize: vertical; }
 .message-edit-actions { display: flex; justify-content: flex-end; gap: 6px; margin-top: 5px; }

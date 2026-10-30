@@ -8,11 +8,22 @@ In a Colab notebook with a GPU (Runtime > Change runtime type > T4 GPU), run ONE
     %cd /content/freya-v1
     !python training/colab_run.py --save-to /content/drive/MyDrive/freya
 
-When it finishes, download MyDrive/freya/freya-trained.gguf, put it in your laptop's
-freya-v1/training/freya-gguf/ folder, and run start.bat (Windows) or `sh start.sh`.
+It saves MyDrive/freya/freya-trained.gguf. Run it on Colab's GPU instead of your laptop with
+training/serve_remote.py --model /content/drive/MyDrive/freya/freya-trained.gguf
+Then use the blind test (npm run bakeoff) to decide whether it beats the stock 27B.
+
+First, make the conversations it trains on. This can take a couple of sessions, and picks up where it
+left off:
+
+    !python training/colab_run.py --make-corpus 2000 --save-to /content/drive/MyDrive/freya
+
+Then train on them:
+
+    !python training/colab_run.py --save-to /content/drive/MyDrive/freya
 
 Options:
-  --base NAME    base model (default: Qwen3.5 4B abliterated; fallback: the Qwen3 4B option)
+  --make-corpus N  make N conversations with the uncensored 27B, saved to --save-to, then stop
+  --base NAME    base model (default: Qwen3.5 9B abliterated; a free T4 can't train the 27B)
   --epochs N     training epochs (default 2)
   --smoke        10 training steps and no export: just checks everything loads
   --no-eval      skip the persona evaluation
@@ -32,7 +43,7 @@ import time
 import urllib.request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-QWEN35 = "huihui-ai/Huihui-Qwen3.5-4B-abliterated"
+QWEN35 = "huihui-ai/Huihui-Qwen3.5-9B-abliterated"
 QWEN3_FALLBACK = "huihui-ai/Huihui-Qwen3-4B-Instruct-2507-abliterated"
 
 
@@ -63,8 +74,10 @@ def main():
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--no-eval", action="store_true")
     parser.add_argument("--save-to", default="")
+    parser.add_argument("--make-corpus", type=int, default=0)
     args = parser.parse_args()
     started = time.time()
+    corpus = os.path.join(args.save_to, "freya-corpus.jsonl") if args.save_to else "training/data/freya-corpus.jsonl"
 
     step("1/6 GPU")
     if shutil.which("nvidia-smi") is None or subprocess.run("nvidia-smi -L", shell=True).returncode != 0:
@@ -76,10 +89,23 @@ def main():
         run("curl -fsSL https://deb.nodesource.com/setup_20.x | bash - > /dev/null && apt-get install -y -qq nodejs > /dev/null")
     run("node --version")
 
+    if args.make_corpus:
+        step("Make the conversations: the 27B writes them, on this GPU")
+        sys.path.insert(0, os.path.join(ROOT, "training"))
+        import serve_remote
+        serve_remote.install_ollama()
+        candidates = next(models for floor, models in serve_remote.MODELS_BY_VRAM if serve_remote.gpu_gigabytes() >= floor)
+        serve_remote.load_fitting(candidates, serve_remote.CONTEXTS)
+        run(f'npx -y tsx scripts/make-corpus.mjs --target {args.make_corpus} --provider ollama --out "{corpus}"')
+        print(f"\nConversations are in {corpus}. Run this again without --make-corpus to train on them.")
+        return
+
     step("3/6 Build and validate the training data")
     os.makedirs(os.path.join(ROOT, "training", "data"), exist_ok=True)
     run("npx -y tsx scripts/build-training-data.mjs")
     data = 'training/freya-train.jsonl "training/data/*.jsonl"'
+    if os.path.exists(corpus if os.path.isabs(corpus) else os.path.join(ROOT, corpus)):
+        data += f' "{corpus}"'
     run(f"{sys.executable} training/train_lora.py --data {data} --validate-only")
 
     step(f"4/6 Train on {args.base}" + (" (smoke test)" if args.smoke else ""))
@@ -130,11 +156,11 @@ def main():
     print(f"""
 Done in {minutes:.0f} min. Read the evaluation transcripts above, not just the score.
 
-On your laptop:
-  1. Download freya-trained.gguf from Google Drive (MyDrive/freya).
-  2. Put it in freya-v1/training/freya-gguf/
-  3. Run start.bat (Windows) or `sh start.sh` (macOS/Linux): it builds FREYA from that file and starts the app.
-""" + ("" if chat_format == "qwen3.5" else "  (You trained the Qwen3 fallback: start it with `start.bat --format chatml` / `sh start.sh --format chatml`.)\n"))
+To hear it, without loading it on your laptop:
+  python training/serve_remote.py --model {args.save_to or "training/freya-gguf_gguf"}/freya-trained.gguf
+Then run the line it prints on your laptop, and use the blind test (npm run bakeoff) to see whether
+it beats the stock 27B. Only keep it if it does.
+""")
 
 
 if __name__ == "__main__":

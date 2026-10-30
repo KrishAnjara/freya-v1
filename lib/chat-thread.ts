@@ -92,10 +92,18 @@ export function messagePreview(message: PreviewSource, max = 90): string {
   return message.attachments?.[0]?.name ?? "A message";
 }
 
-type ReferencingMessage = PreviewSource & { id: string; role: string; replyTo?: string; reaction?: string };
+type ReferencingMessage = PreviewSource & { id: string; role: string; replyTo?: string; reaction?: string; herReaction?: string };
 
 /** The reactions on offer. */
 export const REACTIONS = ["😂", "❤️", "👍", "😮", "😢", "🔥"] as const;
+
+/** Her own reaction, written as a hidden tag: "[[react:😂]]" answers a message without a text. */
+export function extractHerReaction(text: string): { text: string; reaction?: string } {
+  const match = text.match(/\[\[\s*react\s*:\s*([^\]\s]+)\s*\]\]/i);
+  if (!match) return { text };
+  const reaction = REACTIONS.find((known) => known === match[1] || known.replace("\uFE0F", "") === match[1].replace("\uFE0F", ""));
+  return { text: text.replace(match[0], "").trim(), ...(reaction ? { reaction } : {}) };
+}
 
 /**
  * What FREYA's model is told about a message the user replied to, so she knows what "this"
@@ -108,7 +116,7 @@ export function referenceNote(message: ReferencingMessage, all: ReferencingMessa
   const byId = new Map(all.map((item) => [item.id, item]));
   const describe = (target: ReferencingMessage) => `${target.role === "assistant" ? "something you said" : "their own earlier message"}: "${messagePreview(target, 240)}"`;
   const replied = message.replyTo ? byId.get(message.replyTo) : undefined;
-  return replied ? `(replying to ${describe(replied)})` : "";
+  return [replied ? `(replying to ${describe(replied)})` : "", message.herReaction ? `(you reacted ${message.herReaction} to this)` : ""].filter(Boolean).join(" ");
 }
 
 export type ThreadRow = {

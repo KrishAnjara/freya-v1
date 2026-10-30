@@ -12,6 +12,7 @@
 import { buildLocalSystemPrompt, buildSystemPrompt } from "@/lib/personality";
 import { normalizeCharacterProfile } from "@/lib/character-profile";
 import { ollamaThinking } from "@/lib/llm";
+import { getOllamaEndpoint, ollamaContextLength, ollamaHeaders } from "@/lib/ollama-models";
 
 /** Next can bundle the caller twice (startup and the models route), so the guard is process-wide. */
 const WARM_INTERVAL_MS = 10 * 60_000;
@@ -24,9 +25,9 @@ export async function warmOllama() {
   if (Date.now() - (warmState.__freyaWarmedAt ?? 0) < WARM_INTERVAL_MS) return;
   warmState.__freyaWarmedAt = Date.now();
 
-  const endpoint = (process.env.OLLAMA_BASE_URL || "http://127.0.0.1:11434").replace(/\/+$/, "");
+  const endpoint = getOllamaEndpoint();
   const model = process.env.OLLAMA_MODEL || "freya";
-  const contextLength = Math.max(1024, Math.min(8192, Number(process.env.OLLAMA_NUM_CTX) || 4096));
+  const contextLength = ollamaContextLength();
   // Defaults match an ordinary request, so the cached prefix covers the shared persona block.
   // Hybrid speaks with the compact persona; plain Ollama mode uses the full one.
   const system = mode === "hybrid"
@@ -37,7 +38,7 @@ export async function warmOllama() {
     const started = Date.now();
     const response = await fetch(`${endpoint}/api/chat`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: ollamaHeaders(),
       body: JSON.stringify({
         model,
         stream: false,

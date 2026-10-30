@@ -50,7 +50,7 @@ test("an explicit per-request provider overrides hybrid", () => {
 
 test("unknown providers are rejected with the full list of valid ones", () => {
   setEnv("AI_PROVIDER", "openai");
-  assert.throws(() => resolveProviders(), /groq, gemini, ollama, or hybrid/);
+  assert.throws(() => resolveProviders(), /groq, gemini, ollama, server, or hybrid/);
 });
 
 // --- research brief --------------------------------------------------------

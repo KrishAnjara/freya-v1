@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
-import { listInstalledOllamaModels, resolveOllamaModel } from "@/lib/ollama-models";
+import { isServerMode } from "@/lib/llm";
+import { listInstalledOllamaModels, ollamaIsLocal, resolveOllamaModel } from "@/lib/ollama-models";
 import { configuredReasoningMode } from "@/lib/reasoning-signal";
 import { warmOllama } from "@/lib/warm-ollama";
 
@@ -13,14 +14,16 @@ export const dynamic = "force-dynamic";
  */
 export async function GET() {
   const reasoning = configuredReasoningMode();
+  // Where private turns go, so the Settings wording stays true.
+  const voiceOnThisMachine = ollamaIsLocal() && !isServerMode();
   // Opening the app loads the local voice (when it is the voice), so the first message doesn't
   // wait minutes for a cold start. warmOllama does nothing in cloud modes.
   void warmOllama();
   try {
     const models = await listInstalledOllamaModels();
     const defaultModel = await resolveOllamaModel();
-    return NextResponse.json({ models, defaultModel, ollama: "ready", reasoning }, { headers: { "Cache-Control": "no-store" } });
+    return NextResponse.json({ models, defaultModel, ollama: "ready", reasoning, voiceOnThisMachine }, { headers: { "Cache-Control": "no-store" } });
   } catch {
-    return NextResponse.json({ models: [], defaultModel: null, ollama: "unavailable", reasoning }, { headers: { "Cache-Control": "no-store" } });
+    return NextResponse.json({ models: [], defaultModel: null, ollama: "unavailable", reasoning, voiceOnThisMachine }, { headers: { "Cache-Control": "no-store" } });
   }
 }

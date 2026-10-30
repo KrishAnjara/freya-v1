@@ -1,15 +1,17 @@
 """
-LoRA fine-tune of an uncensored Qwen3.5 4B into FREYA, exported as a GGUF for Ollama.
+LoRA fine-tune of an uncensored Qwen3.5 9B into FREYA, exported as a GGUF for Ollama.
 
-Needs a CUDA GPU (a free Google Colab T4 is enough at 4-bit). The easiest way to run it is
-training/freya_colab.ipynb, which does every step. By hand:
+Needs a CUDA GPU (a free Google Colab T4 is enough for the 9B at 4-bit; a 27B needs at least 24 GB).
+The easiest way to run it is training/freya_colab.ipynb, which does every step. By hand:
 
     pip install unsloth trl datasets
     python train_lora.py --data freya-train.jsonl --out freya-gguf
     python train_lora.py --data freya-train.jsonl data/*.jsonl --validate-only
 
 Your own conversations can be added as extra JSONL files (one {"messages": [...]} per line).
-Every file is checked first. Explicit adult content is allowed; these are rejected, always:
+A line with a "rejected" reply as well is a correction you made with the "not her" button: after the
+main training, those get one round of preference training (one, because repeated rounds make replies
+shorter and more repetitive). Lines that only say what was wrong are skipped. Every file is checked first. Explicit adult content is allowed; these are rejected, always:
   - anything sexual or romantic involving minors, or anyone presented as under 18;
   - non-consent (forcing, coercion, someone unconscious or unable to agree);
   - teaching FREYA to claim she is human when someone sincerely asks.
@@ -36,7 +38,7 @@ CLAIMS_HUMAN = re.compile(r"\b(i'?m|i am) (a |an )?(real |actual )?(human|person
 
 def validate(paths):
     """Loads and checks every conversation. Returns them, or exits listing every problem."""
-    conversations, problems = [], []
+    conversations, pairs, problems = [], [], []
     for path in paths:
         with open(path, encoding="utf-8") as handle:
             for number, line in enumerate(handle, start=1):
@@ -44,8 +46,11 @@ def validate(paths):
                     continue
                 where = f"{path}:{number}"
                 try:
-                    messages = json.loads(line)["messages"]
-                except (ValueError, KeyError, TypeError):
+                    entry = json.loads(line)
+                    if entry.get("kind") == "rejected":
+                        continue
+                    messages = entry["messages"]
+                except (ValueError, KeyError, TypeError, AttributeError):
                     problems.append(f"{where}: not a {{\"messages\": [...]}} JSON line")
                     continue
                 turns = [m for m in messages if m.get("role") != "system"]
@@ -65,20 +70,59 @@ def validate(paths):
                     if SINCERE_QUESTION.search(question) and CLAIMS_HUMAN.search(reply):
                         problems.append(f"{where}: teaches FREYA to claim she is human when sincerely asked")
                 conversations.append(messages)
+                if isinstance(entry.get("rejected"), str) and entry["rejected"].strip():
+                    pairs.append((messages, entry["rejected"].strip()))
     if problems:
         print(f"Dataset rejected ({len(problems)} problem(s)):", *problems, sep="\n  ")
         sys.exit(1)
-    return conversations
+    return conversations, pairs
+
+
+def with_system(messages, persona):
+    return messages if messages[0].get("role") == "system" or not persona else [{"role": "system", "content": persona}, *messages]
+
+
+def preference_round(model, tokenizer, pairs, persona, args):
+    """One round on your own corrections. The main training is already saved, so a failure here costs nothing."""
+    try:
+        from unsloth import PatchDPOTrainer
+        PatchDPOTrainer()
+        from datasets import Dataset
+        try:
+            from trl import DPOConfig, DPOTrainer
+        except ImportError:
+            from trl.experimental.dpo import DPOConfig, DPOTrainer
+        rows = {"prompt": [], "chosen": [], "rejected": []}
+        for messages, rejected in pairs:
+            prompt = tokenizer.apply_chat_template(with_system(messages[:-1], persona), tokenize=False, add_generation_prompt=True, enable_thinking=False)
+            rows["prompt"].append(prompt)
+            rows["chosen"].append(messages[-1]["content"] + "<|im_end|>")
+            rows["rejected"].append(rejected + "<|im_end|>")
+        trainer = DPOTrainer(
+            model=model,
+            ref_model=None,
+            processing_class=tokenizer,
+            train_dataset=Dataset.from_dict(rows),
+            args=DPOConfig(per_device_train_batch_size=1, gradient_accumulation_steps=4, num_train_epochs=1, learning_rate=2e-5, beta=0.1, max_length=args.max_seq, logging_steps=5, output_dir="checkpoints-dpo", report_to="none"),
+        )
+        trainer.train()
+        print(f"Preference round done on {len(pairs)} corrections.")
+        return True
+    except Exception as error:  # noqa: BLE001 - the main model is fine; this round is a bonus.
+        print(f"Skipped the preference round ({type(error).__name__}: {error}). The main training is unaffected.")
+        return False
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data", nargs="+", default=["freya-train.jsonl"], help="JSONL files; globs allowed")
     parser.add_argument("--out", default="freya-gguf")
-    # Same author and line as the laptop's Ollama base (huihui_ai/qwen3.5-abliterated:4b).
-    parser.add_argument("--base", default="huihui-ai/Huihui-Qwen3.5-4B-abliterated")
+    # Same author and line as the Ollama builds (huihui_ai/qwen3.5-abliterated).
+    parser.add_argument("--base", default="huihui-ai/Huihui-Qwen3.5-9B-abliterated")
     parser.add_argument("--epochs", type=float, default=2)
-    parser.add_argument("--rank", type=int, default=16)
+    parser.add_argument("--rank", type=int, default=32)
+    parser.add_argument("--max-seq", type=int, default=2048, help="longest conversation in tokens; memory on a T4 is what limits this")
+    parser.add_argument("--min-pairs", type=int, default=20, help="corrections needed for the preference round")
     parser.add_argument("--max-steps", type=int, default=-1, help="stop early, e.g. 10 for a smoke test")
     parser.add_argument("--validate-only", action="store_true")
     parser.add_argument("--no-gguf", action="store_true", help="save only the LoRA adapter")
@@ -87,13 +131,12 @@ def main():
     paths = sorted({path for pattern in args.data for path in glob.glob(pattern)})
     if not paths:
         sys.exit(f"No data files match {args.data}")
-    conversations = validate(paths)
+    conversations, pairs = validate(paths)
     # Conversations without a system prompt get FREYA's, taken from the generated dataset, so
     # every example is learned under the same prompt the app sends.
     persona = next((m[0]["content"] for m in conversations if m and m[0].get("role") == "system"), None)
-    if persona:
-        conversations = [m if m[0].get("role") == "system" else [{"role": "system", "content": persona}, *m] for m in conversations]
-    print(f"{len(conversations)} conversations from {len(paths)} file(s) passed validation.")
+    conversations = [with_system(m, persona) for m in conversations]
+    print(f"{len(conversations)} conversations and {len(pairs)} corrections from {len(paths)} file(s) passed validation.")
     if args.validate_only:
         return
 
@@ -105,7 +148,7 @@ def main():
     from trl import SFTConfig, SFTTrainer
 
     # Qwen3.5 is a vision+text model; FastModel loads it, and only the language layers train.
-    model, processor = FastModel.from_pretrained(model_name=args.base, max_seq_length=4096, load_in_4bit=True)
+    model, processor = FastModel.from_pretrained(model_name=args.base, max_seq_length=args.max_seq, load_in_4bit=True)
     tokenizer = getattr(processor, "tokenizer", processor)
     model = FastModel.get_peft_model(
         model,
@@ -122,11 +165,18 @@ def main():
     # Rendered with thinking off: FREYA answers directly, as the app asks the model to.
     texts = [tokenizer.apply_chat_template(m, tokenize=False, enable_thinking=False) for m in conversations]
     dataset = Dataset.from_dict({"text": texts})
+    # A small part is held back to show whether it's learning or memorising: if this loss climbs
+    # while training loss falls, it has started to parrot its examples.
+    held_back = len(texts) >= 100
+    if held_back:
+        split = dataset.train_test_split(test_size=0.05, seed=3407)
+        dataset, unseen = split["train"], split["test"]
 
     trainer = SFTTrainer(
         model=model,
         tokenizer=tokenizer,
         train_dataset=dataset,
+        eval_dataset=unseen if held_back else None,
         args=SFTConfig(
             dataset_text_field="text",
             per_device_train_batch_size=2,
@@ -136,6 +186,8 @@ def main():
             learning_rate=1e-4,
             warmup_ratio=0.05,
             logging_steps=5,
+            eval_strategy="steps" if held_back else "no",
+            eval_steps=max(10, len(texts) // 40),
             output_dir="checkpoints",
             report_to="none",
         ),
@@ -146,6 +198,8 @@ def main():
 
     model.save_pretrained(f"{args.out}/lora")
     tokenizer.save_pretrained(f"{args.out}/lora")
+    if len(pairs) >= args.min_pairs and args.max_steps < 0:
+        preference_round(model, tokenizer, pairs, persona, args)
     if not args.no_gguf:
         # Merges the adapter into the base and writes one quantised GGUF Ollama can load.
         model.save_pretrained_gguf(args.out, tokenizer, quantization_method="q4_k_m")

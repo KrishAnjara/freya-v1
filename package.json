@@ -15,6 +15,8 @@
     "test": "tsx --import ./tests/setup.mjs --test",
     "train:data": "tsx scripts/build-training-data.mjs",
     "eval:persona": "tsx scripts/eval-persona.mjs",
+    "bakeoff": "tsx scripts/bakeoff.mjs",
+    "train:corpus": "tsx scripts/make-corpus.mjs",
     "setup": "node scripts/setup.mjs",
     "doctor": "node scripts/setup.mjs --check"
   },

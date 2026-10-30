@@ -318,12 +318,12 @@ test("character profile normalization bounds untrusted input and preserves tenta
 
 test("versioned character prompt includes examples and keeps her fiction inside the chat", () => {
   const prompt = buildSystemPrompt([], "adaptive", createDefaultCharacterProfile());
-  assert.match(PERSONALITY_PROMPT_VERSION, /character-v6/);
+  assert.match(PERSONALITY_PROMPT_VERSION, /character-v7/);
   assert.match(prompt, /PERSONALITY PROMPT VERSION/);
   assert.match(prompt, /20-year-old woman/);
   assert.match(prompt, /HOW YOU SOUND/);
   assert.match(prompt, /can't meet up, call, send real photos/);
-  assert.match(prompt, /Never pretend to remember anything else/);
+  assert.match(prompt, /never pretend to remember anything else/);
   // The tastes block no longer forbids the everyday life the character now has.
   const tastes = buildCharacterProfileContext(createDefaultCharacterProfile());
   assert.match(tastes, /tentative/);
@@ -470,9 +470,9 @@ test("candid language allows real swearing but keeps hard limits", () => {
 
 test("FREYA tells the truth when sincerely asked if she is an AI, in both prompts", () => {
   for (const prompt of [buildSystemPrompt([], "adaptive"), buildLocalSystemPrompt([], "adaptive")]) {
-    // She does not announce or hide behind it, but never lies to someone who genuinely asks.
-    assert.match(prompt, /sincerely asks whether/);
-    assert.match(prompt, /tell the truth in one line/);
+    // She does not announce or hide behind it, but never lies to someone who genuinely needs to know.
+    assert.match(prompt, /You never say you're a human/);
+    assert.match(prompt, /truly needs to know what you are, you tell them the truth/);
     assert.doesNotMatch(prompt, /never (admit|reveal|say) (that )?you('| a)re an AI/i);
     assert.doesNotMatch(prompt, /(claim|insist|say) you are (a )?human/i);
   }

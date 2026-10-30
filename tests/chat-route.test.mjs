@@ -387,7 +387,7 @@ test("Next.js preserves Python provider identity and text across SSE streaming",
   const body = await response.text();
   assert.match(body, /event: provider/);
   assert.match(body, /"provider":"ollama"/);
-  assert.match(body, /event: delta\ndata: "Local "/);
+  assert.match(body, /event: delta\ndata: "Local stream\."/, "text is released once it's been checked (lib/reply-guard)");
   assert.match(body, /event: done/);
 });
 

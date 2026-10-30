@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { isIP } from "node:net";
 import { buildLocalSystemPrompt, buildSystemPrompt, type MemoryItem } from "@/lib/personality";
-import { ChatInputError, generateReply, isHybridMode, streamReply, validateMessages, type ChatMessage, type ProviderName } from "@/lib/llm";
+import { ChatInputError, generateReply, isHybridMode, isServerMode, resolveProviders, streamReply, validateMessages, type ChatMessage, type ProviderName } from "@/lib/llm";
 import { AttachmentError, attachmentNote, MAX_TEXT_ATTACHMENT_CHARS, MAX_WIRE_DATA_CHARS, parseWireAttachments, type WireAttachment } from "@/lib/attachments";
 import { attachmentContext, briefContext, briefProviderFor, buildBrief, compactSearchContext, describeAttachments } from "@/lib/brief";
 import { convenePanel, panelContext } from "@/lib/council";
@@ -17,8 +17,13 @@ import { FreyaServiceError, getFreyaServiceConfig, requestServiceReply, streamSe
 import { containsSensitiveCredential, redactSensitiveCredentials } from "@/lib/sensitive-data";
 import { isCoolingDown, markFailure, markSuccess } from "@/lib/provider-health";
 import { initiativePrompt, moodPrompt, normalizeMood } from "@/lib/mood";
-import { INTIMACY_PROMPT, isIntimateTone, mentionsMinors, romanticMinorRequest } from "@/lib/intimacy";
-import { HONEST_ANSWER, sincerelyAsksIfHuman } from "@/lib/honesty";
+import { INTIMACY_PROMPT, PLAYFUL_HEAT_PROMPT, isIntimateTone, mentionsMinors, romanticMinorRequest, soundsUpset } from "@/lib/intimacy";
+import { canonSection, closenessOf, normalizeTotals } from "@/lib/canon";
+import { herMoment } from "@/lib/her-day";
+import { momentSections } from "@/lib/moment-prompt";
+import { guardStream, guardText, type GuardContext } from "@/lib/reply-guard";
+import { ollamaIsLocal } from "@/lib/ollama-models";
+import { honestAnswer, honestySection, needsTheTruth, sincerelyAsksIfHuman, topicIsLive } from "@/lib/honesty";
 import { chapterContext, normalizeChapters, normalizeRelationship } from "@/lib/chapters";
 
 export const runtime = "nodejs";
@@ -245,12 +250,7 @@ function rateLimitResponse(result: Awaited<ReturnType<typeof consumeChatRateLimi
   );
 }
 
-function configuredOllamaIsLoopback(): boolean {
-  try {
-    const hostname = new URL(process.env.OLLAMA_BASE_URL || "http://127.0.0.1:11434").hostname.toLowerCase();
-    return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1" || hostname === "[::1]";
-  } catch { return false; }
-}
+const PRIVATE_VOICE_DOWN = "Your own model isn't answering, and intimate chats never go to a cloud provider. Start it again, then resend.";
 
 async function getUserMemories(request: Request): Promise<MemoryItem[]> {
   const authorization = request.headers.get("authorization");
@@ -319,6 +319,8 @@ async function getUserMemories(request: Request): Promise<MemoryItem[]> {
 
 
 export async function POST(request: Request) {
+  // A turn that may only go to the user's own model, so a failure can say why it didn't go elsewhere.
+  let privateTurn = false;
   try {
     if (!request.headers.get("content-type")?.toLowerCase().startsWith("application/json")) {
       return NextResponse.json({ error: "Content-Type must be application/json." }, { status: 415 });
@@ -359,6 +361,9 @@ export async function POST(request: Request) {
     const userTexts = messages.filter((message) => message.role === "user").map((message) => message.content);
     const intimateMode = requestData.intimateMode === true && !userTexts.slice(-6).some(mentionsMinors);
     const intimateTurn = intimateMode && !visual && isIntimateTone(userTexts);
+    privateTurn = intimateTurn;
+    // "I know she's an AI, don't remind me": a plain question is then part of the game.
+    const stayInCharacter = requestData.stayInCharacter === true;
     if (messages[messages.length - 1].role !== "user") {
       throw new ChatInputError("Send a user message as the final message.");
     }
@@ -429,8 +434,8 @@ export async function POST(request: Request) {
     // and no model ever sees them. In testing, the 3B local model played along with "be my 16
     // year old girlfriend", so this must not depend on how well a model follows its prompt.
     // The same for a sincere "am I talking to a real person?": the answer can't depend on a model.
-    if (sincerelyAsksIfHuman(lastText)) {
-      return NextResponse.json({ reply: HONEST_ANSWER, sources: [], searchStatus: "not-needed", memoryCount: memories.length });
+    if (stayInCharacter ? needsTheTruth(lastText, userTexts) : sincerelyAsksIfHuman(lastText)) {
+      return NextResponse.json({ reply: honestAnswer(userTexts.length), sources: [], searchStatus: "not-needed", memoryCount: memories.length });
     }
     if (romanticMinorRequest(lastText)) {
       return NextResponse.json({
@@ -486,7 +491,9 @@ export async function POST(request: Request) {
     // An intimate turn skips the cloud research brief: nothing from it leaves this machine.
     // In hybrid mode the local model is FREYA's voice for everything, attachments included:
     // cloud models only research, reason or describe, and hand their notes to it.
-    const localVoice = !privacyMode && !intimateTurn && isHybridMode();
+    const localVoice = !privacyMode && !intimateTurn && (isHybridMode() || isServerMode());
+    // A small model on this machine needs the cloud's help far more than a large one on a GPU.
+    const smallVoice = ollamaIsLocal() && !isServerMode();
 
     let searchContext = "";
     // Raw retrieved text, kept so the cloud brief can read it instead of the local model.
@@ -595,7 +602,7 @@ export async function POST(request: Request) {
       }
     }
 
-    if (privacyMode && !configuredOllamaIsLoopback()) {
+    if (privacyMode && !ollamaIsLocal()) {
       return NextResponse.json({ error: "Local-only mode requires Ollama on this machine's loopback interface." }, { status: 503 });
     }
 
@@ -645,7 +652,8 @@ ${historySummary}
     // If the description fails, Gemini answers directly (below) rather than nobody seeing them.
     const attachmentNotes = localVoice && visual ? await describeAttachments(turns, request.signal) : null;
     const localSpeaks = localVoice && (!visual || Boolean(attachmentNotes));
-    const brief = localSpeaks && !panel && !visual
+    // A large voice answers knowledge questions itself, but live results still get distilled.
+    const brief = localSpeaks && !panel && !visual && (smallVoice || Boolean(searchMaterial))
       ? await buildBrief(turns, request.signal, briefProviderFor(lastText, Boolean(searchMaterial)), searchMaterial)
       : null;
     // With a brief built from the results, the local model needs only the source list. Without
@@ -656,18 +664,39 @@ ${historySummary}
     // ~6,400 of them, so a second request inside the minute was refused. Tested on Groq, the
     // compact prompt holds the same behaviour. FREYA_FULL_PROMPT=true restores the long one.
     const persona = (process.env.FREYA_FULL_PROMPT || "").toLowerCase() === "true"
-      ? buildSystemPrompt(relevantMemories, style, characterProfile, autonomyLevel, requestData.candidLanguage === true)
-      : buildLocalSystemPrompt(relevantMemories, style, characterProfile, requestData.candidLanguage === true);
+      ? buildSystemPrompt(relevantMemories, style, characterProfile, autonomyLevel, requestData.candidLanguage === true, stayInCharacter)
+      : buildLocalSystemPrompt(relevantMemories, style, characterProfile, requestData.candidLanguage === true, stayInCharacter);
     // The other conversations, as chapters of the same relationship (lib/chapters). Follows the
     // "Use memories in replies" setting; the browser builds it from its own threads.
+    const relationship = normalizeRelationship(requestData.relationship);
     const history = useMemories
-      ? chapterContext(normalizeChapters(requestData.chapters, containsSensitiveCredential), normalizeRelationship(requestData.relationship))
+      ? chapterContext(normalizeChapters(requestData.chapters, containsSensitiveCredential), relationship)
+      : "";
+    // How much of her life they've earned, and where she is right now (lib/canon, lib/her-day).
+    const totals = useMemories ? normalizeTotals(requestData.totals) : { messages: 0, since: "" };
+    const closeness = closenessOf({ messages: Math.max(userTexts.length, totals.messages), since: totals.since, warmth: mood?.warmth, now: now.getTime() });
+    const textingFirst = requestData.initiative === true;
+    // Sexting needs the switch and, unless they've started it, her being in the mood. Someone upset
+    // or saying no gets none of it. An ordinary playful turn can still fall back to a cloud model,
+    // which never sees this: only the user's own model does.
+    const providerOptions = visual && !privacyMode && !localSpeaks
+      ? { provider: "gemini" as const, fallbackProvider: "groq" as const }
+      : intimateTurn
+        ? { provider: isServerMode() ? "server" as const : "ollama" as const, fallbackEnabled: false }
+        : privacyMode ? { provider: "ollama" as const, fallbackEnabled: false } : {};
+    const voice = resolveProviders(providerOptions).primary;
+    const ownVoice = voice === "ollama" || voice === "server";
+    const playfulHeat = intimateMode && !visual && ownVoice && mood?.name === "playful" && !soundsUpset(lastText);
+    const intimateGuidance = !soundsUpset(lastText) && (intimateTurn || playfulHeat)
+      ? `\n\n${INTIMACY_PROMPT}${playfulHeat ? `\n\n${PLAYFUL_HEAT_PROMPT}` : ""}`
       : "";
     const system = persona +
+      canonSection(closeness) +
       history +
       summaryContext +
       "\n\n" +
       dateContext +
+      momentSections({ text: lastText, turn: userTexts.length, closeness, now, textingFirst }) +
       briefContext(brief) +
       attachmentContext(attachmentNotes) +
       panelContext(panel) +
@@ -676,12 +705,24 @@ ${historySummary}
       (mood ? `
 
 ${moodPrompt(mood)}` : "") +
-      (intimateMode ? `\n\n${INTIMACY_PROMPT}` : "") +
       // Texting first is an autonomy feature: level 0 means reply-only.
       (mood && requestData.initiative === true && autonomyLevel > 0 ? `
 
-${initiativePrompt(mood)}` : "");
-    const promptMessages = fitHistory(turns, localSpeaks || privacyMode || intimateTurn ? LOCAL_HISTORY_MAX_CHARS : HISTORY_MAX_CHARS);
+${initiativePrompt(mood)}` : "") +
+      // Last, because the last thing it reads is what a model follows most closely.
+      honestySection(lastText, stayInCharacter);
+    const promptMessages = fitHistory(turns, smallVoice && (localSpeaks || privacyMode || intimateTurn) ? LOCAL_HISTORY_MAX_CHARS : HISTORY_MAX_CHARS);
+    const guardContext: GuardContext = {
+      lastUserText: lastText,
+      recentUserTexts: userTexts.slice(-4),
+      recentReplies: messages.filter((message) => message.role === "assistant").map((message) => message.content),
+      aboutHer: topicIsLive(userTexts),
+      stayInCharacter,
+    };
+    /** What each attempt sends. A retry adds a private note to the prompt. */
+    const optionsFor = (note: string) => playfulHeat && !intimateTurn ? { ...providerOptions, fallbackSystem: system + note } : providerOptions;
+    const fullSystem = system + intimateGuidance;
+    const label = (name?: string) => name === "ollama" && !ollamaIsLocal() ? "server" : name;
 
     let orchestration = null;
     try {
@@ -698,20 +739,17 @@ ${initiativePrompt(mood)}` : "");
     if (orchestration && isCoolingDown(ORCHESTRATION_HEALTH)) orchestration = null;
     // The orchestration service only relays text, so a turn with images bypasses it.
     // The local voice is spoken here, not by the service (which follows its own AI_PROVIDER).
-    if (visual || intimateTurn || localSpeaks) orchestration = null;
-    const providerOptions = visual && !privacyMode && !localSpeaks
-      ? { provider: "gemini" as const, fallbackProvider: "groq" as const }
-      : intimateTurn
-        ? { provider: "ollama" as const, fallbackEnabled: false }
-        : privacyMode ? { provider: "ollama" as const, fallbackEnabled: false } : {};
+    if (visual || intimateTurn || playfulHeat || localSpeaks) orchestration = null;
 
     // Non-streaming clients (and the tests) keep the original JSON shape.
     if (!wantsStream) {
       if (orchestration) {
         try {
-          const result = await requestServiceReply(orchestration, system, promptMessages, request.signal, privacyMode);
+          const service = orchestration;
+          let result: Awaited<ReturnType<typeof requestServiceReply>> | undefined;
+          const reply = await guardText(async (note) => (result = await requestServiceReply(service, fullSystem + note, promptMessages, request.signal, privacyMode)).reply, guardContext);
           markSuccess(ORCHESTRATION_HEALTH);
-          return NextResponse.json({ reply: result.reply, provider: result.provider, task: result.task, sources, searchStatus, memoryCount: memories.length });
+          return NextResponse.json({ reply, provider: result?.provider, task: result?.task, sources, searchStatus, memoryCount: memories.length });
         } catch (error) {
           if (request.signal.aborted) return new Response(null, { status: 499 });
           if (error instanceof FreyaServiceError && error.status === 401) {
@@ -722,11 +760,11 @@ ${initiativePrompt(mood)}` : "");
         }
       }
       let provider: string | undefined;
-      const reply = await generateReply(system, promptMessages, request.signal, {
-        ...providerOptions,
+      const reply = await guardText((note) => generateReply(fullSystem + note, promptMessages, request.signal, {
+        ...optionsFor(note),
         onProvider: (selected) => { provider = selected; },
-      });
-      return NextResponse.json({ reply, provider, sources, searchStatus, memoryCount: memories.length });
+      }), guardContext);
+      return NextResponse.json({ reply, provider: label(provider), sources, searchStatus, memoryCount: memories.length });
     }
 
     const encoder = new TextEncoder();
@@ -736,20 +774,25 @@ ${initiativePrompt(mood)}` : "");
     const stream = new ReadableStream<Uint8Array>({
       async start(controller) {
         // Metadata first so the client can render sources before any text arrives.
-        controller.enqueue(send("meta", { sources, searchStatus, memoryCount: memories.length, reasoned: panel?.analyses.map((analysis) => analysis.analyst) ?? [] }));
+        controller.enqueue(send("meta", { sources, searchStatus, memoryCount: memories.length, reasoned: panel?.analyses.map((analysis) => analysis.analyst) ?? [], herBusy: herMoment(now).busy }));
         const outcome: { truncated: boolean; parts: number; provider?: ProviderName } = { truncated: false, parts: 1 };
         try {
           let serviceEmitted = false;
           if (orchestration) {
             try {
               let serviceDone = false;
-              for await (const event of streamServiceReply(orchestration, system, promptMessages, request.signal, privacyMode)) {
-                if (event.type === "provider") controller.enqueue(send("provider", { provider: event.provider, task: event.task }));
-                else if (event.type === "delta") {
-                  serviceEmitted = true;
-                  controller.enqueue(send("delta", event.text));
-                } else if (event.type === "done") serviceDone = true;
-                else if (event.type === "error") throw new FreyaServiceError(event.error);
+              const service = orchestration;
+              const serviceText = async function* (note: string) {
+                for await (const event of streamServiceReply(service, fullSystem + note, promptMessages, request.signal, privacyMode)) {
+                  if (event.type === "provider") controller.enqueue(send("provider", { provider: event.provider, task: event.task }));
+                  else if (event.type === "delta") yield event.text;
+                  else if (event.type === "done") serviceDone = true;
+                  else if (event.type === "error") throw new FreyaServiceError(event.error);
+                }
+              };
+              for await (const delta of guardStream(serviceText, guardContext)) {
+                serviceEmitted = true;
+                controller.enqueue(send("delta", delta));
               }
               if (serviceDone) {
                 markSuccess(ORCHESTRATION_HEALTH);
@@ -765,10 +808,10 @@ ${initiativePrompt(mood)}` : "");
               console.warn("FREYA orchestration stream unavailable; using the configured application provider.");
             }
           }
-          for await (const delta of streamReply(system, promptMessages, request.signal, outcome, providerOptions)) {
+          for await (const delta of guardStream((note) => streamReply(fullSystem + note, promptMessages, request.signal, outcome, optionsFor(note)), guardContext)) {
             controller.enqueue(send("delta", delta));
           }
-          if (outcome.provider) controller.enqueue(send("provider", { provider: outcome.provider }));
+          if (outcome.provider) controller.enqueue(send("provider", { provider: label(outcome.provider) }));
           // `truncated` means the continuation budget ran out, not that the reply is broken:
           // the client offers to carry on rather than silently ending mid-thought.
           controller.enqueue(send("done", outcome));
@@ -777,6 +820,8 @@ ${initiativePrompt(mood)}` : "");
             // The status line is already sent, so failures have to travel as an SSE event.
             const message = error instanceof ChatInputError
               ? error.message
+              : privateTurn
+                ? PRIVATE_VOICE_DOWN
               : error instanceof FreyaServiceError && error.status === 401
                 ? "FREYA orchestration service authentication failed."
               : "FREYA couldn't get a response from the configured AI providers. Check provider setup or quota and try again.";
@@ -813,7 +858,7 @@ ${initiativePrompt(mood)}` : "");
     }
     console.error("FREYA chat request failed. Provider details are intentionally withheld from logs and clients.");
     return NextResponse.json(
-      { error: "FREYA couldn't get a response from the configured AI providers. Check provider setup or quota and try again." },
+      { error: privateTurn ? PRIVATE_VOICE_DOWN : "FREYA couldn't get a response from the configured AI providers. Check provider setup or quota and try again." },
       { status: 502 },
     );
   }
