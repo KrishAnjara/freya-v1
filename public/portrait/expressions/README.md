@@ -10,7 +10,7 @@ base portrait (`app/static/freya.png`), so you can add these one at a time.
 | File | Expression | When it shows | Description |
 |---|---|---|---|
 | `neutral.png` | neutral | content, bored or tired moods | Optional: the base portrait already is neutral. Add only if you regenerate the set and want an exact match. Relaxed face, lips closed. |
-| `smile.png` | smile | playful mood, "lol", her own jokes | Soft closed-mouth smile, cheeks slightly lifted, eyes a little narrowed. |
+| `smile.png` | smile | "lol", "smile for me", her own jokes | Soft closed-mouth smile, cheeks slightly lifted, eyes a little narrowed. |
 | `smile-2.png` | smile (variation) | alternates with `smile.png` | A bigger smile, closed mouth or a hint of teeth, eyes crinkled. |
 | `laugh.png` | laugh | "lmao", "😂", her own laughing | Genuine laugh: mouth open, teeth showing, eyes crinkled, cheeks high. |
 | `curious.png` | curious | curious or restless moods (the default) | One eyebrow slightly raised, eyes engaged, lips closed, a faint smile. |
@@ -19,7 +19,7 @@ base portrait (`app/static/freya.png`), so you can add these one at a time.
 | `sad.png` | sad | melancholy or sulking moods, bad news | Inner brows raised, mouth corners down, eyes slightly lowered, lips closed. |
 | `affectionate.png` | affectionate | warm mood, "love you", "miss you" | Warm, soft smile, softened eyes, relaxed brows, lips closed. |
 | `thinking.png` | thinking | while she works out a reply | Eyes looking up and to her right (the viewer's left), lips pressed together, slight brow knit. |
-| `thinking-2.png` | thinking (variation) | alternates with `thinking.png` | Eyes looking aside, mouth slightly pursed to one side. |
+| `thinking-2.png` | playful | playful mood only, including while she thinks | Side-eye glance with a one-sided smirk. Not used for ordinary thinking. |
 | `confused.png` | confused | "???", "what do you mean" | One brow furrowed, the other raised, slight frown, lips closed. |
 | `confident.png` | confident | irritated mood (cool, composed) | Subtle one-sided smirk, steady direct gaze, lips closed. |
 

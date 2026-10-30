@@ -5,7 +5,7 @@ A personality-first AI chat app: Freya, a fictional 20-year-old character played
 through hard questions with a panel of cloud models, and can run on a local model on your own
 machine.
 
-Built with Next.js 15 and React 19. Cloud models: Groq, Gemini, Tavily search. Local model:
+Built with Next.js 15 and React 19. Cloud models: Grok, Groq, Gemini, Tavily search. Local model:
 Ollama (Qwen3.5 4B). Optional: Supabase (cross-device memory), a Python orchestration service.
 
 ## Quick start (Windows, macOS, Linux)
@@ -37,15 +37,15 @@ The start script never downloads a model. If you've fine-tuned one on Colab (bel
 ```
 your message ─┬─ casual chat ──────────────────────────────────────────► FREYA's voice ─► messages
               ├─ live facts, dates, news ─► Tavily search ─► Gemini brief ─┤
-              ├─ logic, code, explanations ─► Groq brief ──────────────────┤
-              ├─ hard question ─► reasoning panel: Groq reasoning ∥ Gemini ┤
+              ├─ logic, code, explanations ─► Grok/Groq brief ─────────────┤
+              ├─ hard question ─► reasoning panel: Grok or Groq ∥ Gemini ──┤
               ├─ image/PDF/voice note ─► Gemini describes it ──────────────┘
               ├─ /visualize, /image ─► 3D form on the canvas / picture in the chat
               └─ intimate (opt-in, 18+) or Local-only mode ─► local model only, never leaves your machine
 ```
 
 - **FREYA's voice** (`AI_PROVIDER`): `hybrid` makes the local fine-tuned `freya` model the voice
-  of every reply; Groq, Gemini and Tavily only research, reason, describe or draw, and their notes
+  of every reply; Grok, Groq, Gemini and Tavily only research, reason, describe or draw, and their notes
   go into its prompt (they never answer the user themselves). `groq` uses Groq as the voice
   (fast, for machines without Ollama). The fallback only answers when the voice is unreachable.
   Replies arrive as separate chat messages at least a second apart; long or structured answers

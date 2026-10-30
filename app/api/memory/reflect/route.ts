@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { guardRequest, hostedProvidersAllowed } from "@/lib/route-guard";
 import { generateJson } from "@/lib/structured";
 import { containsSensitiveCredential, redactSensitiveCredentials } from "@/lib/sensitive-data";
-import { MAX_REFLECTION_TURNS, REFLECTION_PROMPT, reflectionInput, validateChanges, type KnownMemory, type ReflectionTurn } from "@/lib/memory-reflection";
+import { MAX_REFLECTION_TURNS, REFLECTION_PROMPT, reflectionInput, validateChanges, validateRecap, type KnownMemory, type ReflectionTurn } from "@/lib/memory-reflection";
 
 /**
  * Automatic memory: reads a stretch of conversation and proposes changes to the user's notes.
@@ -49,14 +49,15 @@ export async function POST(request: Request) {
   const today = typeof body.today === "string" && /^\d{4}-\d{2}-\d{2}/.test(body.today) ? body.today.slice(0, 10) : new Date().toISOString().slice(0, 10);
 
   try {
-    const result = await generateJson(REFLECTION_PROMPT, reflectionInput(turns, memories, forgotten, today), {
+    const result = await generateJson(REFLECTION_PROMPT, reflectionInput(turns, memories, forgotten, today, typeof body.recap === "string" ? redactSensitiveCredentials(body.recap).slice(0, 400) : ""), {
       groqModel: process.env.FREYA_MEMORY_MODEL?.trim() || "openai/gpt-oss-120b",
       maxTokens: 1500,
       temperature: 0.1,
       signal: request.signal,
     });
     const changes = validateChanges(result.data, memories, forgotten, containsSensitiveCredential);
-    return NextResponse.json({ ...changes, provider: result.provider }, { headers: { "Cache-Control": "no-store" } });
+    const recap = validateRecap((result.data as { recap?: unknown } | null)?.recap, forgotten, containsSensitiveCredential);
+    return NextResponse.json({ ...changes, recap, provider: result.provider }, { headers: { "Cache-Control": "no-store" } });
   } catch (error) {
     if (request.signal.aborted) return new NextResponse(null, { status: 499 });
     console.warn(`FREYA memory reflection failed (${error instanceof Error ? error.message.slice(0, 40) : "error"}).`);

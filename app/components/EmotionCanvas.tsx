@@ -3,13 +3,18 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import * as THREE from "three";
 import type { MoodName, MoodState } from "@/lib/mood";
+import { initialFormPose, moveForm, rotateForm, stepFormPose, zoomForm } from "@/lib/form-pose";
 import { FORM_POINTS, type PointCloud } from "@/lib/visualize";
 import { state as telemetry, subscribeTelemetry, telemetryRevision } from "@/lib/stream-telemetry";
 
 export type CanvasSignal = "idle" | "composing" | "generating" | "responding" | "interrupted";
 
-/** A /visualize result shown on the canvas: loading (particles swirl), ready, or failed. */
-export type CanvasForm = { key: string; title: string; status: "loading" | "ready" | "error"; cloud?: PointCloud };
+/**
+ * A /visualize result shown on the canvas: loading (particles swirl), refining (the form stays
+ * up while its change is made), ready, or failed. The key is the form's identity:
+ * a refinement keeps it, so the form morphs in place, keeping the way it has been turned.
+ */
+export type CanvasForm = { key: string; title: string; status: "loading" | "refining" | "ready" | "error"; cloud?: PointCloud };
 const FORM_COUNT = FORM_POINTS;
 
 /**
@@ -74,10 +79,12 @@ attribute vec3 tint;
 varying vec3 vTint;
 varying float vFade;
 uniform float pixelRatio;
+uniform float focus;
 void main() {
   vTint = tint;
   vec4 mv = modelViewMatrix * vec4(position, 1.0);
-  vFade = clamp(1.0 - (-mv.z - 3.0) / 7.0, 0.15, 1.0);
+  // Depth fade around the body itself, so it stays bright wherever the camera has to sit.
+  vFade = clamp(1.0 - (-mv.z - focus + 0.6) / 4.0, 0.35, 1.0);
   gl_PointSize = size * pixelRatio * (240.0 / -mv.z);
   gl_Position = projectionMatrix * mv;
 }`;
@@ -95,7 +102,7 @@ void main() {
 
 function pointMaterial(pixelRatio: number) {
   return new THREE.ShaderMaterial({
-    uniforms: { pixelRatio: { value: pixelRatio } },
+    uniforms: { pixelRatio: { value: pixelRatio }, focus: { value: 4.5 } },
     vertexShader: POINT_VERTEX,
     fragmentShader: POINT_FRAGMENT,
     transparent: true,
@@ -168,6 +175,13 @@ export default function EmotionCanvas({ signal, mood, form = null, onClearForm }
     let formTargets: Float32Array = swirl;
     let formKey = "";
     let formStatus = "";
+    let formCloud: PointCloud | undefined;
+    let poseKey = "";
+    const pose = initialFormPose();
+    // Fingers or the mouse currently on the form, by pointer id.
+    const pointers = new Map<number, { x: number; y: number }>();
+    let pinchDistance = 0;
+    let lastDragAt = 0;
     let formLevel = 0;
     const formGeometry = new THREE.BufferGeometry();
     formGeometry.setAttribute("position", new THREE.BufferAttribute(formPositions, 3));
@@ -202,8 +216,13 @@ export default function EmotionCanvas({ signal, mood, form = null, onClearForm }
       renderer.setSize(width, height, false);
       camera.aspect = width / height;
       const halfAngle = Math.tan((camera.fov * Math.PI) / 360);
-      camera.position.z = Math.min(11, Math.max(4.4, 3.1 / (halfAngle * camera.aspect), 1.75 / halfAngle));
+      // Framed by the smaller side, so the body fills the canvas whatever shape the layout gives
+      // it. Framing by width pushed the camera back on anything less than very wide, leaving it
+      // small and faded.
+      camera.position.z = 1.75 / (halfAngle * Math.min(1, camera.aspect));
       camera.updateProjectionMatrix();
+      presenceMaterial.uniforms.focus.value = camera.position.z;
+      formMaterial.uniforms.focus.value = camera.position.z;
     };
     const resizeObserver = new ResizeObserver(resize);
     resizeObserver.observe(host);
@@ -211,14 +230,71 @@ export default function EmotionCanvas({ signal, mood, form = null, onClearForm }
 
     let pointerX = 0;
     let pointerY = 0;
+    // Only a visualised form can be handled; FREYA's own presence just notices the pointer.
+    const formInHand = () => {
+      const status = formRef.current?.status;
+      return status === "ready" || status === "refining";
+    };
+    const worldPerPixel = () => {
+      const bounds = host.getBoundingClientRect();
+      return (2 * camera.position.z * Math.tan((camera.fov * Math.PI) / 360)) / Math.max(1, bounds.height);
+    };
     const onMove = (event: PointerEvent) => {
       const bounds = host.getBoundingClientRect();
       pointerX = ((event.clientX - bounds.left) / bounds.width) * 2 - 1;
       pointerY = -((event.clientY - bounds.top) / bounds.height) * 2 + 1;
+      const held = pointers.get(event.pointerId);
+      if (!held) return;
+      const deltaX = event.clientX - held.x;
+      const deltaY = event.clientY - held.y;
+      pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      if (pointers.size >= 2) {
+        // Two fingers: pinch to zoom, and move together to drag.
+        const [first, second] = [...pointers.values()];
+        const distance = Math.hypot(first.x - second.x, first.y - second.y);
+        if (pinchDistance > 0) zoomForm(pose, distance / pinchDistance);
+        pinchDistance = distance;
+        moveForm(pose, (deltaX / 2) * worldPerPixel(), (-deltaY / 2) * worldPerPixel());
+      } else if (event.shiftKey || (event.buttons & 2)) {
+        moveForm(pose, deltaX * worldPerPixel(), -deltaY * worldPerPixel());
+      } else {
+        const now = performance.now();
+        rotateForm(pose, deltaX, deltaY, (now - lastDragAt) / 1000);
+        lastDragAt = now;
+      }
     };
     const onLeave = () => { pointerX = 0; pointerY = 0; };
+    const onDown = (event: PointerEvent) => {
+      if (!formInHand()) return;
+      host.setPointerCapture(event.pointerId);
+      pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      pinchDistance = 0;
+      lastDragAt = performance.now();
+      pose.spin = 0;
+      host.classList.add("is-holding");
+    };
+    const onUp = (event: PointerEvent) => {
+      pointers.delete(event.pointerId);
+      pinchDistance = 0;
+      if (!pointers.size) {
+        host.classList.remove("is-holding");
+        // A hand that stopped before letting go isn't a flick.
+        if (performance.now() - lastDragAt > 90) pose.spin = 0;
+      }
+    };
+    const onWheel = (event: WheelEvent) => {
+      if (!formInHand()) return;
+      event.preventDefault();
+      zoomForm(pose, Math.exp(-event.deltaY * 0.0012));
+    };
+    const onMenu = (event: Event) => { if (formInHand()) event.preventDefault(); };
     host.addEventListener("pointermove", onMove);
     host.addEventListener("pointerleave", onLeave);
+    host.addEventListener("pointerdown", onDown);
+    host.addEventListener("pointerup", onUp);
+    host.addEventListener("pointercancel", onUp);
+    host.addEventListener("wheel", onWheel, { passive: false });
+    host.addEventListener("contextmenu", onMenu);
 
     let animation = 0;
     let lastFrame = 0;
@@ -262,7 +338,7 @@ export default function EmotionCanvas({ signal, mood, form = null, onClearForm }
       }
       ripples = ripples.filter((ripple) => t - ripple.start < 1.6).slice(-12);
 
-      // Form on stage: the presence steps back into a dim halo.
+      // Form on stage: the presence all but disappears, so the form reads cleanly.
       const shownForm = formRef.current;
       const formActive = Boolean(shownForm && shownForm.status !== "error");
       formLevel += ((formActive ? 1 : 0) - formLevel) * (1 - Math.exp(-dt * 2.4));
@@ -273,7 +349,7 @@ export default function EmotionCanvas({ signal, mood, form = null, onClearForm }
       const warmTint: [number, number, number] = [0.98, 0.7, 0.5];
       const coolTint: [number, number, number] = [0.55, 0.64, 0.76];
       const temperature = style.tint.map((value, channel) => value * 0.6 + (coolTint[channel] + (warmTint[channel] - coolTint[channel]) * warmth) * 0.4);
-      const brightness = (0.6 + 0.55 * style.glow + 0.35 * listen + 0.25 * think) * (1 - 0.7 * formLevel);
+      const brightness = (0.75 + 0.6 * style.glow + 0.35 * listen + 0.25 * think) * (1 - 0.96 * formLevel);
       for (let index = 0; index < PRESENCE; index += 1) {
         const offset = index * 3;
         const dx = directions[offset];
@@ -304,45 +380,63 @@ export default function EmotionCanvas({ signal, mood, form = null, onClearForm }
         presencePositions[offset + 2] = z * r;
         const shade = brightness * (0.75 + 0.25 * Math.sin(index * 3.7 + t * 0.7)) + lit * 0.5;
         for (let channel = 0; channel < 3; channel += 1) presenceTint[offset + channel] = temperature[channel] * shade;
-        presenceSize[index] = 0.058 + lit * 0.06 + listen * 0.01;
+        presenceSize[index] = 0.068 + lit * 0.06 + listen * 0.01;
       }
       presenceGeometry.getAttribute("position").needsUpdate = true;
       presenceGeometry.getAttribute("tint").needsUpdate = true;
       presenceGeometry.getAttribute("size").needsUpdate = true;
 
       // Visualised form: swirl while composing, settle into the shape, fade out when cleared.
+      // A different form starts from a clean pose; a refinement of this one keeps it.
+      if ((shownForm?.key ?? "") !== poseKey) {
+        poseKey = shownForm?.key ?? "";
+        Object.assign(pose, initialFormPose());
+        pointers.clear();
+        host.classList.remove("is-holding");
+        formCloud = undefined;
+      }
       const nextKey = shownForm ? `${shownForm.key}:${shownForm.status}` : "";
       if (nextKey !== formKey) {
         formKey = nextKey;
         formStatus = shownForm?.status ?? "";
-        if (shownForm?.status === "ready" && shownForm.cloud) {
-          formTargets = shownForm.cloud.positions;
-          formColors.set(shownForm.cloud.colors.subarray(0, FORM_COUNT * 3));
-        } else if (shownForm?.status === "loading") {
+        if (shownForm?.status === "loading") {
           formTargets = swirl;
           formColors.fill(0.78);
+          formCloud = undefined;
         }
+      }
+      if (shownForm?.cloud && shownForm.cloud !== formCloud) {
+        formCloud = shownForm.cloud;
+        formTargets = formCloud.positions;
+        formColors.set(formCloud.colors.subarray(0, FORM_COUNT * 3));
       }
       // Hidden, not just black: colourless points still write alpha, leaving a dark outline.
       formGroup.visible = formLevel > 0.002;
       if (formGroup.visible) {
         const settle = 1 - Math.exp(-dt * (formStatus === "loading" ? 1.4 : 2.2));
-        const glow = formStatus === "loading" ? 0.35 + 0.15 * Math.sin(t * 3) : 0.95;
+        const glow = formStatus === "loading" ? 0.35 + 0.15 * Math.sin(t * 3) : formStatus === "refining" ? 0.75 + 0.2 * Math.sin(t * 3) : 0.95;
         for (let index = 0; index < FORM_COUNT * 3; index += 1) {
           formPositions[index] += (formTargets[index] - formPositions[index]) * settle;
           formTint[index] = formColors[index] * glow * formLevel;
         }
         formSize.fill((formStatus === "loading" ? 0.03 : 0.038) * Math.min(1, formLevel * 1.4));
-        formGroup.rotation.y += dt * (formStatus === "loading" ? 1.2 : 0.32);
+        if (formStatus === "loading") pose.yaw += dt * 1.2;
+        stepFormPose(pose, dt, pointers.size > 0);
+        formGroup.rotation.set(pose.pitch, pose.yaw, 0);
+        formGroup.position.set(pose.panX, pose.panY, 0);
+        formGroup.scale.setScalar(pose.zoom);
         formGeometry.getAttribute("position").needsUpdate = true;
         formGeometry.getAttribute("tint").needsUpdate = true;
         formGeometry.getAttribute("size").needsUpdate = true;
       }
 
       // Attention: the body turns towards the pointer; curious moods lean in further.
+      // With a form on stage the pointer belongs to the form, so the scene itself holds still.
       const reach = 0.35 + style.lean;
-      rig.rotation.y += (pointerX * reach + Math.sin(t * 0.11) * 0.12 - rig.rotation.y) * (1 - Math.exp(-dt * 1.4));
-      rig.rotation.x += (pointerY * -0.2 - listen * 0.18 + Math.sin(t * 0.09) * 0.05 - rig.rotation.x) * (1 - Math.exp(-dt * 1.4));
+      const noticeX = formInHand() ? 0 : pointerX;
+      const noticeY = formInHand() ? 0 : pointerY;
+      rig.rotation.y += (noticeX * reach + Math.sin(t * 0.11) * 0.12 * (1 - formLevel) - rig.rotation.y) * (1 - Math.exp(-dt * 1.4));
+      rig.rotation.x += (noticeY * -0.2 - listen * 0.18 + Math.sin(t * 0.09) * 0.05 * (1 - formLevel) - rig.rotation.x) * (1 - Math.exp(-dt * 1.4));
       renderer.render(scene, camera);
     };
 
@@ -367,6 +461,11 @@ export default function EmotionCanvas({ signal, mood, form = null, onClearForm }
       document.removeEventListener("visibilitychange", sync);
       host.removeEventListener("pointermove", onMove);
       host.removeEventListener("pointerleave", onLeave);
+      host.removeEventListener("pointerdown", onDown);
+      host.removeEventListener("pointerup", onUp);
+      host.removeEventListener("pointercancel", onUp);
+      host.removeEventListener("wheel", onWheel);
+      host.removeEventListener("contextmenu", onMenu);
       for (const geometry of [presenceGeometry, formGeometry]) geometry.dispose();
       for (const material of [presenceMaterial, formMaterial]) material.dispose();
       renderer.dispose();
@@ -380,11 +479,11 @@ export default function EmotionCanvas({ signal, mood, form = null, onClearForm }
     aria-label={`FREYA's presence: ${ACTIVITY_LABEL[activity].toLowerCase()}, mood ${mood.name}. Shows the app's simulated mood and conversation state.`}
   >
     {fallback && <div className="canvas-fallback" aria-hidden="true"><span>✧</span><i/><i/><i/><i/><i/><i/><i/><i/></div>}
-    <div ref={hostRef} className="three-host" aria-hidden="true" />
+    <div ref={hostRef} className={`three-host ${form?.status === "ready" || form?.status === "refining" ? "form-in-hand" : ""}`} aria-hidden="true" />
     <div className="presence-status" aria-hidden="true">{ACTIVITY_LABEL[activity]} · {mood.name.toUpperCase()}</div>
     {form && <div className={`form-caption form-${form.status}`} role="status" aria-live="polite">
-      <span>{form.status === "loading" ? `Composing · ${form.title}…` : form.status === "error" ? `Couldn't visualise ${form.title}` : `${form.title}${fallback ? " · 3D view needs motion enabled" : ""}`}</span>
-      {form.status !== "loading" && onClearForm && <button type="button" onClick={onClearForm} aria-label="Clear the visualisation">Clear</button>}
+      <span>{form.status === "loading" ? `Composing · ${form.title}…` : form.status === "refining" ? `Refining · ${form.title}…` : form.status === "error" ? `Couldn't visualise ${form.title}` : `${form.title}${fallback ? " · 3D view needs motion enabled" : ""}`}</span>
+      {form.status !== "loading" && form.status !== "refining" && onClearForm && <button type="button" onClick={onClearForm} aria-label="Clear the visualisation">Clear</button>}
     </div>}
   </section>;
 }

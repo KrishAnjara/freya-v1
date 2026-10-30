@@ -22,7 +22,8 @@ import { addCuriosity, extractMoodTag, initialMood, loadMood, reactToMessage, re
 import { contentWords } from "@/lib/stream-telemetry";
 import { isReasoningMode, needsReasoning, type ReasoningMode } from "@/lib/reasoning-signal";
 import LongformMessage from "@/app/components/LongformMessage";
-import { describeThread, modelHistory, requestTurns, turnOf } from "@/lib/chat-thread";
+import { describeThread, messagePreview, modelHistory, REACTIONS, referenceNote, requestTurns, turnOf } from "@/lib/chat-thread";
+import { chaptersForPrompt, relationshipFacts } from "@/lib/chapters";
 import { notificationPreview, notificationState, requestNotifications, showNotification } from "@/lib/notifications";
 import { playChime } from "@/lib/chime";
 import VoiceControls, { type SpeechRequest } from "@/app/components/VoiceControls";
@@ -38,7 +39,7 @@ import { sanitizeSvg } from "@/lib/svg-safety";
 import { captureExplicitPreference } from "@/lib/memory-capture";
 import { deriveReflectionCandidates } from "@/lib/reflection";
 import { summarizeOlderMessages } from "@/lib/conversation-summary";
-import { applyChangesLocally, describeChanges, LOCAL_MEMORY_LIMIT, loadForgotten, normalizeStoredMemories, reflectionWindow, rememberForgotten, type StoredMemory } from "@/lib/memory-client";
+import { applyChangesLocally, describeChanges, LOCAL_MEMORY_LIMIT, loadForgotten, MEMORY_RESET_KEY, normalizeStoredMemories, reflectionWindow, rememberForgotten, type StoredMemory } from "@/lib/memory-client";
 import type { MemoryChanges } from "@/lib/memory-reflection";
 import { containsSensitiveCredential } from "@/lib/sensitive-data";
 
@@ -83,8 +84,12 @@ type Message = {
   initiative?: boolean;
   /** Cloud analysts who worked this reply through first (lib/council). */
   reasoned?: string[];
-  /** A composer command (/visualize, /image, or "draw me…"): shown as a chip, never sent as chat. */
-  command?: "visualize" | "image";
+  /** A composer command (/visualize, /image, "draw me…") or a tagged refinement: shown as a chip, never sent as chat. */
+  command?: "visualize" | "refine" | "image";
+  /** The user's reaction to this message. */
+  reaction?: string;
+  /** The user changed this message after sending it. */
+  edited?: boolean;
   /** A /visualize result; its spec can be put back on the canvas. */
   visualization?: VisualizationInfo & { spec?: VisualSpec };
   /** A picture FREYA made: a generated image (in attachments) or an SVG drawing. */
@@ -95,6 +100,8 @@ type Conversation = {
   id: string; title: string; messages: Message[]; createdAt: string; updatedAt: string; unread?: number;
   /** How many of its messages automatic memory has already read, so nothing is mined twice. */
   reflectedCount?: number;
+  /** Automatic memory's short note on this conversation, for FREYA to recall from other chats. */
+  recap?: string;
 };
 /** One reply FREYA owes: to `targetId`, or a continuation of `turn` when `extraPrompt` is set. */
 type ReplyJob = { conversationId: string; targetId: string; turn?: string; extraPrompt?: string; initiative?: boolean };
@@ -196,8 +203,10 @@ function sanitizeMessage(message: Message): Message {
     ...(message.failed === true ? { failed: true } : {}),
     ...(message.longform === true ? { longform: true } : {}),
     ...(message.initiative === true ? { initiative: true } : {}),
-    ...(Array.isArray(message.reasoned) && message.reasoned.every((name) => name === "groq" || name === "gemini") && message.reasoned.length ? { reasoned: message.reasoned } : {}),
-    ...(message.command === "visualize" || message.command === "image" ? { command: message.command } : {}),
+    ...(Array.isArray(message.reasoned) && message.reasoned.every((name) => name === "grok" || name === "groq" || name === "gemini") && message.reasoned.length ? { reasoned: message.reasoned } : {}),
+    ...(message.command === "visualize" || message.command === "refine" || message.command === "image" ? { command: message.command } : {}),
+    ...((REACTIONS as readonly string[]).includes(message.reaction ?? "") ? { reaction: message.reaction } : {}),
+    ...(message.edited === true ? { edited: true } : {}),
     ...sanitizeMedia(message),
   };
 }
@@ -229,7 +238,7 @@ function sanitizeMedia(message: Message): Pick<Message, "visualization" | "pictu
  */
 function forModel(message: Message): Message {
   if (message.voice) return { ...message, content: describeVoice(message.voice, message.content) };
-  if (message.command) return { ...message, content: `(asked for ${message.command === "image" ? "a picture" : "a 3D visualisation on the canvas"}: ${message.content})`, attachments: [] };
+  if (message.command) return { ...message, content: `(${message.command === "refine" ? "asked to change the visualisation on the canvas" : message.command === "image" ? "asked for a picture" : "asked for a 3D visualisation on the canvas"}: ${message.content})`, attachments: [] };
   if (message.visualization) return { ...message, content: message.visualization.status === "ready" ? `(showed them a 3D particle visualisation on the canvas: ${message.visualization.title})` : "(a visualisation didn't work)", attachments: [] };
   if (message.picture) {
     const picture = message.picture;
@@ -282,8 +291,18 @@ function normalizeConversations(value: unknown): Conversation[] {
       updatedAt: typeof candidate.updatedAt === "string" ? candidate.updatedAt : createdAt,
       ...(unread ? { unread } : {}),
       ...(typeof candidate.reflectedCount === "number" && candidate.reflectedCount > 0 ? { reflectedCount: Math.min(messages.length, Math.floor(candidate.reflectedCount)) } : {}),
+      ...(typeof candidate.recap === "string" && candidate.recap.trim() ? { recap: candidate.recap.slice(0, 320) } : {}),
     }];
   }).slice(0, MAX_CONVERSATIONS);
+}
+
+/** What FREYA gets to know about the user's other conversations when replying in this one. */
+function continuityOf(conversations: Conversation[], conversationId: string, latestText: string) {
+  let resetAt = "";
+  try { resetAt = localStorage.getItem(MEMORY_RESET_KEY) ?? ""; } catch { /* no reset recorded */ }
+  const chapters = chaptersForPrompt(conversations, conversationId, { recentTexts: [latestText], forgotten: loadForgotten(), resetAt });
+  const relationship = relationshipFacts(conversations, conversationId, resetAt);
+  return relationship ? { chapters, relationship } : {};
 }
 
 /** Notes kept in this browser (no account, or cloud memory not configured). */
@@ -405,6 +424,15 @@ export default function Home() {
   const [serverSetup, setServerSetup] = useState<{ localModel: string | null; localReady: boolean; reasoning: ReasoningMode }>({ localModel: null, localReady: false, reasoning: "auto" });
   const [autoMemory, setAutoMemory] = useState(true);
   const [candidLanguage, setCandidLanguage] = useState(true);
+  /** The message the next one replies to. */
+  const [replyingToId, setReplyingToId] = useState("");
+  /** The visualisation card whose Refine button was used: the next message changes that form. */
+  const [refiningId, setRefiningId] = useState("");
+  /** The message whose reaction picker is open, the one being edited, and the one just copied. */
+  const [reactingToId, setReactingToId] = useState("");
+  const [editingId, setEditingId] = useState("");
+  const [editText, setEditText] = useState("");
+  const [copiedId, setCopiedId] = useState("");
   /** The /visualize form on the canvas, if any. */
   const [canvasForm, setCanvasForm] = useState<CanvasForm | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -984,6 +1012,10 @@ export default function Home() {
     if (conversationId === activeId) { setDrawerOpen((open) => (window.innerWidth <= 700 ? false : open)); return; }
     // Leaving a conversation is a natural point to remember what mattered in it.
     reflectRef.current(activeIdRef.current);
+    setReplyingToId("");
+    setRefiningId("");
+    setEditingId("");
+    setReactingToId("");
     // A reply in progress keeps going in the background and lands in its own conversation.
     activeIdRef.current = conversationId;
     setActiveId(conversationId);
@@ -1105,9 +1137,9 @@ export default function Home() {
     return true;
   }
 
-  function markReflected(conversationId: string, upTo: number) {
+  function markReflected(conversationId: string, upTo: number, recap?: string) {
     setConversations((previous) => previous.map((conversation) => conversation.id === conversationId
-      ? { ...conversation, reflectedCount: Math.max(conversation.reflectedCount ?? 0, upTo) }
+      ? { ...conversation, reflectedCount: Math.max(conversation.reflectedCount ?? 0, upTo), ...(recap ? { recap } : {}) }
       : conversation));
   }
 
@@ -1133,13 +1165,14 @@ export default function Home() {
           memories: memoriesRef.current.map((memory) => ({ id: memory.id, text: memory.text })),
           forgotten: loadForgotten(),
           today: localDate(),
+          ...(conversation.recap ? { recap: conversation.recap } : {}),
         }),
       });
       if (!response.ok) return;
-      const changes = await response.json() as MemoryChanges;
+      const changes = await response.json() as MemoryChanges & { recap?: unknown };
       if (!Array.isArray(changes.add) || !Array.isArray(changes.update) || !Array.isArray(changes.remove)) return;
       if (!await applyMemoryChanges(changes)) return;
-      markReflected(conversationId, window.upTo);
+      markReflected(conversationId, window.upTo, typeof changes.recap === "string" ? changes.recap : undefined);
       const line = describeChanges(changes);
       if (line) notify(line);
     } catch (error) {
@@ -1349,7 +1382,11 @@ export default function Home() {
 
     // FREYA reads a voice note as its transcript, and knows it was spoken.
     // FREYA reads a voice note as what was measured and said, and hears it on Gemini.
-    const history = modelHistory(visible.map(forModel));
+    const history = modelHistory(visible.map((message) => {
+      const note = referenceNote(message, visible);
+      const described = forModel(message);
+      return note ? { ...described, content: `${note}\n\n${described.content}` } : described;
+    }));
     if (job.extraPrompt) history.push({ role: "user", content: job.extraPrompt, attachments: [] });
     if (initiative) history.push({ role: "user", content: "[No new message from them. You are choosing to text first.]", attachments: [] });
     const { turns, older, sent } = requestTurns(history);
@@ -1477,6 +1514,8 @@ export default function Home() {
           messages: turns.map((entry, index) => index === turns.length - 1 && attachments.length ? { ...entry, attachments } : entry),
           useMemories: memoryEnabled,
           // Without an account the notes live here, so they travel with the request.
+          // Her other conversations, as chapters of the same relationship (lib/chapters).
+          ...(memoryEnabled ? continuityOf(conversationsRef.current, job.conversationId, latestUserText) : {}),
           ...(memoryEnabled && !memoryInCloud && memories.length ? { localMemories: memories.map((memory) => ({ id: memory.id, text: memory.text, createdAt: memory.createdAt })) } : {}),
           style,
           characterProfile,
@@ -1592,16 +1631,21 @@ export default function Home() {
       if (command) {
         if (!command.argument) { notify(command.name === "visualize" ? "Say what to show, e.g. /visualize a red fox." : "Say what to draw, e.g. /image a lighthouse at night.", "error"); return; }
         setInput("");
+        setReplyingToId("");
+        setRefiningId("");
         if (command.name === "visualize") void runVisualize(command.argument);
         else void runPicture(command.argument, command.argument);
         return;
       }
+      // With a canvas tagged, what they type is the change to make to it.
+      if (refineTarget) { setInput(""); setRefiningId(""); void runRefine(text, refineTarget); return; }
       const subject = pictureRequest(text);
-      if (subject) { setInput(""); void runPicture(subject, text); return; }
+      if (subject) { setInput(""); setReplyingToId(""); void runPicture(subject, text); return; }
     }
     const message: Message = {
       id: id(), role: "user", content: text, at: new Date().toISOString(),
       ...(pendingFiles.length ? { attachments: pendingFiles } : {}),
+      ...(replyingToId ? { replyTo: replyingToId } : {}),
       // Shown as "queued" until FREYA finishes what she is sending now.
       ...(workerRef.current ? { queued: true } : {}),
     };
@@ -1609,6 +1653,7 @@ export default function Home() {
     feel(text);
     react(reactionTo(text));
     setInput("");
+    setReplyingToId("");
     setPendingFiles([]);
     setTruncatedReplyId("");
     shouldAutoScroll.current = true;
@@ -1639,12 +1684,10 @@ export default function Home() {
   async function runVisualize(description: string) {
     if (privacyMode) { notify("Visualisations need a cloud model, so they're paused in Local-only mode.", "error"); return; }
     const title = description.length > 40 ? `${description.slice(0, 40).trimEnd()}…` : description;
-    // The latest form in this conversation, so "make it bigger" can change it.
-    const current = [...messages].reverse().find((message) => message.visualization?.status === "ready" && message.visualization.spec)?.visualization?.spec;
     const { conversationId, cardId } = postCommand("visualize", description, { visualization: { title, status: "loading" } });
     setCanvasForm({ key: cardId, title, status: "loading" });
     try {
-      const response = await fetch("/api/visualize", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ description, ...(current ? { current } : {}) }) });
+      const response = await fetch("/api/visualize", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ description }) });
       const payload = await response.json().catch(() => ({}));
       const spec = validateSpec(payload?.spec);
       if (!response.ok || !spec) throw new Error(typeof payload?.error === "string" ? payload.error : "The visualisation couldn't be made.");
@@ -1664,8 +1707,42 @@ export default function Home() {
     const spec = message.visualization?.spec;
     if (!spec) return;
     try {
-      setCanvasForm({ key: `${message.id}:${Date.now()}`, title: spec.title, status: "ready", cloud: await cloudForSpec(spec, FORM_POINTS) });
+      setCanvasForm({ key: message.id, title: spec.title, status: "ready", cloud: await cloudForSpec(spec, FORM_POINTS) });
     } catch (error) { notify(reportError("visualize", error, "That form couldn't be shown."), "error"); }
+  }
+
+  /**
+   * Changes the one form whose Refine button was used, and no other. It updates that form and its
+   * card in place: no new card or canvas is made, and a failure leaves it as it was.
+   */
+  async function runRefine(change: string, target: Message) {
+    if (privacyMode) { notify("Visualisations need a cloud model, so they're paused in Local-only mode.", "error"); return; }
+    const before = target.visualization;
+    if (!before?.spec) return;
+    const conversationId = activeIdRef.current;
+    const at = new Date().toISOString();
+    updateActiveMessages((previous) => [...previous, { id: id(), role: "user", content: change, at, command: "refine", replyTo: target.id }]);
+    shouldAutoScroll.current = true;
+    atBottomRef.current = true;
+    setAtBottom(true);
+    patchMessage(conversationId, target.id, { visualization: { ...before, status: "loading", refining: true } });
+    const restore = async () => ({ key: target.id, title: before.title, status: "ready" as const, cloud: canvasForm?.key === target.id && canvasForm.cloud ? canvasForm.cloud : await cloudForSpec(before.spec!, FORM_POINTS) });
+    const shown = await restore();
+    setCanvasForm({ ...shown, status: "refining" });
+    try {
+      const response = await fetch("/api/visualize", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ description: change, mode: "refine", current: before.spec }) });
+      const payload = await response.json().catch(() => ({}));
+      const spec = validateSpec(payload?.spec);
+      if (!response.ok || !spec) throw new Error(typeof payload?.error === "string" ? payload.error : "That change couldn't be made.");
+      const cloud = await cloudForSpec(spec, FORM_POINTS);
+      patchMessage(conversationId, target.id, { visualization: { title: spec.title, status: "ready", spec } });
+      setCanvasForm((current) => current?.key === target.id ? { key: target.id, title: spec.title, status: "ready", cloud } : current);
+    } catch (error) {
+      patchMessage(conversationId, target.id, { visualization: before });
+      setCanvasForm((current) => current?.key === target.id ? shown : current);
+      notify(cardError(error, "That change couldn't be made."), "error");
+      reportError("visualize", error);
+    }
   }
 
   /** A picture in the chat: generated when an image model is available, else a labelled SVG. */
@@ -1701,9 +1778,64 @@ export default function Home() {
     }
   }
 
-  function startRefine(kind: "visualize" | "image") {
-    setInput(`/${kind} `);
+  function startRefine() {
+    setInput("/image ");
     window.requestAnimationFrame(() => composerRef.current?.focus());
+  }
+
+  /** The card's Refine button: tags that form in the composer and puts it on the canvas. */
+  function tagForRefine(message: Message) {
+    setRefiningId((current) => current === message.id ? "" : message.id);
+    setReplyingToId("");
+    if (canvasForm?.key !== message.id) void showVisualization(message);
+    window.requestAnimationFrame(() => composerRef.current?.focus());
+  }
+
+  function startReply(messageId: string) {
+    setReplyingToId(messageId);
+    setRefiningId("");
+    window.requestAnimationFrame(() => composerRef.current?.focus());
+  }
+
+  /** One reaction per message: picking the same one again takes it off. */
+  function toggleReaction(message: Message, reaction: string) {
+    const next = message.reaction === reaction ? undefined : reaction;
+    patchConversation(activeIdRef.current, (messages) => messages.map((item) => item.id === message.id ? { ...item, reaction: next } : item));
+    setReactingToId("");
+    // A reaction is part of how the conversation is going, so it can move her mood like a message.
+    if (next) feel(next);
+  }
+
+  async function copyMessage(message: Message) {
+    try {
+      await navigator.clipboard.writeText(message.content || message.picture?.prompt || message.visualization?.title || "");
+      setCopiedId(message.id);
+      window.setTimeout(() => setCopiedId((current) => current === message.id ? "" : current), 1200);
+    } catch (error) { notify(reportError("copy", error, "That couldn't be copied."), "error"); }
+  }
+
+  /**
+   * Saves an edit. Editing the latest thing they said means they want an answer to the new text,
+   * so her reply to it is replaced. Editing further back only corrects the record: what followed
+   * stays, and she reads the corrected version from now on.
+   */
+  function saveEdit(message: Message) {
+    const text = editText.trim();
+    setEditingId("");
+    if (!text || text === message.content) return;
+    const conversationId = activeIdRef.current;
+    const index = messages.findIndex((item) => item.id === message.id);
+    const isLatest = !messages.slice(index + 1).some((item) => item.role === "user" && !item.command);
+    patchConversation(conversationId, (current) => current
+      .filter((item, position) => !isLatest || position <= index || item.role !== "assistant" || item.visualization || item.picture)
+      .map((item) => item.id === message.id ? { ...item, content: text, edited: true, failed: false } : item));
+    // Automatic memory reads it again, and a chat named after this message follows the change.
+    setConversations((previous) => previous.map((conversation) => conversation.id === conversationId ? {
+      ...conversation,
+      reflectedCount: Math.min(conversation.reflectedCount ?? 0, index),
+      title: conversation.title === deriveTitle(message.content) ? deriveTitle(text) : conversation.title,
+    } : conversation));
+    if (isLatest) enqueueReply({ conversationId, targetId: message.id });
   }
 
   async function addFiles(list: FileList | File[] | null) {
@@ -1838,6 +1970,7 @@ export default function Home() {
   }
 
   function handleKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if (event.key === "Escape" && (replyingToId || refiningId)) { event.preventDefault(); setReplyingToId(""); setRefiningId(""); return; }
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
       void sendMessage();
@@ -1877,7 +2010,12 @@ export default function Home() {
     }
     rememberForgotten(memories.map((memory) => memory.text));
     // Everything said so far counts as read, so nothing deleted comes back from an old chat.
-    setConversations((previous) => previous.map((conversation) => ({ ...conversation, reflectedCount: conversation.messages.length })));
+    setConversations((previous) => previous.map((conversation) => {
+      const kept: Conversation = { ...conversation, reflectedCount: conversation.messages.length };
+      delete kept.recap;
+      return kept;
+    }));
+    try { localStorage.setItem(MEMORY_RESET_KEY, new Date().toISOString()); } catch { /* the notes themselves are gone */ }
     notify(`All memories were deleted from ${location}.`);
   }
 
@@ -1895,7 +2033,11 @@ export default function Home() {
   const replyingHere = replyingIn.includes(activeId);
   // Her face: a fresh reaction first, then thinking while she works out a reply, then her mood.
   const portraitExpression = chooseExpression(mood.name, typingIn === activeId && Boolean(typingIn), reaction);
-  const awaitingReply = hydrated && !replyingHere && messages.at(-1)?.role === "user";
+  // A command chip (a refinement with no card after it) isn't waiting for an answer.
+  const awaitingReply = hydrated && !replyingHere && messages.at(-1)?.role === "user" && !messages.at(-1)?.command;
+  const replyTarget = replyingToId ? messages.find((message) => message.id === replyingToId) : undefined;
+  const refineTarget = refiningId ? messages.find((message) => message.id === refiningId && message.visualization?.spec) : undefined;
+
 
   return (
     <main className={`app-shell ${drawerOpen ? "drawer-open" : ""}`}>
@@ -1963,7 +2105,7 @@ export default function Home() {
               <div className="settings-group-title">PRIVACY &amp; DATA</div>
               <div className="dialog-setting-row"><div><strong>Local-only privacy</strong><span>Every reply comes from the local model on this computer{serverSetup.localModel ? ` (${serverSetup.localModel}${serverSetup.localReady ? "" : ", not running"})` : " (none found)"}; nothing is sent to cloud models. Automatic memory, images and visualisations pause.</span></div><label className="toggle-row"><span className="sr-only">Local-only privacy</span><input type="checkbox" checked={privacyMode} onChange={(event) => setPrivacyMode(event.target.checked)} /></label></div>
               <div className="dialog-setting-row"><div><strong>Export</strong><span>Save the open conversation as a Markdown file.</span></div><button type="button" className="dialog-inline-button" onClick={exportActiveConversation}>Export chat</button></div>
-              <div className="shortcut-list"><div className="side-label">KEYBOARD</div><dl><dt>Ctrl / ⌘ + K</dt><dd>New conversation</dd><dt>Ctrl / ⌘ + B</dt><dd>Toggle conversation list</dd><dt>/</dt><dd>Focus the composer</dd><dt>Shift + Enter</dt><dd>New line</dd><dt>/visualize …</dt><dd>Show something on the canvas</dd><dt>/image …</dt><dd>Make a picture in the chat</dd></dl></div>
+              <div className="shortcut-list"><div className="side-label">KEYBOARD</div><dl><dt>Ctrl / ⌘ + K</dt><dd>New conversation</dd><dt>Ctrl / ⌘ + B</dt><dd>Toggle conversation list</dd><dt>/</dt><dd>Focus the composer</dd><dt>Shift + Enter</dt><dd>New line</dd><dt>/visualize …</dt><dd>Make a new form on the canvas</dd><dt>/image …</dt><dd>Make a picture in the chat</dd></dl></div>
             </div>}
           </div>
         </section>
@@ -2009,6 +2151,16 @@ export default function Home() {
               <AttachmentList items={pendingFiles} onRemove={removePendingFile}/>
               {preparingFiles > 0 && <span className="attachment-preparing">PREPARING {preparingFiles}…</span>}
             </div>}
+            {refineTarget && <span className="composer-reply">
+              <span aria-hidden="true">◇</span>
+              <span className="composer-reply-text">Refining {refineTarget.visualization?.title}</span>
+              <button type="button" onClick={() => setRefiningId("")} aria-label="Stop refining">×</button>
+            </span>}
+            {replyTarget && <span className="composer-reply">
+              <span aria-hidden="true">↩</span>
+              <span className="composer-reply-text" title={messagePreview(replyTarget, 200)}>{messagePreview(replyTarget, 60)}</span>
+              <button type="button" onClick={() => setReplyingToId("")} aria-label="Cancel reply">×</button>
+            </span>}
             {commandHints(input).length > 0 && <div className="command-hints" role="listbox" aria-label="Commands">
               {commandHints(input).map((command) => <button type="button" role="option" aria-selected={false} key={command.name} onClick={() => { setInput(`/${command.name} `); composerRef.current?.focus(); }}>
                 <b>/{command.name}</b><span>{command.hint}</span>
@@ -2022,7 +2174,7 @@ export default function Home() {
               <textarea
                 ref={composerRef} value={input} onChange={(event) => setInput(event.target.value)} onKeyDown={handleKeyDown}
                 onPaste={(event) => { const files = Array.from(event.clipboardData.files); if (files.length) { event.preventDefault(); void addFiles(files); } }}
-                placeholder={replyingHere ? "Keep talking — she'll get to it…" : "Say something interesting…"} rows={1} maxLength={MAX_INPUT_CHARS} aria-label="Message FREYA"
+                placeholder={refineTarget ? `What should change about ${refineTarget.visualization?.title}?` : replyingHere ? "Keep talking — she'll get to it…" : "Say something interesting…"} rows={1} maxLength={MAX_INPUT_CHARS} aria-label="Message FREYA"
               />
               {/* No stop button: FREYA finishes what she is saying, and anything sent meanwhile
                   is answered right after. */}
@@ -2049,17 +2201,30 @@ export default function Home() {
                       {info.startsRun && <div className="message-heading">
                         <div className="message-name">{message.role === "assistant" ? "FREYA" : "YOU"}</div>
                       </div>}
-                      {info.tag && <button type="button" className="reply-tag" onClick={() => jumpToMessage(info.tag!.id)} title="Show the message this replies to">
-                        <span className="reply-tag-label">↳ REPLYING TO</span>
-                        <span className="reply-tag-text">{info.tag.content.replace(/\s+/g, " ").slice(0, 90) || info.tag.attachments?.[0]?.name || "your message"}</span>
-                      </button>}
+                      <div className="message-line">
+                      <div className={`message-main ${message.reaction ? "has-reaction" : ""}`}>
                       {message.attachments && message.attachments.length > 0 && <AttachmentList items={message.attachments} onUnavailable={() => notify("That file is no longer stored in this browser.", "error")}/>}
-                      {message.command
-                        ? <div className="command-chip"><span className="command-chip-label">{message.command === "image" ? "PICTURE" : "VISUALIZE"}</span><span>{message.content}</span></div>
+                      {editingId === message.id
+                        ? <div className="message-edit">
+                          <textarea
+                            autoFocus value={editText} rows={Math.min(8, editText.split("\n").length + 1)} maxLength={MAX_INPUT_CHARS} aria-label="Edit your message"
+                            onChange={(event) => setEditText(event.target.value)}
+                            onKeyDown={(event) => {
+                              if (event.key === "Escape") { event.preventDefault(); setEditingId(""); }
+                              if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); saveEdit(message); }
+                            }}
+                          />
+                          <div className="message-edit-actions">
+                            <button type="button" onClick={() => setEditingId("")}>Cancel</button>
+                            <button type="button" onClick={() => saveEdit(message)}>Save</button>
+                          </div>
+                        </div>
+                        : message.command
+                        ? <div className="command-chip"><span className="command-chip-label">{message.command === "image" ? "PICTURE" : message.command === "refine" ? "REFINE" : "VISUALIZE"}</span><span>{message.content}</span></div>
                         : message.visualization
-                        ? <VisualizationCard info={message.visualization} onShow={() => void showVisualization(message)} onRefine={() => startRefine("visualize")}/>
+                        ? <VisualizationCard info={message.visualization} onShow={() => void showVisualization(message)} onRefine={message.visualization.spec?.technique === "portrait" ? undefined : () => tagForRefine(message)} tagged={refiningId === message.id}/>
                         : message.picture
-                        ? <PictureCard info={message.picture} onRefine={() => startRefine("image")}/>
+                        ? <PictureCard info={message.picture} onRefine={startRefine}/>
                         : message.longform
                         ? <LongformMessage content={message.content} streaming={Boolean(message.streaming)}/>
                         : message.voice || message.spoken
@@ -2067,9 +2232,25 @@ export default function Home() {
                         : message.content && (message.role === "assistant"
                           ? <div className="assistant-body"><MarkdownContent content={message.content}/></div>
                           : <div className="message-text">{message.content}</div>)}
+                      {message.reaction && <button type="button" className="message-reaction" onClick={() => toggleReaction(message, message.reaction!)} aria-label={`Remove your ${message.reaction} reaction`} title="Remove reaction">{message.reaction}</button>}
+                      </div>
+                      {info.tag && <button type="button" className="reply-side" onClick={() => jumpToMessage(info.tag!.id)} title={`Replying to: ${messagePreview(info.tag as Message, 200)}`} aria-label={`Replying to: ${messagePreview(info.tag as Message, 200)}`}>
+                        <span aria-hidden="true">↩</span><span className="reply-side-text">{(info.tag as Message).visualization?.title ?? messagePreview(info.tag as Message, 40)}</span>
+                      </button>}
+                      {!message.streaming && !message.command && editingId !== message.id && <div className="message-tools">
+                        <button type="button" onClick={() => startReply(message.id)} aria-label={`Reply to: ${messagePreview(message, 60)}`} title="Reply">↩</button>
+                        <button type="button" onClick={() => setReactingToId((current) => current === message.id ? "" : message.id)} aria-expanded={reactingToId === message.id} aria-label={`React to: ${messagePreview(message, 60)}`} title="React">☺</button>
+                        <button type="button" onClick={() => void copyMessage(message)} aria-label={`Copy: ${messagePreview(message, 60)}`} title={copiedId === message.id ? "Copied" : "Copy"}>{copiedId === message.id ? "✓" : "⧉"}</button>
+                        {message.role === "user" && !message.voice && !message.visualization && !message.picture && <button type="button" onClick={() => { if (replyingHere) { notify("Wait for her to finish replying, then edit it.", "info"); return; } setEditText(message.content); setEditingId(message.id); setReactingToId(""); }} aria-label={`Edit: ${messagePreview(message, 60)}`} title="Edit">✎</button>}
+                        {reactingToId === message.id && <div className="reaction-picker" role="group" aria-label="Reactions">
+                          {REACTIONS.map((reaction) => <button type="button" key={reaction} className={message.reaction === reaction ? "selected" : ""} onClick={() => toggleReaction(message, reaction)} aria-label={`React with ${reaction}`}>{reaction}</button>)}
+                        </div>}
+                      </div>}
+                      </div>
                       {message.sources && message.sources.length > 0 && <div className="source-list"><div className="source-heading">RETRIEVED SOURCES</div>{message.sources.filter((source) => { try { return ["http:", "https:"].includes(new URL(source.url).protocol); } catch { return false; } }).map((source) => <a key={source.url} href={source.url} target="_blank" rel="noopener noreferrer">{source.title} ↗</a>)}</div>}
                       {(message.queued || clock || (info.endsTurn && message.provider)) && <div className="message-meta">
                         {message.queued && <span className="queued">QUEUED</span>}
+                        {message.edited && <span>EDITED</span>}
                         {message.reasoned && <span title={`Worked through first by ${message.reasoned.length} independent analyst${message.reasoned.length === 1 ? "" : "s"} (${message.reasoned.join(" + ")})`}>REASONED</span>}
                         {info.endsTurn && message.provider && <span title={`Response generated by ${message.provider}`}>{message.provider === "ollama" ? "LOCAL" : message.provider.toUpperCase()}</span>}
                         {clock && <time dateTime={message.at}>{clock}</time>}
@@ -2101,7 +2282,7 @@ export default function Home() {
         <aside className="profile-panel" aria-label="FREYA profile">
           <PortraitParticles expression={portraitExpression} />
           <div className="profile-name-row"><h2>FREYA, 20</h2><span className="profile-state">ONLINE · {mood.name.toUpperCase()}</span></div>
-          <p className="profile-description">5&apos;7&quot; | Somewhere between brilliant and unbearable.<br/>Probably reading something you wouldn&apos;t understand. Occasionally online. Rarely impressed.<br/><em>Don&apos;t mistake curiosity for interest.</em></p>
+          <p className="profile-description">Hey, I&apos;m Freya. I read too much, stay up too late, and have opinions about most things.</p>
           <div className="profile-sigil" aria-hidden="true">✦</div>
           <p className="profile-footnote">Your portrait, lit as a 3D relief. Her expression follows her simulated mood and the conversation; no face scanning or recognition.</p>
         </aside>

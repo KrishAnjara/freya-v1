@@ -1,12 +1,13 @@
 /**
- * Composer shortcuts. "/visualize …" puts a 3D form on the canvas and "/image …" makes a
+ * Composer shortcuts. "/visualize …" makes a new 3D form on the canvas and "/image …" makes a
  * picture in the chat; neither is sent to FREYA as an ordinary message. A plain request for a
- * picture ("draw me a cat") is recognised too, conservatively. Pure, so it is tested directly.
+ * picture ("draw me a cat") is recognised too, conservatively. Changing a form isn't a command:
+ * its card's Refine button tags it in the composer. Pure, so it is tested directly.
  */
 export type ComposerCommand = { name: "visualize" | "image"; argument: string };
 
 export const COMMANDS = [
-  { name: "visualize", usage: "/visualize a red fox", hint: "Show something as 3D particles on the canvas" },
+  { name: "visualize", usage: "/visualize a red fox", hint: "Make a new 3D particle form on the canvas" },
   { name: "image", usage: "/image a lighthouse at night", hint: "Make a picture in the chat" },
 ] as const;
 

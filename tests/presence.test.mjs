@@ -124,3 +124,131 @@ test("a sincere human-or-AI question gets the truth from the app itself; banter 
   assert.match((await response.json()).reply, /i'm an AI/);
   assert.equal(calls, 0, "no model gets a chance to deny it");
 });
+
+test("casual messages never search the web; real requests for current facts still do", async () => {
+  const { needsCurrentInformation, requiresLiveSearch, shouldSearch } = await import("../lib/search.ts");
+  for (const chat of [
+    "ok but im really sad today", "i had a rough day today", "this week has been awful", "i'm so tired right now",
+    "what should i cook today", "how are you today?", "what are you doing today", "what did you do yesterday?", "my latest haircut sucks",
+    "lol my current boss is insane", "what is wrong with me", "what is this", "who is she", "i recently got a dog", "yesterday was fun",
+  ]) {
+    assert.equal(shouldSearch(chat), false, `searched for: ${chat}`);
+    assert.equal(needsCurrentInformation(chat), false, `current info for: ${chat}`);
+    assert.equal(requiresLiveSearch(chat), false, `must verify: ${chat}`);
+  }
+  for (const query of [
+    "what's the latest AI news today?", "who's the current president of france?", "what's the weather in pune today", "any news on the election",
+    "what's the latest on the ukraine war?", "search for cheap flights to goa", "what's the bitcoin price right now?", "what are the side effects of ibuprofen",
+  ]) {
+    assert.equal(shouldSearch(query), true, `didn't search for: ${query}`);
+  }
+});
+
+test("thinking-2.png is her playful face and is never used for ordinary thinking", async () => {
+  const { expressionOfFile } = await import("../lib/expression.ts");
+  assert.equal(expressionOfFile("thinking", "2"), "playful");
+  assert.equal(expressionOfFile("thinking", undefined), "thinking");
+  assert.equal(expressionOfFile("smile", "2"), "smile");
+  assert.equal(moodExpression("playful"), "playful");
+  assert.equal(chooseExpression("playful", true, null, 0), "playful", "stays playful while she thinks");
+  assert.equal(chooseExpression("neutral", true, null, 0), "thinking");
+  assert.equal(chooseExpression("curious", true, null, 0), "thinking");
+});
+
+test("a handled form returns to its anchor and the spin eases back in; zoom stays", async () => {
+  const { FORM_SPIN, initialFormPose, moveForm, rotateForm, stepFormPose, zoomForm } = await import("../lib/form-pose.ts");
+  const pose = initialFormPose();
+  moveForm(pose, 1, -0.5);
+  rotateForm(pose, 100, 60, 0.05);
+  zoomForm(pose, 2);
+  const held = { ...pose };
+  stepFormPose(pose, 1, true);
+  assert.deepEqual([pose.panX, pose.panY, pose.pitch, pose.yaw], [held.panX, held.panY, held.pitch, held.yaw], "still while held");
+  for (let frame = 0; frame < 300; frame += 1) stepFormPose(pose, 1 / 60, false);
+  assert.ok(Math.abs(pose.panX) < 0.001 && Math.abs(pose.panY) < 0.001, "back at its anchor");
+  assert.ok(Math.abs(pose.pitch) < 0.01, "upright again");
+  assert.ok(Math.abs(pose.spin - FORM_SPIN) < 0.05, "spinning at its normal speed");
+  assert.ok(Math.abs(pose.zoom - 2) < 0.001, "zoom stays where it was put");
+  zoomForm(pose, 100);
+  assert.equal(pose.zoomTarget, 3.5, "zoom is bounded");
+  // Letting go after stopping: the spin starts from nothing and builds up gradually.
+  const still = initialFormPose();
+  still.spin = 0;
+  stepFormPose(still, 1 / 60, false);
+  assert.ok(still.spin > 0 && still.spin < 0.02, "gradually, not all at once");
+});
+
+test("refining isn't a command; replies and reactions reach the model", async () => {
+  const { commandHints, parseCommand } = await import("../lib/composer-commands.ts");
+  const { describeThread, messagePreview, referenceNote } = await import("../lib/chat-thread.ts");
+  assert.equal(parseCommand("/refine make it blue"), null);
+  assert.deepEqual(commandHints("/re"), []);
+  const thread = [
+    { id: "a", role: "user", content: "my sister lives in pune" },
+    { id: "b", role: "assistant", content: "nice city", reaction: "😂" },
+    { id: "c", role: "assistant", content: "", picture: { prompt: "a lighthouse" } },
+    { id: "d", role: "user", content: "wait what about this", replyTo: "c" },
+  ];
+  assert.match(referenceNote(thread[3], thread), /replying to something you said: "Picture: a lighthouse"/);
+  assert.equal(referenceNote(thread[1], thread), "(they reacted 😂 to this)");
+  assert.equal(referenceNote(thread[0], thread), "");
+  assert.equal(describeThread(thread)[3].tag.id, "c", "a chosen reply always shows its tag, even right after the message");
+  assert.equal(messagePreview({ content: "x".repeat(200) }, 10).length, 11);
+});
+
+test("conversations are chapters: recaps, own words until then, recency and relevance", async () => {
+  const { chapterContext, chaptersForPrompt, extractiveRecap, normalizeChapters, normalizeRelationship, relationshipFacts, timeAgo } = await import("../lib/chapters.ts");
+  const day = 86_400_000;
+  const now = Date.UTC(2026, 10, 10, 12);
+  const at = (daysAgo) => new Date(now - daysAgo * day).toISOString();
+  const say = (content, daysAgo) => ({ role: "user", content, at: at(daysAgo) });
+  const threads = [
+    { id: "now", createdAt: at(0), updatedAt: at(0), messages: [say("hey", 0)] },
+    { id: "a", createdAt: at(1), updatedAt: at(1), recap: "They were nervous about a driving test; we joked about parallel parking.", messages: [say("my driving test is friday", 1)] },
+    { id: "b", createdAt: at(3), updatedAt: at(3), messages: [say("i started learning guitar", 3), say("only three chords so far", 3)] },
+    { id: "c", createdAt: at(9), updatedAt: at(9), messages: [say("my cat miso is ill", 9)] },
+    { id: "d", createdAt: at(12), updatedAt: at(12), messages: [say("work has been rough", 12)] },
+    { id: "e", createdAt: at(13), updatedAt: at(13), messages: [] },
+  ];
+  // The newest chat always, plus whatever is relevant to what they're saying.
+  let chapters = chaptersForPrompt(threads, "now", { recentTexts: ["how is miso doing"] });
+  assert.equal(chapters.length, 3);
+  assert.ok(chapters.some((chapter) => /driving test/.test(chapter.text)), "the most recent chat");
+  assert.ok(chapters.some((chapter) => /miso/.test(chapter.text)), "the relevant one");
+  assert.ok(!chapters.some((chapter) => chapter.text.includes('"hey"')), "never the chat they're in");
+  // No recap yet: their own words, and intimate turns stay out.
+  assert.match(extractiveRecap(threads[2].messages), /They said: "i started learning guitar" and "only three chords so far"/);
+  assert.equal(extractiveRecap([say("kiss me, i want you", 0)]), "");
+  // Forgetting.
+  chapters = chaptersForPrompt(threads, "now", { forgotten: ["my cat miso is ill"], recentTexts: ["miso"] });
+  assert.ok(!chapters.some((chapter) => /miso/.test(chapter.text)), "a deleted memory doesn't come back this way");
+  assert.equal(chaptersForPrompt(threads, "now", { resetAt: at(0.5) }).length, 0, "Forget everything covers what came before it");
+  // The prompt.
+  const facts = relationshipFacts(threads, "now");
+  assert.equal(facts.conversations, 5);
+  const context = chapterContext(chaptersForPrompt(threads, "now"), facts, now);
+  assert.match(context, /next chapter, not a first meeting/);
+  assert.match(context, /5 conversations so far, the first 12 days ago, the last yesterday/);
+  assert.ok(context.length < 900, `fits the local window (${context.length} chars)`);
+  // A first-time user stays a stranger.
+  assert.equal(relationshipFacts([threads[0]], "now"), null);
+  assert.equal(chapterContext([], null, now), "");
+  assert.equal(timeAgo(at(2), now), "2 days ago");
+  // Requests are untrusted.
+  assert.deepEqual(normalizeChapters([{ at: at(1), text: "api_key=super-secret-value-123" }, { at: "nope", text: "x" }, "y"], (text) => /api_key/.test(text)), []);
+  assert.equal(normalizeRelationship({ conversations: "5" }), null);
+});
+
+test("the chat route gives her the history, and only with memory on", async () => {
+  for (const [k, v] of Object.entries({ NODE_ENV: "test", AI_PROVIDER: "groq", GROQ_API_KEY: "test-only", GROQ_MODEL: "voice", GROQ_FALLBACK_MODELS: "", WEB_SEARCH_ENABLED: "false", FREYA_REASONING_MODE: "off", FREYA_LOCAL_ONLY: "false" })) setEnv(k, v);
+  for (const k of ["FREYA_SERVICE_URL", "UPSTASH_REDIS_REST_URL", "UPSTASH_REDIS_REST_TOKEN", "FREYA_TRUSTED_IP_HEADER", "GEMINI_API_KEY"]) setEnv(k, undefined);
+  let system = "";
+  globalThis.fetch = async (_url, init) => { system = JSON.parse(String(init?.body)).messages[0].content; return new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), { status: 200 }); };
+  const now = new Date().toISOString();
+  const send = (extra) => chatPost(new Request("http://localhost/api/chat", { method: "POST", headers: { "content-type": "application/json", "x-real-ip": "203.0.113.7" }, body: JSON.stringify({ messages: [{ role: "user", content: "hey" }], chapters: [{ at: now, text: "They were nervous about a driving test." }], relationship: { conversations: 4, since: now, lastTalk: now }, ...extra }) }));
+  await send({});
+  assert.match(system, /YOUR HISTORY WITH THEM/);
+  assert.match(system, /nervous about a driving test/);
+  await send({ useMemories: false });
+  assert.doesNotMatch(system, /YOUR HISTORY WITH THEM/, "Use memories in replies is off");
+});

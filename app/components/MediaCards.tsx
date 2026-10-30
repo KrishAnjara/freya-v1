@@ -2,7 +2,7 @@
 
 import MarkdownContent from "@/app/components/MarkdownContent";
 
-export type VisualizationInfo = { title: string; status: "loading" | "ready" | "error"; error?: string };
+export type VisualizationInfo = { title: string; status: "loading" | "ready" | "error"; error?: string; refining?: boolean };
 export type PictureInfo = {
   status: "loading" | "ready" | "error";
   prompt: string;
@@ -21,13 +21,13 @@ const FALLBACK_REASONS: Record<string, string> = {
 };
 
 /** A /visualize result in the thread: its form can be put back on the canvas at any time. */
-export function VisualizationCard({ info, onShow, onRefine }: { info: VisualizationInfo; onShow: () => void; onRefine: () => void }) {
+export function VisualizationCard({ info, onShow, onRefine, tagged = false }: { info: VisualizationInfo; onShow: () => void; onRefine?: () => void; tagged?: boolean }) {
   return <div className={`media-card visualization-card status-${info.status}`}>
     <div className="media-card-kicker">3D VISUALISATION</div>
-    <div className="media-card-title">{info.status === "loading" ? `Composing ${info.title}…` : info.status === "error" ? (info.error || "That didn't work.") : info.title}</div>
+    <div className="media-card-title">{info.status === "loading" ? `${info.refining ? "Refining" : "Composing"} ${info.title}…` : info.status === "error" ? (info.error || "That didn't work.") : info.title}</div>
     {info.status === "ready" && <div className="media-card-actions">
       <button type="button" onClick={onShow}>Show on canvas</button>
-      <button type="button" onClick={onRefine}>Refine</button>
+      {onRefine && <button type="button" onClick={onRefine} aria-pressed={tagged}>{tagged ? "Refining…" : "Refine"}</button>}
     </div>}
   </div>;
 }

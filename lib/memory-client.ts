@@ -22,6 +22,8 @@ export type StoredMemory = {
 
 export const LOCAL_MEMORY_LIMIT = 60;
 export const FORGOTTEN_KEY = "freya.v1.memoryForgotten";
+/** When the user last chose "Forget everything"; older conversation isn't brought up again. */
+export const MEMORY_RESET_KEY = "freya.v1.memoryResetAt";
 const FORGOTTEN_LIMIT = 80;
 
 /** A reflection needs this much new conversation: two user messages, or one substantial one. */

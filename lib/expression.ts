@@ -11,7 +11,7 @@
  */
 import type { MoodName } from "@/lib/mood";
 
-export const EXPRESSIONS = ["neutral", "smile", "laugh", "curious", "surprised", "sad", "affectionate", "thinking", "confused", "confident"] as const;
+export const EXPRESSIONS = ["neutral", "smile", "playful", "laugh", "curious", "surprised", "sad", "affectionate", "thinking", "confused", "confident"] as const;
 export type Expression = (typeof EXPRESSIONS)[number];
 
 /** brow -1 furrowed..1 raised; smile -1 corners down..1 up; squint 0..1; tilt -1..1; lips 0..1 parted; gaze -1..1. */
@@ -20,6 +20,7 @@ export type Pose = { brow: number; smile: number; squint: number; tilt: number; 
 export const POSES: Record<Expression, Pose> = {
   neutral: { brow: 0, smile: 0.05, squint: 0, tilt: 0, lips: 0, gazeX: 0, gazeY: 0 },
   smile: { brow: 0.15, smile: 0.6, squint: 0.3, tilt: 0.15, lips: 0, gazeX: 0, gazeY: 0 },
+  playful: { brow: 0.25, smile: 0.4, squint: 0.2, tilt: 0.2, lips: 0, gazeX: 0.3, gazeY: 0 },
   laugh: { brow: 0.35, smile: 1, squint: 0.6, tilt: -0.35, lips: 0.45, gazeX: 0, gazeY: 0.15 },
   curious: { brow: 0.55, smile: 0.12, squint: 0, tilt: 0.55, lips: 0.05, gazeX: 0.1, gazeY: 0.05 },
   surprised: { brow: 1, smile: 0.05, squint: -0.3, tilt: -0.1, lips: 0.4, gazeX: 0, gazeY: 0.1 },
@@ -32,7 +33,7 @@ export const POSES: Record<Expression, Pose> = {
 
 const MOOD_EXPRESSION: Record<MoodName, Expression> = {
   neutral: "neutral",
-  playful: "smile",
+  playful: "playful",
   warm: "affectionate",
   curious: "curious",
   content: "neutral",
@@ -95,9 +96,19 @@ export function reactionInReply(text: string): Reaction | null {
 
 export function chooseExpression(moodName: MoodName, thinking: boolean, reaction: (Reaction & { until: number }) | null, now = Date.now()): Expression {
   if (reaction && reaction.until > now) return reaction.expression;
-  if (thinking) return "thinking";
+  // In a playful mood she keeps that look while working out a reply.
+  if (thinking) return moodName === "playful" ? "playful" : "thinking";
   return moodExpression(moodName);
 }
 
 /** Expression image files: "smile.png", "smile-2.webp" (a variation). Anything else is ignored. */
-export const EXPRESSION_FILE = /^(neutral|smile|laugh|curious|surprised|sad|affectionate|thinking|confused|confident)(?:-(\d{1,2}))?\.(png|jpe?g|webp)$/i;
+export const EXPRESSION_FILE = /^(neutral|smile|playful|laugh|curious|surprised|sad|affectionate|thinking|confused|confident)(?:-(\d{1,2}))?\.(png|jpe?g|webp)$/i;
+
+/**
+ * Which expression an image file shows. thinking-2.png is a playful side-eye smirk rather than a
+ * thinking face, so it is the playful mood's image and never appears for ordinary thinking.
+ */
+export function expressionOfFile(name: string, variation?: string): Expression {
+  const expression = name.toLowerCase() as Expression;
+  return expression === "thinking" && variation === "2" ? "playful" : expression;
+}

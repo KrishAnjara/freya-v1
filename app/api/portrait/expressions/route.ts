@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { readdir } from "node:fs/promises";
 import { join } from "node:path";
-import { EXPRESSION_FILE } from "@/lib/expression";
+import { EXPRESSION_FILE, expressionOfFile } from "@/lib/expression";
 
 /**
  * Which expression images actually exist in public/portrait/expressions/, so the portrait
@@ -16,7 +16,7 @@ export async function GET() {
     const images = files
       .map((file) => file.match(EXPRESSION_FILE))
       .filter((match): match is RegExpMatchArray => Boolean(match))
-      .map((match) => ({ expression: match[1].toLowerCase(), url: `/portrait/expressions/${match[0]}` }))
+      .map((match) => ({ expression: expressionOfFile(match[1], match[2]), url: `/portrait/expressions/${match[0]}` }))
       .sort((a, b) => a.url.localeCompare(b.url));
     return NextResponse.json({ images }, { headers: { "Cache-Control": "no-store" } });
   } catch {

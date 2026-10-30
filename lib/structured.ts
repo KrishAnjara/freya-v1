@@ -1,11 +1,13 @@
 /**
  * One structured (JSON) completion for background jobs: memory reflection and visualisation.
  *
- * Groq in JSON mode first, then Gemini with a JSON response type. Sampling is fixed and low:
+ * Grok when there's an xAI key, then Groq in JSON mode, then Gemini with a JSON response type. Sampling is fixed and low:
  * these are extraction and layout tasks, not FREYA's voice, and no client can change them.
  * Failures are logged by status only, never with provider text.
  */
-export type StructuredResult = { data: unknown; provider: "groq" | "gemini" };
+import { grokComplete, hasGrok } from "@/lib/grok";
+
+export type StructuredResult = { data: unknown; provider: "grok" | "groq" | "gemini" };
 
 type Options = { groqModel: string; maxTokens: number; temperature?: number; signal?: AbortSignal; timeoutMs?: number; reasoningEffort?: "low" | "medium" | "high" };
 
@@ -63,6 +65,15 @@ async function geminiJson(system: string, user: string, options: Options): Promi
  * followed by a second one (FREYA_STRUCTURED_FALLBACK_MODEL) before Gemini.
  */
 export async function generateJson(system: string, user: string, options: Options): Promise<StructuredResult> {
+  if (hasGrok()) {
+    try {
+      const text = await grokComplete(system, user, { signal: options.signal, timeoutMs: options.timeoutMs ?? 30_000, maxTokens: options.maxTokens, temperature: options.temperature ?? 0.2, effort: options.reasoningEffort, json: true });
+      return { data: parseJson(text), provider: "grok" };
+    } catch (grokError) {
+      if (options.signal?.aborted) throw grokError;
+      console.warn(`FREYA structured job: Grok unavailable (${grokError instanceof Error ? grokError.message.slice(0, 40) : "error"}).`);
+    }
+  }
   const fallback = process.env.FREYA_STRUCTURED_FALLBACK_MODEL?.trim() || "openai/gpt-oss-20b";
   const models = [...new Set([options.groqModel, fallback])];
   for (const model of models) {

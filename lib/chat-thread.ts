@@ -74,6 +74,43 @@ export function requestTurns(entries: HistoryEntry[], limit = 23) {
   return { turns, older: older.map(({ role, content }) => ({ role, content })), sent };
 }
 
+type PreviewSource = {
+  content: string;
+  attachments?: { name: string }[];
+  picture?: { prompt: string };
+  visualization?: { title: string };
+  voice?: unknown;
+};
+
+/** A one-line description of a message, for reply tags and the composer. */
+export function messagePreview(message: PreviewSource, max = 90): string {
+  const text = message.content.replace(/\s+/g, " ").trim();
+  if (text) return text.length > max ? `${text.slice(0, max).trimEnd()}…` : text;
+  if (message.picture) return `Picture: ${message.picture.prompt.slice(0, max)}`;
+  if (message.visualization) return `Visualisation: ${message.visualization.title}`;
+  if (message.voice) return "Voice note";
+  return message.attachments?.[0]?.name ?? "A message";
+}
+
+type ReferencingMessage = PreviewSource & { id: string; role: string; replyTo?: string; reaction?: string };
+
+/** The reactions on offer. */
+export const REACTIONS = ["😂", "❤️", "👍", "😮", "😢", "🔥"] as const;
+
+/**
+ * What FREYA's model is told about a message the user replied to, so she knows what "this"
+ * means even when that message has scrolled out of the history she is sent, and about a
+ * reaction they left on one of hers.
+ */
+export function referenceNote(message: ReferencingMessage, all: ReferencingMessage[]): string {
+  if (message.role === "assistant") return message.reaction ? `(they reacted ${message.reaction} to this)` : "";
+  if (message.role !== "user") return "";
+  const byId = new Map(all.map((item) => [item.id, item]));
+  const describe = (target: ReferencingMessage) => `${target.role === "assistant" ? "something you said" : "their own earlier message"}: "${messagePreview(target, 240)}"`;
+  const replied = message.replyTo ? byId.get(message.replyTo) : undefined;
+  return replied ? `(replying to ${describe(replied)})` : "";
+}
+
 export type ThreadRow = {
   /** First message of a run from one side: shows the name. */
   startsRun: boolean;
@@ -106,7 +143,8 @@ export function describeThread(messages: ThreadMessage[]): ThreadRow[] {
     seenTurns.add(key);
     const target = message.replyTo ? byId.get(message.replyTo) : undefined;
     // Tagged only when something sits between the reply and what it answers.
-    const tag = firstOfTurn && target && previous && previous.id !== target.id ? target : undefined;
+    // A reply the user chose to make always shows what it replies to.
+    const tag = message.role === "user" ? target : firstOfTurn && target && previous && previous.id !== target.id ? target : undefined;
     return {
       startsRun: !previous || previous.role !== message.role,
       endsRun: !next || next.role !== message.role,

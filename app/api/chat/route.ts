@@ -19,6 +19,7 @@ import { isCoolingDown, markFailure, markSuccess } from "@/lib/provider-health";
 import { initiativePrompt, moodPrompt, normalizeMood } from "@/lib/mood";
 import { INTIMACY_PROMPT, isIntimateTone, mentionsMinors, romanticMinorRequest } from "@/lib/intimacy";
 import { HONEST_ANSWER, sincerelyAsksIfHuman } from "@/lib/honesty";
+import { chapterContext, normalizeChapters, normalizeRelationship } from "@/lib/chapters";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -657,7 +658,13 @@ ${historySummary}
     const persona = (process.env.FREYA_FULL_PROMPT || "").toLowerCase() === "true"
       ? buildSystemPrompt(relevantMemories, style, characterProfile, autonomyLevel, requestData.candidLanguage === true)
       : buildLocalSystemPrompt(relevantMemories, style, characterProfile, requestData.candidLanguage === true);
+    // The other conversations, as chapters of the same relationship (lib/chapters). Follows the
+    // "Use memories in replies" setting; the browser builds it from its own threads.
+    const history = useMemories
+      ? chapterContext(normalizeChapters(requestData.chapters, containsSensitiveCredential), normalizeRelationship(requestData.relationship))
+      : "";
     const system = persona +
+      history +
       summaryContext +
       "\n\n" +
       dateContext +

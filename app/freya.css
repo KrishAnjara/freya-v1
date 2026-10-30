@@ -1202,3 +1202,47 @@ button.attachment-face:hover { border-color: rgba(176, 188, 186, .5); background
 /* Presence canvas -------------------------------------------------------- */
 .presence-status { position: absolute; top: 12px; left: 12px; z-index: 2; color: rgba(217, 209, 194, .62); font: 9px var(--mono); letter-spacing: .16em; pointer-events: none; }
 .presence-canvas.activity-thinking .presence-status, .presence-canvas.activity-speaking .presence-status { color: rgba(217, 209, 194, .9); }
+
+/* Handling a visualised form ---------------------------------------------- */
+.three-host.form-in-hand { cursor: grab; touch-action: none; }
+.three-host.form-in-hand.is-holding { cursor: grabbing; }
+
+/* Message controls: beside the bubble, taking no space of their own ------------ */
+.message-line { position: relative; display: flex; width: fit-content; max-width: 100%; align-items: flex-start; gap: 6px; }
+.message.user .message-line { flex-direction: row-reverse; margin-left: auto; }
+.message.longform .message-line { width: 100%; }
+.message-main { position: relative; min-width: 0; flex: 0 1 auto; }
+.message.longform .message-main { flex: 1 1 auto; }
+.message-main.has-reaction { margin-bottom: 11px; }
+.reply-side { display: flex; flex: 0 0 auto; align-items: center; gap: 4px; max-width: 130px; margin-top: 6px; padding: 2px 5px; border: 0; background: transparent; color: var(--dim); font: 9px var(--mono); cursor: pointer; }
+.reply-side:hover, .reply-side:focus-visible { color: #cfd6d4; }
+.reply-side-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.message-tools { position: absolute; top: 2px; left: 100%; z-index: 2; display: flex; margin-left: 4px; opacity: 0; transition: opacity .15s ease; }
+.message.user .message-tools { right: 100%; left: auto; margin-right: 4px; margin-left: 0; }
+.message:hover .message-tools, .message-tools:focus-within { opacity: 1; }
+.message-tools > button { width: 22px; height: 22px; padding: 0; border: 0; background: transparent; color: var(--muted); font: 12px var(--mono); cursor: pointer; }
+.message-tools > button:hover, .message-tools > button:focus-visible { color: #e7e2d6; }
+.reaction-picker { position: absolute; right: 0; bottom: 100%; z-index: 3; display: flex; padding: 2px; border: 1px solid var(--line-soft); background: rgba(8, 9, 10, .96); }
+.message.user .reaction-picker { right: auto; left: 0; }
+.message-list > .message:first-child .reaction-picker { top: 100%; bottom: auto; }
+.reaction-picker button { width: 26px; height: 26px; padding: 0; border: 0; background: transparent; font-size: 14px; cursor: pointer; }
+.reaction-picker button:hover, .reaction-picker button:focus-visible, .reaction-picker button.selected { background: rgba(217, 209, 194, .12); }
+.message-reaction { position: absolute; right: 8px; bottom: -11px; z-index: 1; padding: 0 4px; border: 1px solid var(--line-soft); background: #0d1011; font-size: 11px; line-height: 17px; cursor: pointer; }
+.message.user .message-reaction { right: auto; left: 8px; }
+.message-edit { width: min(420px, 100%); }
+.message-edit textarea { display: block; width: 100%; min-width: 240px; padding: 9px 11px; border: 1px solid var(--line); background: #0d1011; color: #e7e2d6; font: inherit; font-size: 13px; line-height: 1.5; resize: vertical; }
+.message-edit-actions { display: flex; justify-content: flex-end; gap: 6px; margin-top: 5px; }
+.message-edit-actions button { padding: 3px 9px; border: 1px solid var(--line-soft); background: transparent; color: #d9d1c2; font: 10px var(--mono); cursor: pointer; }
+.message-edit-actions button:hover, .message-edit-actions button:focus-visible { border-color: #d9d1c2; }
+.composer-wrap { position: relative; }
+.composer-reply { position: absolute; bottom: calc(100% - 8px); left: clamp(16px, 4vw, 54px); z-index: 3; display: flex; max-width: min(320px, calc(100% - 32px)); align-items: center; gap: 6px; padding: 2px 4px 2px 8px; border: 1px solid var(--line-soft); background: rgba(8, 9, 10, .96); color: var(--muted); font: 10px var(--mono); }
+.composer-reply-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.composer-reply button { flex: 0 0 auto; padding: 0 4px; border: 0; background: transparent; color: var(--muted); font-size: 14px; line-height: 1; cursor: pointer; }
+.composer-reply button:hover, .composer-reply button:focus-visible { color: #d9d1c2; }
+/* No room beside the bubble on small screens, and no hover on touch: a slim row under it. */
+@media (max-width: 760px), (hover: none) {
+  .message-line { flex-wrap: wrap; }
+  .message-tools { position: relative; top: auto; left: auto; flex-basis: 100%; margin: 0; opacity: .7; }
+  .message.user .message-tools { right: auto; justify-content: flex-end; margin: 0; }
+  .reply-side { max-width: 90px; }
+}

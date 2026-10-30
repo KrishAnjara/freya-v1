@@ -1,11 +1,12 @@
 import { NextResponse } from "next/server";
 import { guardRequest, hostedProvidersAllowed } from "@/lib/route-guard";
 import { generateJson } from "@/lib/structured";
-import { validateSpec, VISUALIZE_PROMPT, type VisualSpec } from "@/lib/visualize";
+import { REFINE_PROMPT, validateSpec, VISUALIZE_PROMPT } from "@/lib/visualize";
 
 /**
- * /visualize: turns a description into a validated spec of solids for the canvas to scatter
- * particles over. A follow-up can modify the current form, which the browser sends back.
+ * Turns a description into a validated spec of solids for the canvas to scatter particles over.
+ * /visualize always starts from nothing; only a refinement (mode "refine") sees a form, the one
+ * whose Refine button was used.
  */
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -19,13 +20,17 @@ export async function POST(request: Request) {
   try { body = await request.json(); } catch { return NextResponse.json({ error: "Request body must be valid JSON." }, { status: 400 }); }
   const description = typeof body.description === "string" ? body.description.replace(/\s+/g, " ").trim().slice(0, 400) : "";
   if (description.length < 2) return NextResponse.json({ error: "Describe what to visualise, e.g. /visualize a red fox." }, { status: 400 });
-  const current = validateSpec(body.current) as VisualSpec | null;
+  const refining = body.mode === "refine";
+  const current = refining ? validateSpec(body.current) : null;
+  if (refining && !current) return NextResponse.json({ error: "There's nothing to refine yet. Make something with /visualize first." }, { status: 400 });
+  // The portrait relief is drawn from an image, so there are no parts to change.
+  if (current?.technique === "portrait") return NextResponse.json({ error: "That one's made from her portrait, so it can't be reshaped. Use /visualize for a new form." }, { status: 422 });
 
   const input = current
-    ? `CURRENT FORM (${current.title}):\n${JSON.stringify({ technique: current.technique, parts: current.parts })}\n\nREQUEST: ${description}`
+    ? `CURRENT FORM (${current.title}):\n${JSON.stringify({ parts: current.parts })}\n\nCHANGE: ${description}`
     : `REQUEST: ${description}`;
   try {
-    const result = await generateJson(VISUALIZE_PROMPT, input, {
+    const result = await generateJson(refining ? REFINE_PROMPT : VISUALIZE_PROMPT, input, {
       groqModel: process.env.FREYA_VISUALIZE_MODEL?.trim() || "openai/gpt-oss-120b",
       maxTokens: 6000,
       temperature: 0.3,

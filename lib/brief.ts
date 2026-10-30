@@ -11,12 +11,15 @@
  * local. Any failure returns null and the local model simply answers on its own.
  */
 
+import { grokComplete, hasGrok } from "@/lib/grok";
 import { generateReply, type ChatMessage, type ProviderName } from "@/lib/llm";
 
 /** Cap on brief length. Long enough for substance, short enough for a small context window. */
 const BRIEF_MAX_CHARS = 2200;
 /** The brief is a speed-up for quality, not worth stalling a reply over. */
 const BRIEF_TIMEOUT_MS = 9000;
+/** Grok stops early enough for the next researcher to stand in before that deadline. */
+const GROK_BRIEF_MS = 6000;
 /** Recent turns the researcher sees, so follow-ups like "and the second one?" resolve. */
 const CONTEXT_TURNS = 6;
 /** Cap on retrieved web text handed to the researcher. */
@@ -72,7 +75,7 @@ export function needsBrief(text: string): boolean {
   return asksForSubstance || value.includes("```") || value.length > 320;
 }
 
-export type Brief = { text: string; provider: ProviderName };
+export type Brief = { text: string; provider: ProviderName | "grok" };
 
 /**
  * Returns a brief for the last user message, or null when none is needed or it failed.
@@ -94,7 +97,8 @@ export async function buildBrief(
 
   const hasGroq = Boolean(process.env.GROQ_API_KEY?.trim());
   const hasGemini = Boolean(process.env.GEMINI_API_KEY?.trim());
-  if (!hasGroq && !hasGemini) return null;
+  const useGrok = hasGrok() && (preferred === "groq" || !hasGemini);
+  if (!useGrok && !hasGroq && !hasGemini) return null;
   const primary: "groq" | "gemini" = preferred === "groq" ? (hasGroq ? "groq" : "gemini") : (hasGemini ? "gemini" : "groq");
   const fallback: "groq" | "gemini" = primary === "groq" ? "gemini" : "groq";
   const canFallBack = primary === "groq" ? hasGemini : hasGroq;
@@ -106,7 +110,7 @@ export async function buildBrief(
   if (signal?.aborted) forward();
   else signal?.addEventListener("abort", forward, { once: true });
 
-  let used: ProviderName = primary;
+  let used: Brief["provider"] = primary;
   try {
     // The researcher reads the conversation as a quoted transcript, not as turns it took part
     // in. Passed as live turns, "you're wrong, apologize" lands on the researcher itself, and
@@ -126,7 +130,16 @@ export async function buildBrief(
       role: "user",
       content: `TRANSCRIPT (you are not a participant)\n\n${transcript}\n\nWrite the brief for the last USER message.`,
     }];
-    const text = await generateReply(RESEARCHER_PROMPT + retrieved, request, controller.signal, {
+    let text = "";
+    if (useGrok) {
+      try {
+        text = await grokComplete(RESEARCHER_PROMPT + retrieved, request[0].content, { signal: controller.signal, timeoutMs: GROK_BRIEF_MS, maxTokens: 900 });
+        used = "grok";
+      } catch (error) {
+        if (controller.signal.aborted) throw error;
+      }
+    }
+    if (!text) text = await generateReply(RESEARCHER_PROMPT + retrieved, request, controller.signal, {
       provider: primary,
       fallbackProvider: fallback,
       fallbackEnabled: canFallBack,
@@ -223,7 +236,7 @@ React to it as yourself, as if you'd looked at it. Don't mention a description o
 
 /**
  * Which cloud service researches for the local voice: Gemini for anything live (search results,
- * news, today's date or time, prices), Groq for everything else (logic, explanations, code).
+ * news, today's date or time, prices), Grok or Groq for everything else (logic, explanations, code).
  */
 export function briefProviderFor(text: string, hasLiveMaterial: boolean): "groq" | "gemini" {
   if (hasLiveMaterial || /\b(news|today|tonight|tomorrow|yesterday|this (week|month|year)|latest|current(ly)?|right now|recent(ly)?|date|time is it|weather|price|score|schedule|election|released?)\b/i.test(text)) return "gemini";

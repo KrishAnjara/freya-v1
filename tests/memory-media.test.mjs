@@ -158,14 +158,13 @@ test("composer commands and plain picture requests are recognised conservatively
 
 test("visualisation specs are bounded and sample into centred, coloured clouds", () => {
   assert.equal(validateSpec({ parts: [] }), null);
-  const spec = validateSpec({ title: "Mug", mode: "modify", parts: [
+  const spec = validateSpec({ title: "Mug", parts: [
     { shape: "cylinder", position: [0, 0, 0], size: [0.8, 1, 0.8], rotation: [0, 0, 0], color: "#ffffff" },
     { shape: "torus", position: [0.5, 0, 0], size: [0.5, 0.1, 0.5], rotation: [90, 0, 0], color: "not-a-colour", radius: 0.06 },
     { shape: "tube", path: [[0, 0, 0]], radius: 0.1 },
     { shape: "pyramid" },
     { shape: "box", position: [99, 0, 0], size: [-1, 1, 1] },
   ] });
-  assert.equal(spec.mode, "modify");
   assert.equal(spec.parts.length, 3, "a one-point tube and unknown shapes are dropped");
   assert.equal(spec.parts[1].color, "#d9d1c2");
   assert.equal(spec.parts[2].position[0], 1.5);
@@ -188,17 +187,22 @@ test("relief clouds skip a dark background", () => {
   assert.ok(cloud.colors.slice(0, 3).every((value) => value > 0.6), "points come from the bright area");
 });
 
-test("the visualize route returns a validated spec and passes the current form on refinement", async () => {
+test("/visualize starts from nothing; only a refinement sees and changes a form", async () => {
   env();
   let sent = "";
-  globalThis.fetch = async (url, init) => { sent = String(init?.body); return groqJson({ title: "Fox", mode: "modify", technique: "parts", parts: [{ shape: "ellipsoid", position: [0, 0, 0], size: [1, 0.6, 0.5], rotation: [0, 0, 0], color: "#c8501e" }] }); };
+  globalThis.fetch = async (url, init) => { sent = String(init?.body); return groqJson({ title: "Fox", technique: "parts", parts: [{ shape: "ellipsoid", position: [0, 0, 0], size: [1, 0.6, 0.5], rotation: [0, 0, 0], color: "#c8501e" }] }); };
   const current = { title: "Fox", technique: "parts", parts: [{ shape: "box", position: [0, 0, 0], size: [1, 1, 1], rotation: [0, 0, 0], color: "#ffffff" }] };
-  const response = await post(visualizePost, "/api/visualize", { description: "make the tail fluffier", current });
-  const payload = await response.json();
+  // A client that sends the current form with /visualize still gets a fresh start.
+  let response = await post(visualizePost, "/api/visualize", { description: "a fox", current });
   assert.equal(response.status, 200);
-  assert.equal(payload.spec.mode, "modify");
-  assert.match(sent, /CURRENT FORM/);
+  assert.doesNotMatch(sent, /CURRENT FORM \(/, "a new canvas never sees the old one");
+  response = await post(visualizePost, "/api/visualize", { description: "make the tail fluffier", mode: "refine", current });
+  assert.equal(response.status, 200);
+  assert.match(sent, /CURRENT FORM \(Fox\)/);
+  assert.match(sent, /keep every part the request/);
   assert.equal((await post(visualizePost, "/api/visualize", { description: "" })).status, 400);
+  assert.equal((await post(visualizePost, "/api/visualize", { description: "bigger", mode: "refine" })).status, 400, "nothing to refine");
+  assert.equal((await post(visualizePost, "/api/visualize", { description: "bigger", mode: "refine", current: { technique: "portrait", title: "Face", parts: [] } })).status, 422, "a portrait has no parts to change");
 });
 
 // --- pictures -----------------------------------------------------------------------------

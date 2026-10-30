@@ -48,22 +48,44 @@ function validUrl(value: unknown): value is string {
 }
 
 /** Search for current, niche, or explicitly requested information. */
+/** Words that only mean "look it up" next to something to look up: "sad today" isn't a query. */
+const TIME_WORDS = /\b(latest|current|currently|today|today's|yesterday|this week|this month|right now|recent|recently)\b/i;
+const LIVE_TOPIC = /\b(news|headlines?|weather|forecast|prices?|stocks?|market|scores?|election|polls?|release|released|version|updates?|happening|exchange rate|traffic|date|ceo|president|prime minister)\b/i;
+const ASKING = /\?\s*$|\b(tell|give|show|get|find|what|who|when|where|which|any)\b/i;
+const ABOUT_ME = /\b(i|i'm|im|i've|my|me|mine|we|our)\b/i;
+/** A question to her: "what are you up to?", "how are you today?". */
+const TO_HER = /\b(who|what|where|when|how|are|do|did|have|were)\b[^.?!]*\b(you|your|u|ur)\b/i;
+
+/**
+ * Is this asking for something current? A time word needs an actual subject and a request:
+ * "what's the latest AI news today?" and "current president of france?" are; "im really sad
+ * today", "this week has been awful" and "what should i cook today" aren't.
+ */
+function asksForCurrentInfo(value: string) {
+  if (!TIME_WORDS.test(value) || !ASKING.test(value)) return false;
+  if (TO_HER.test(value) && !LIVE_TOPIC.test(value)) return false;
+  return LIVE_TOPIC.test(value) || !ABOUT_ME.test(value);
+}
+
 export function shouldSearch(text: string): boolean {
   const value = text.trim();
   if (!value || value.length < 5) return false;
 
   const explicit =
-    /\b(search|look up|google|find sources|source this|research|verify online|check online|browse the web|latest|current|today|today's date|current date|yesterday|this week|this month|right now|recent|price of|weather|who won|when is the next|release date|current version|news about|breaking news|as of today)\b/i;
+    /\b(search|look up|google|find sources|source this|research|verify online|check online|browse the web|price of|weather|who won|when is the next|release date|current version|news about|news on|any news|headlines|breaking news|as of today)\b/i;
 
   const factual =
     /\b(who is|what is|what are|when did|when was|where is|how much does|how many|which model|compare|statistics|study says|according to)\b/i;
 
-  if (explicit.test(value)) return true;
+  if (explicit.test(value) || asksForCurrentInfo(value)) return true;
   // A self-contained problem (arithmetic, code) is answered by reasoning, not by the web:
   // "what is 17 * 23" matched "what is" and went to search, then was refused when search was off.
   if (/\d\s*[-+*/×÷^%=]\s*\(?\d|```/.test(value)) return false;
   // Questions to her are conversation: "what are you up to?" matched "what are" and searched the web.
-  if (/\b(who|what|where|when|how)\b[^.?!]*\b(you|your|u|ur)\b/i.test(value) && !/\b(search|look up|google)\b/i.test(value)) return false;
+  if (TO_HER.test(value)) return false;
+  // Nor are questions about themselves or something already in front of them: "what is wrong with
+  // me", "what is this", "who is she".
+  if (ABOUT_ME.test(value) || /^(what|who|where)('s| is| are) (this|that|it|he|she|they|those|these)\b/i.test(value)) return false;
   return factual.test(value);
 }
 
@@ -82,7 +104,7 @@ export function explicitlyDisablesSearch(text: string): boolean {
 }
 
 export function needsCurrentInformation(text: string): boolean {
-  return /\b(latest|breaking news|right now|currently|today|this week|this month|current events|current price|recent news|latest AI news|what(?:'s| is) happening in the world)\b/i.test(text);
+  return /\b(breaking news|current events|current price|recent news|what(?:'s| is) happening in the world)\b/i.test(text) || asksForCurrentInfo(text.trim());
 }
 
 async function searchGemini(query: string, requestSignal?: AbortSignal): Promise<SearchResult> {

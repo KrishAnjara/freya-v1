@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { grokComplete, grokModel, hasGrok } from "@/lib/grok";
 import { groqModels, groqReasoningEffort, ollamaThinking } from "@/lib/llm";
 import { getFreyaServiceConfig, requestServiceReply } from "@/lib/freya-service";
 import { isSelfHosted } from "@/lib/rate-limit";
@@ -85,6 +86,11 @@ const geminiCheck: Check = async () => {
   const payload = await response.json().catch(() => null);
   const text = payload?.candidates?.[0]?.content?.parts?.map((part: { text?: string }) => part.text || "").join("");
   return response.ok && said(text) ? "working" : "not working";
+};
+
+const grokCheck: Check = async () => {
+  await grokComplete("Reply briefly.", PROMPT, { timeoutMs: PROBE_TIMEOUT_MS, maxTokens: 200 });
+  return "working";
 };
 
 const ollamaCheck: Check = async () => {
@@ -174,6 +180,7 @@ const rateLimiterCheck: Check = async () => {
 
 async function runChecks(): Promise<HealthReport> {
   const checks: [string, Check][] = [
+    ...(hasGrok() ? [[`cloud: grok ${grokModel()}`, grokCheck] as [string, Check]] : []),
     ...groqModels().map((model): [string, Check] => [`cloud: groq ${model}`, groqCheck(model)]),
     [`cloud: gemini ${process.env.GEMINI_MODEL || "gemini-2.5-flash"}`, geminiCheck],
     [`local: ollama ${process.env.OLLAMA_MODEL || "freya"}`, ollamaCheck],

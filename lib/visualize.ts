@@ -43,7 +43,7 @@ const DEFAULT_COLOR = "#d9d1c2";
 
 export const VISUALIZE_PROMPT = `You build 3D particle sculptures for a small canvas. The user describes something; you compose it from simple solids, and points are scattered over their surfaces.
 
-Return JSON: {"title":"2-4 word name","technique":"parts","mode":"new"|"modify","parts":[...]}
+Return JSON: {"title":"2-4 word name","technique":"parts","parts":[...]}
 Each part: {"shape":"ellipsoid|box|cylinder|cone|torus|tube","position":[x,y,z],"size":[sx,sy,sz],"rotation":[rx,ry,rz],"color":"#rrggbb"}
 - Space: the whole object fits inside -1..1 on every axis. y is up, the object faces +z (towards the viewer).
 - size is the full width, height and depth of the part before rotation. rotation is in degrees.
@@ -53,9 +53,13 @@ Each part: {"shape":"ellipsoid|box|cylinder|cone|torus|tube","position":[x,y,z],
 - First decide what makes the subject recognisable at a glance (a fox: long pointed snout, big triangular ears, a bushy tail nearly as big as its body, white chest and tail tip, thin dark legs; the Eiffel Tower: four splayed legs meeting in a tapering lattice spire with two platforms). Build those features clearly, slightly exaggerated, like a stylised sculpture.
 - Animals, vehicles, buildings and objects with detail: 15-45 parts. Simple objects: fewer. Pose animals naturally (a sitting animal has its haunches down and front legs straight).
 - Get proportions and placement right. Connected parts must overlap (a head sits on the neck, the neck on the body; legs start inside the body): check each part's position against its neighbour's position and size. No floating parts unless the subject really has them. Mirror left/right parts exactly. Use believable colours, but avoid black (it doesn't show on the dark canvas): use a very dark grey instead.
-- For a human face or head (portrait, person's face, woman, man), return {"title":"...","technique":"portrait","mode":"new","parts":[]}: a dedicated renderer draws it.
-- If CURRENT FORM is given and the request changes it ("make it bigger", "add wings", "now in red"), return mode "modify" with the full updated parts list. If it asks for something unrelated, return mode "new".
+- For a human face or head (portrait, person's face, woman, man), return {"title":"...","technique":"portrait","parts":[]}: a dedicated renderer draws it.
 - Abstract ideas: make an elegant symbolic sculpture from the same solids.`;
+
+/** The card's Refine button: changes that one sculpture instead of starting a new one. */
+export const REFINE_PROMPT = `${VISUALIZE_PROMPT}
+
+You are changing an existing sculpture, not starting again. CURRENT FORM holds its parts. Return the complete updated parts list: keep every part the request doesn't touch exactly as it is (same position, size, rotation and colour), and change or add only what was asked for. Keep the title unless the subject itself changed. Always use technique "parts".`;
 
 const isNumber = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value);
 const clamp = (value: number, low: number, high: number) => Math.max(low, Math.min(high, value));
@@ -70,12 +74,11 @@ function color(value: unknown) {
 }
 
 /** Keeps only well-formed parts, with every number bounded. Never throws. */
-export function validateSpec(raw: unknown): VisualSpec & { mode: "new" | "modify" } | null {
+export function validateSpec(raw: unknown): VisualSpec | null {
   if (!raw || typeof raw !== "object") return null;
   const input = raw as Record<string, unknown>;
   const title = typeof input.title === "string" && input.title.trim() ? input.title.replace(/\s+/g, " ").trim().slice(0, 48) : "Visualization";
-  const mode = input.mode === "modify" ? "modify" : "new";
-  if (input.technique === "portrait") return { title, technique: "portrait", parts: [], mode };
+  if (input.technique === "portrait") return { title, technique: "portrait", parts: [] };
   const parts: VisualPart[] = [];
   for (const item of Array.isArray(input.parts) ? input.parts : []) {
     if (!item || typeof item !== "object") continue;
@@ -101,7 +104,7 @@ export function validateSpec(raw: unknown): VisualSpec & { mode: "new" | "modify
     if (parts.length >= MAX_PARTS) break;
   }
   if (!parts.length) return null;
-  return { title, technique: "parts", parts, mode };
+  return { title, technique: "parts", parts };
 }
 
 // --- sampling (browser) ----------------------------------------------------------------------
