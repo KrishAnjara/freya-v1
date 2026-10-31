@@ -9,6 +9,8 @@ import { reportError } from "@/lib/report-error";
 import { beginStream, failStream, finishStream, recordChunk, recordMeta, recordProvider } from "@/lib/stream-telemetry";
 import { AskDialog, ToastStack, type AskRequest, type Toast } from "@/app/components/Dialogs";
 import { feedbackFor, feedbackToJsonl, loadFeedback, saveFeedback } from "@/lib/feedback";
+import type { FreyaConfig } from "@/lib/freya-config";
+import { PRIVATE_VOICE_DOWN } from "@/lib/intimacy";
 import MarkdownContent from "@/app/components/MarkdownContent";
 import VoiceNote, { type RecordedAudio } from "@/app/components/VoiceNote";
 import VoiceRecorder from "@/app/components/VoiceRecorder";
@@ -429,6 +431,8 @@ export default function Home() {
   const [privacyMode, setPrivacyMode] = useState(false);
   /** The server-owned AI setup (display only): Local-only mode's model and the reasoning setting. */
   const [serverSetup, setServerSetup] = useState<{ localModel: string | null; localReady: boolean; reasoning: ReasoningMode; voiceOnThisMachine: boolean }>({ localModel: null, localReady: false, reasoning: "auto", voiceOnThisMachine: true });
+  /** freya.config.json's switches: these beat the browser's own settings. */
+  const [switches, setSwitches] = useState<FreyaConfig>({});
   const [autoMemory, setAutoMemory] = useState(true);
   const [candidLanguage, setCandidLanguage] = useState(true);
   /** The message the next one replies to. */
@@ -524,7 +528,7 @@ export default function Home() {
   // Saved only once the stored mood has been read: saving first overwrote it with the blank
   // starting state, so her mood was lost on every reload.
   useEffect(() => { moodRef.current = mood; if (moodLoadedRef.current) saveMood(mood); }, [mood]);
-  useEffect(() => { initiativeRef.current = { on: initiativeOn, autonomy: autonomyLevel }; }, [initiativeOn, autonomyLevel]);
+  useEffect(() => { initiativeRef.current = { on: switches.textsFirst ?? initiativeOn, autonomy: autonomyLevel }; }, [switches.textsFirst, initiativeOn, autonomyLevel]);
 
   // Chrome fills the voice list asynchronously, so prime it before the first Speak press.
   useEffect(() => { primeVoices(); }, []);
@@ -555,10 +559,19 @@ export default function Home() {
   const checkServerRun = useCallback(() => {
     fetch("/api/session", { cache: "no-store" })
       .then((response) => response.ok ? response.json() : null)
-      .then((payload) => { if (typeof payload?.bootId === "string") setMood((current) => resumeMood(current, Date.now(), payload.bootId)); })
+      .then((payload) => {
+        if (typeof payload?.bootId === "string") setMood((current) => resumeMood(current, Date.now(), payload.bootId));
+        if (payload?.switches && typeof payload.switches === "object") setSwitches(payload.switches);
+      })
       .catch(() => { /* Server unreachable: nothing to compare yet. */ });
   }, []);
-  useEffect(() => { if (hydrated) checkServerRun(); }, [hydrated, checkServerRun]);
+  useEffect(() => {
+    if (!hydrated) return;
+    checkServerRun();
+    // Coming back from flipping a switch in a terminal or editor.
+    window.addEventListener("focus", checkServerRun);
+    return () => window.removeEventListener("focus", checkServerRun);
+  }, [hydrated, checkServerRun]);
 
   useEffect(() => {
     if (!hydrated) return;
@@ -1605,7 +1618,7 @@ export default function Home() {
         await readReplyStream(response.body, controller.signal, {
           onMeta: (found, searchStatus, panel, herBusy) => {
             recordMeta(found.length, searchStatus); sources = found; reasoned = panel; setDeliberatingIn("");
-            if (herBusy && realisticTiming && !initiative && !job.extraPrompt && !job.turn) { pickUpAt = performance.now() + busyDelay(); setTypingIn(""); }
+            if (herBusy && (switches.realisticTiming ?? realisticTiming) && !initiative && !job.extraPrompt && !job.turn) { pickUpAt = performance.now() + busyDelay(); setTypingIn(""); }
           },
           onProvider: (name) => { recordProvider(name); provider = name; },
           onDelta: (delta) => {
@@ -1645,7 +1658,9 @@ export default function Home() {
       await finishPiece();
       // Nothing arrived: the message itself failed, and gets a Resend button.
       if (!posted.length && !initiative && target.role === "user") patchConversation(job.conversationId, (messages) => messages.map((message) => message.id === target.id ? { ...message, failed: true } : message));
-      notify(reportError("chat", error), "error");
+      // These say what actually happened, so they're shown as they are.
+      const reason = error instanceof Error && (error.message === PRIVATE_VOICE_DOWN || error.message.startsWith("Chat request limit reached")) ? error.message : undefined;
+      notify(reportError("chat", error, reason), "error");
     } finally {
       if (activeChatRequest.current === controller) activeChatRequest.current = null;
       setTypingIn("");
@@ -1678,7 +1693,7 @@ export default function Home() {
   /** How a message from them lands on her: mood, and sometimes a new thing to wonder about. */
   function feel(text: string) {
     setMood((current) => {
-      let next = reactToMessage(resumeMood(current), text, Date.now(), { intimate: intimateMode });
+      let next = reactToMessage(resumeMood(current), text, Date.now(), { intimate: intimateMode && switches.sexTalk !== false });
       const words = contentWords(text).filter((word) => word.length >= 6);
       if (words.length && Math.random() < 0.35) next = addCuriosity(next, words[Math.floor(Math.random() * words.length)]);
       return next;
@@ -2141,13 +2156,14 @@ export default function Home() {
               {supabase && <div className="settings-account-block">{user ? <><p className="memory-description">Cloud memories are scoped to this signed-in account.</p><button className="small-primary" type="button" onClick={() => void signOut()}>Sign out</button></> : <><div className="side-label">CLOUD MEMORY ACCOUNT</div><p className="memory-description">Sign in to sync personal memories.</p><form className="memory-form" onSubmit={(event) => void submitAuth("signin", event)}><input type="email" value={authEmail} onChange={(event) => setAuthEmail(event.target.value)} placeholder="Email" autoComplete="email" required/><input type="password" value={authPassword} onChange={(event) => setAuthPassword(event.target.value)} placeholder="Password (min. 6 chars)" autoComplete="current-password" minLength={6} required/><button className="small-primary" type="submit" disabled={authBusy}>{authBusy ? "Please wait…" : "Sign in"}</button><button className="clear-memories" type="button" disabled={authBusy} onClick={() => void submitAuth("signup")}>Create account</button></form></>}</div>}
             </div> : <div id="settings-tab-panel" role="tabpanel" aria-labelledby="settings-tab" className="settings-tab-panel">
               <div className="settings-group-title">CONVERSATION</div>
+              {Object.keys(switches).length > 0 && <p className="settings-description">Greyed-out switches are set in freya.config.json. Run freya to change them.</p>}
               <div className="dialog-setting-row"><div><strong>Reply style</strong><span>Choose FREYA&apos;s conversational tone.</span></div><select value={style} onChange={(event) => setStyle(event.target.value as Style)} aria-label="Reply style"><option value="adaptive">Adaptive</option><option value="friendly">Friendly</option><option value="direct">Direct</option><option value="professional">Professional</option><option value="playful">Playful</option></select></div>
-              <div className="dialog-setting-row"><div><strong>Candid language</strong><span>She swears a lot and trash-talks you when you&apos;ve earned it. No slurs or threats, and none of it when you&apos;re hurting.</span></div><label className="toggle-row"><span className="sr-only">Candid language</span><input type="checkbox" checked={candidLanguage} onChange={(event) => setCandidLanguage(event.target.checked)} /></label></div>
-              <div className="dialog-setting-row"><div><strong>Stay in character</strong><span>I know Freya is an AI, don&apos;t remind me. If you ask, she dodges instead of answering, and she never says she&apos;s human. She still tells you the truth if you&apos;re upset, getting attached, or say &ldquo;drop the act&rdquo;.</span></div><label className="toggle-row"><span className="sr-only">Stay in character</span><input type="checkbox" checked={stayInCharacter} onChange={(event) => setStayInCharacter(event.target.checked)} /></label></div>
-              <div className="dialog-setting-row"><div><strong>Realistic timing</strong><span>When she&apos;s at work or in a lecture, her first reply can take up to a minute.</span></div><label className="toggle-row"><span className="sr-only">Realistic timing</span><input type="checkbox" checked={realisticTiming} onChange={(event) => setRealisticTiming(event.target.checked)} /></label></div>
-              <div className="dialog-setting-row"><div><strong>FREYA texts first</strong><span>She may message you after you&apos;ve been quiet a while, at most twice without a reply. Off at autonomy level 0. Only while FREYA is open in a tab.</span></div><label className="toggle-row"><span className="sr-only">FREYA texts first</span><input type="checkbox" checked={initiativeOn} onChange={(event) => setInitiativeOn(event.target.checked)} /></label></div>
+              <div className="dialog-setting-row"><div><strong>Candid language</strong><span>She swears a lot and trash-talks you when you&apos;ve earned it. No slurs or threats, and none of it when you&apos;re hurting.</span></div><label className="toggle-row"><span className="sr-only">Candid language</span><input type="checkbox" checked={switches.swearing ?? candidLanguage} disabled={switches.swearing !== undefined} onChange={(event) => setCandidLanguage(event.target.checked)} /></label></div>
+              <div className="dialog-setting-row"><div><strong>Stay in character</strong><span>I know Freya is an AI, don&apos;t remind me. If you ask, she dodges instead of answering, and she never says she&apos;s human. She still tells you the truth if you&apos;re upset, getting attached, or say &ldquo;drop the act&rdquo;.</span></div><label className="toggle-row"><span className="sr-only">Stay in character</span><input type="checkbox" checked={switches.stayInCharacter ?? stayInCharacter} disabled={switches.stayInCharacter !== undefined} onChange={(event) => setStayInCharacter(event.target.checked)} /></label></div>
+              <div className="dialog-setting-row"><div><strong>Realistic timing</strong><span>When she&apos;s at work or in a lecture, her first reply can take up to a minute.</span></div><label className="toggle-row"><span className="sr-only">Realistic timing</span><input type="checkbox" checked={switches.realisticTiming ?? realisticTiming} disabled={switches.realisticTiming !== undefined} onChange={(event) => setRealisticTiming(event.target.checked)} /></label></div>
+              <div className="dialog-setting-row"><div><strong>FREYA texts first</strong><span>She may message you after you&apos;ve been quiet a while, at most twice without a reply. Off at autonomy level 0. Only while FREYA is open in a tab.</span></div><label className="toggle-row"><span className="sr-only">FREYA texts first</span><input type="checkbox" checked={switches.textsFirst ?? initiativeOn} disabled={switches.textsFirst !== undefined} onChange={(event) => setInitiativeOn(event.target.checked)} /></label></div>
               <div className="dialog-setting-row"><div><strong>Autonomy</strong><span>How much she does on her own: texting first, and suggesting new tastes for her profile.</span></div><select value={autonomyLevel} onChange={(event) => setAutonomyLevel(Number(event.target.value) as 0 | 1 | 2)} aria-label="Autonomy level"><option value={0}>Level 0 · Reply only</option><option value={1}>Level 1 · Propose for approval</option><option value={2}>Level 2 · Approve tentative interests</option></select></div>
-              <div className="dialog-setting-row"><div><strong>Intimate roleplay (18+)</strong><span>Sexting and adult roleplay when you lead there, or when she&apos;s in a playful mood; she switches back to normal chat when you do. {serverSetup.voiceOnThisMachine ? "Those turns run on your local Ollama model." : "Those turns run on your voice server, never on Groq or Gemini."}</span></div><label className="toggle-row"><span className="sr-only">Intimate roleplay</span><input type="checkbox" checked={intimateMode} onChange={(event) => void toggleIntimateMode(event.target.checked)} /></label></div>
+              <div className="dialog-setting-row"><div><strong>Intimate roleplay (18+)</strong><span>Sexting and adult roleplay when you lead there, or when she&apos;s in a playful mood; she switches back to normal chat when you do. {serverSetup.voiceOnThisMachine ? "Those turns run on your local Ollama model." : "Those turns run on your voice server, never on Groq or Gemini."}</span></div><label className="toggle-row"><span className="sr-only">Intimate roleplay</span><input type="checkbox" checked={intimateMode && switches.sexTalk !== false} disabled={switches.sexTalk === false} onChange={(event) => void toggleIntimateMode(event.target.checked)} /></label></div>
               <div className="settings-group-title">MEMORY</div>
               <div className="dialog-setting-row"><div><strong>Use memories in replies</strong><span>FREYA brings up what she remembers about you when it&apos;s relevant.</span></div><label className="toggle-row"><span className="sr-only">Use memories in replies</span><input type="checkbox" checked={memoryEnabled} onChange={(event) => setMemoryEnabled(event.target.checked)} /></label></div>
               <div className="dialog-setting-row"><div><strong>Remember things automatically</strong><span>After a conversation goes quiet, or when you switch chats, a cloud model reads what&apos;s new and keeps what matters: people, plans, preferences, things to follow up. Small talk isn&apos;t kept. In Local-only mode only explicit &ldquo;I prefer…&rdquo; statements are saved.</span></div><label className="toggle-row"><span className="sr-only">Remember things automatically</span><input type="checkbox" checked={autoMemory} onChange={(event) => setAutoMemory(event.target.checked)} /></label></div>

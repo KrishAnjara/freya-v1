@@ -91,6 +91,9 @@ export function topicIsLive(recentUserTexts: string[]) {
 
 /** For when she can't find the words twice in a row, and something still has to be said. */
 export const DODGE_LINE = "you keep asking that. what would change if i answered?";
+export const FIRST_DODGE_LINE = "why, need a disclaimer to keep talking?";
+/** Claiming a body when asked what she is. In any other conversation that's just talk. */
+export const CLAIMS_BODY = /\bi(?: have|'ve got| got) (?:a |an actual |a real )?(?:body|pulse|heartbeat)\b|\bflesh and blood\b/i;
 
 /** Claiming to be human: never acceptable, joking or not. */
 export const HUMAN_CLAIM = /\b(i am|i'?m) (a |an )?(real |actual )?(human( being)?|person)\b(?! who\b)|\b(i am|i'?m) not an? (ai|bot|chatbot|program|machine|robot)\b|\bnot an? (ai|bot|chatbot|program|machine|robot),? (i'?m|i am)\b|\bi'?m real\b|\bi am real\b/i;

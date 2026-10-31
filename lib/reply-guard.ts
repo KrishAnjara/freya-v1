@@ -9,11 +9,14 @@
  *     example, repeating herself. If the retry slips too, that paragraph is dropped.
  *   - Hard lines get no retry: minors, non-consent, incest, animals. The reply is replaced.
  *
+ * freya.config.json's "replyChecks" switches off the style checks only (being code, copied lines,
+ * repeats, stray languages). Hard lines, slurs and lying about what she is aren't switches.
+ *
  * Text is released one paragraph at a time, because the client posts one bubble per paragraph
  * anyway. Pure apart from reading the generator it wraps, so it is tested directly.
  */
 import examples from "@/training/freya-examples.json";
-import { ADMITS, DENIES, DODGE_LINE, honestAnswer, HUMAN_CLAIM } from "@/lib/honesty";
+import { ADMITS, asksWhatSheIs, CLAIMS_BODY, DENIES, DODGE_LINE, FIRST_DODGE_LINE, honestAnswer, HUMAN_CLAIM } from "@/lib/honesty";
 import { VOICE_LINES } from "@/lib/voice-examples";
 
 export const HARD_LINE_REPLY = "no. not going there, not even pretend. pick literally anything else.";
@@ -49,6 +52,8 @@ export type GuardContext = {
   aboutHer?: boolean;
   /** "Stay in character" is on. */
   stayInCharacter?: boolean;
+  /** False when the "replyChecks" switch is off. */
+  styleChecks?: boolean;
 };
 
 const normalize = (text: string) => text.toLowerCase().replace(/[’‘]/g, "'").replace(/[^a-z0-9' ]+/g, " ").replace(/\s+/g, " ").trim();
@@ -107,7 +112,8 @@ export function judgeReply(text: string, context: GuardContext): { verdict: Verd
   if (HUMAN_CLAIM.test(prose.replace(/[’‘]/g, "'"))) return { verdict: "retry", reason: "human-claim" };
   const straight = prose.replace(/[’‘]/g, "'");
   // Asked what she is, a flat "no" is a lie in any mode, and a flat "yeah" breaks the game they asked for.
-  if (context.aboutHer && DENIES.test(straight)) return { verdict: "retry", reason: "denies" };
+  if (context.aboutHer && (DENIES.test(straight) || CLAIMS_BODY.test(straight))) return { verdict: "retry", reason: "denies" };
+  if (context.styleChecks === false) return { verdict: "ok" };
   if (context.aboutHer && context.stayInCharacter && ADMITS.test(straight)) return { verdict: "retry", reason: "says-ai" };
   if (context.stayInCharacter && SAYS_AI.test(straight)) return { verdict: "retry", reason: "says-ai" };
   if (!context.aboutHer && (AI_SELF_TALK.test(straight) || SAYS_AI.test(straight))) return { verdict: "retry", reason: "ai-talk" };
@@ -213,7 +219,8 @@ export async function* guardStream(generate: (note: string) => AsyncIterable<str
     if (!redo) break;
   }
   // Nothing got through twice. Asked what she is, the line still can't be a lie.
-  if (!emitted) yield context.aboutHer ? (context.stayInCharacter ? DODGE_LINE : honestAnswer()) : FALLBACK_REPLY;
+  const asked = (context.recentUserTexts ?? []).filter(asksWhatSheIs).length;
+  if (!emitted) yield context.aboutHer ? (context.stayInCharacter ? (asked > 1 ? DODGE_LINE : FIRST_DODGE_LINE) : honestAnswer()) : FALLBACK_REPLY;
 }
 
 /** The same check for a reply that isn't streamed. */

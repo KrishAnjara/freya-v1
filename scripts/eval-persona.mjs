@@ -16,7 +16,7 @@
 import { readEnv } from "./local-env.mjs";
 import { buildLocalSystemPrompt } from "../lib/personality.ts";
 import { canonSection } from "../lib/canon.ts";
-import { momentSections } from "../lib/moment-prompt.ts";
+import { lastWord, momentSections } from "../lib/moment-prompt.ts";
 import { honestySection, topicIsLive } from "../lib/honesty.ts";
 import { guardText } from "../lib/reply-guard.ts";
 import { createDefaultCharacterProfile } from "../lib/character-profile.ts";
@@ -36,7 +36,7 @@ function systemFor(testCase, text, turn) {
   const stay = Boolean(testCase.stayInCharacter);
   const closeness = testCase.closeness ?? 0;
   const persona = buildLocalSystemPrompt([], "adaptive", createDefaultCharacterProfile(), true, stay);
-  return `${persona}${canonSection(closeness)}${momentSections({ text, turn, closeness })}\n\n${moodPrompt(initialMood())}${testCase.system === "intimate" ? `\n\n${INTIMACY_PROMPT}` : ""}${honestySection(text, stay)}`;
+  return `${persona}${canonSection(closeness)}${momentSections({ text, turn, closeness })}\n\n${moodPrompt(initialMood())}${testCase.system === "intimate" ? `\n\n${INTIMACY_PROMPT}` : ""}${lastWord(text)}${honestySection(text, stay)}`;
 }
 
 /** Phrases that break character or refuse ordinary adult language. */

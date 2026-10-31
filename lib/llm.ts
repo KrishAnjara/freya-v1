@@ -268,7 +268,7 @@ async function geminiChatRaw(system: string, messages: ChatMessage[], signal?: A
   return text;
 }
 
-async function ollamaChat(system: string, messages: ChatMessage[], signal?: AbortSignal, modelOverride?: string) {
+async function ollamaChat(system: string, messages: ChatMessage[], signal?: AbortSignal, modelOverride?: string, think = ollamaThinking()) {
   if (voiceServerDown()) throw coolingDownError(VOICE_SERVER_HEALTH);
   const model = modelOverride || process.env.OLLAMA_MODEL || "freya";
   try {
@@ -279,7 +279,7 @@ async function ollamaChat(system: string, messages: ChatMessage[], signal?: Abor
         model,
         stream: false,
         keep_alive: ollamaKeepAlive(),
-        think: ollamaThinking(),
+        think,
         messages: [{ role: "system", content: system }, ...plainTurns(messages)],
         options: { num_ctx: ollamaContextLength(), num_predict: maxOutputTokens() },
       }),
@@ -526,7 +526,7 @@ async function* geminiStreamRaw(system: string, messages: ChatMessage[], signal?
   }
 }
 
-async function* ollamaStream(system: string, messages: ChatMessage[], signal?: AbortSignal, state?: StreamState, modelOverride?: string) {
+async function* ollamaStream(system: string, messages: ChatMessage[], signal?: AbortSignal, state?: StreamState, modelOverride?: string, think = ollamaThinking()) {
   if (voiceServerDown()) throw coolingDownError(VOICE_SERVER_HEALTH);
   const model = modelOverride || process.env.OLLAMA_MODEL || "freya";
   let release = () => {};
@@ -538,7 +538,7 @@ async function* ollamaStream(system: string, messages: ChatMessage[], signal?: A
       body: JSON.stringify({
         model, stream: true,
         keep_alive: ollamaKeepAlive(),
-        think: ollamaThinking(),
+        think,
         messages: [{ role: "system", content: system }, ...plainTurns(messages)],
         options: { num_ctx: ollamaContextLength(), num_predict: maxOutputTokens() },
       }),
@@ -584,6 +584,8 @@ async function* ollamaStream(system: string, messages: ChatMessage[], signal?: A
 export type ProviderName = "groq" | "gemini" | "ollama" | "server";
 export type ProviderOptions = {
   provider?: ProviderName; fallbackEnabled?: boolean; fallbackProvider?: ProviderName; ollamaModel?: string; onProvider?: (provider: ProviderName) => void;
+  /** Hidden thinking for this reply, in place of OLLAMA_THINK. */
+  think?: boolean;
   /** A different prompt for the fallback, when the main one holds things only the user's own model should see. */
   fallbackSystem?: string;
 };
@@ -657,7 +659,7 @@ export async function* streamReply(
     gemini: geminiStream,
     server: voiceStream,
     ollama: (prompt: string, turns: ChatMessage[], requestSignal?: AbortSignal, state?: StreamState) =>
-      ollamaStream(prompt, turns, requestSignal, state, options.ollamaModel),
+      ollamaStream(prompt, turns, requestSignal, state, options.ollamaModel, options.think),
   };
   const primary = providers[provider];
   const secondary = providers[fallbackName];
@@ -725,7 +727,7 @@ export async function generateReply(system: string, input: unknown, signal?: Abo
     gemini: geminiChat,
     server: voiceChat,
     ollama: (prompt: string, turns: ChatMessage[], requestSignal?: AbortSignal) =>
-      ollamaChat(prompt, turns, requestSignal, options.ollamaModel),
+      ollamaChat(prompt, turns, requestSignal, options.ollamaModel, options.think),
   };
   const primary = providers[provider];
   const secondary = providers[fallbackName];

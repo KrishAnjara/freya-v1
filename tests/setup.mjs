@@ -2,6 +2,8 @@
 // search cache are process-level state; without a reset, one test's simulated outage would
 // silently skip a provider in the next test.
 import { afterEach, beforeEach } from "node:test";
+// Tests set their own switches: flipping one in freya.config.json mustn't change what they check.
+process.env.FREYA_CONFIG_PATH = "freya.config.not-in-tests.json";
 import { resetProviderHealthForTests } from "../lib/provider-health.ts";
 import { clearSearchCacheForTests } from "../lib/search.ts";
 

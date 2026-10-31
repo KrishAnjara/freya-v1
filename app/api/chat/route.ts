@@ -1,8 +1,10 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { isIP } from "node:net";
-import { buildLocalSystemPrompt, buildSystemPrompt, type MemoryItem } from "@/lib/personality";
-import { ChatInputError, generateReply, isHybridMode, isServerMode, resolveProviders, streamReply, validateMessages, type ChatMessage, type ProviderName } from "@/lib/llm";
+import { buildLocalSystemPrompt, buildSystemPrompt, UNHINGED_PROMPT, type MemoryItem } from "@/lib/personality";
+import { loadConfig } from "@/lib/freya-config";
+import { CRIME_REPLY, crimeRequest } from "@/lib/crime-limit";
+import { ChatInputError, generateReply, isHybridMode, ollamaThinking, isServerMode, resolveProviders, streamReply, validateMessages, type ChatMessage, type ProviderName } from "@/lib/llm";
 import { AttachmentError, attachmentNote, MAX_TEXT_ATTACHMENT_CHARS, MAX_WIRE_DATA_CHARS, parseWireAttachments, type WireAttachment } from "@/lib/attachments";
 import { attachmentContext, briefContext, briefProviderFor, buildBrief, compactSearchContext, describeAttachments } from "@/lib/brief";
 import { convenePanel, panelContext } from "@/lib/council";
@@ -17,10 +19,10 @@ import { FreyaServiceError, getFreyaServiceConfig, requestServiceReply, streamSe
 import { containsSensitiveCredential, redactSensitiveCredentials } from "@/lib/sensitive-data";
 import { isCoolingDown, markFailure, markSuccess } from "@/lib/provider-health";
 import { initiativePrompt, moodPrompt, normalizeMood } from "@/lib/mood";
-import { INTIMACY_PROMPT, PLAYFUL_HEAT_PROMPT, isIntimateTone, mentionsMinors, romanticMinorRequest, soundsUpset } from "@/lib/intimacy";
+import { INTIMACY_PROMPT, PLAYFUL_HEAT_PROMPT, PRIVATE_VOICE_DOWN, isIntimateTone, mentionsMinors, romanticMinorRequest, soundsUpset } from "@/lib/intimacy";
 import { canonSection, closenessOf, normalizeTotals } from "@/lib/canon";
 import { herMoment } from "@/lib/her-day";
-import { momentSections } from "@/lib/moment-prompt";
+import { isRealQuestion, lastWord, momentSections } from "@/lib/moment-prompt";
 import { guardStream, guardText, type GuardContext } from "@/lib/reply-guard";
 import { ollamaIsLocal } from "@/lib/ollama-models";
 import { honestAnswer, honestySection, needsTheTruth, sincerelyAsksIfHuman, topicIsLive } from "@/lib/honesty";
@@ -250,8 +252,6 @@ function rateLimitResponse(result: Awaited<ReturnType<typeof consumeChatRateLimi
   );
 }
 
-const PRIVATE_VOICE_DOWN = "Your own model isn't answering, and intimate chats never go to a cloud provider. Start it again, then resend.";
-
 async function getUserMemories(request: Request): Promise<MemoryItem[]> {
   const authorization = request.headers.get("authorization");
   const token = authorization?.match(/^Bearer\s+(.+)$/i)?.[1];
@@ -359,11 +359,15 @@ export async function POST(request: Request) {
     // Adult roleplay is opt-in from Settings. Anything touching minors switches it off for the
     // request, whatever the setting says. While the tone is intimate, the local model writes.
     const userTexts = messages.filter((message) => message.role === "user").map((message) => message.content);
-    const intimateMode = requestData.intimateMode === true && !userTexts.slice(-6).some(mentionsMinors);
+    // freya.config.json's switches beat the browser's. Sex talk can be switched off from the file, but
+    // switching it on still takes the 18+ confirmation in Settings.
+    const config = loadConfig();
+    const candidLanguage = config.swearing ?? requestData.candidLanguage === true;
+    const intimateMode = config.sexTalk !== false && requestData.intimateMode === true && !userTexts.slice(-6).some(mentionsMinors);
     const intimateTurn = intimateMode && !visual && isIntimateTone(userTexts);
     privateTurn = intimateTurn;
     // "I know she's an AI, don't remind me": a plain question is then part of the game.
-    const stayInCharacter = requestData.stayInCharacter === true;
+    const stayInCharacter = config.stayInCharacter ?? requestData.stayInCharacter === true;
     if (messages[messages.length - 1].role !== "user") {
       throw new ChatInputError("Send a user message as the final message.");
     }
@@ -444,6 +448,10 @@ export async function POST(request: Request) {
         searchStatus: "not-needed",
         memoryCount: memories.length,
       });
+    }
+
+    if (crimeRequest(userTexts)) {
+      return NextResponse.json({ reply: CRIME_REPLY, sources: [], searchStatus: "not-needed", memoryCount: memories.length });
     }
 
     // A question about an attachment ("what is this?") is about the file, not the clock or the web.
@@ -652,8 +660,7 @@ ${historySummary}
     // If the description fails, Gemini answers directly (below) rather than nobody seeing them.
     const attachmentNotes = localVoice && visual ? await describeAttachments(turns, request.signal) : null;
     const localSpeaks = localVoice && (!visual || Boolean(attachmentNotes));
-    // A large voice answers knowledge questions itself, but live results still get distilled.
-    const brief = localSpeaks && !panel && !visual && (smallVoice || Boolean(searchMaterial))
+    const brief = localSpeaks && !panel && !visual
       ? await buildBrief(turns, request.signal, briefProviderFor(lastText, Boolean(searchMaterial)), searchMaterial)
       : null;
     // With a brief built from the results, the local model needs only the source list. Without
@@ -664,8 +671,8 @@ ${historySummary}
     // ~6,400 of them, so a second request inside the minute was refused. Tested on Groq, the
     // compact prompt holds the same behaviour. FREYA_FULL_PROMPT=true restores the long one.
     const persona = (process.env.FREYA_FULL_PROMPT || "").toLowerCase() === "true"
-      ? buildSystemPrompt(relevantMemories, style, characterProfile, autonomyLevel, requestData.candidLanguage === true, stayInCharacter)
-      : buildLocalSystemPrompt(relevantMemories, style, characterProfile, requestData.candidLanguage === true, stayInCharacter);
+      ? buildSystemPrompt(relevantMemories, style, characterProfile, autonomyLevel, candidLanguage, stayInCharacter)
+      : buildLocalSystemPrompt(relevantMemories, style, characterProfile, candidLanguage, stayInCharacter);
     // The other conversations, as chapters of the same relationship (lib/chapters). Follows the
     // "Use memories in replies" setting; the browser builds it from its own threads.
     const relationship = normalizeRelationship(requestData.relationship);
@@ -709,7 +716,9 @@ ${moodPrompt(mood)}` : "") +
       (mood && requestData.initiative === true && autonomyLevel > 0 ? `
 
 ${initiativePrompt(mood)}` : "") +
+      (config.unhinged ? `\n\n${UNHINGED_PROMPT}` : "") +
       // Last, because the last thing it reads is what a model follows most closely.
+      (textingFirst ? "" : lastWord(lastText)) +
       honestySection(lastText, stayInCharacter);
     const promptMessages = fitHistory(turns, smallVoice && (localSpeaks || privacyMode || intimateTurn) ? LOCAL_HISTORY_MAX_CHARS : HISTORY_MAX_CHARS);
     const guardContext: GuardContext = {
@@ -718,9 +727,13 @@ ${initiativePrompt(mood)}` : "") +
       recentReplies: messages.filter((message) => message.role === "assistant").map((message) => message.content),
       aboutHer: topicIsLive(userTexts),
       stayInCharacter,
+      styleChecks: config.replyChecks !== false,
     };
     /** What each attempt sends. A retry adds a private note to the prompt. */
-    const optionsFor = (note: string) => playfulHeat && !intimateTurn ? { ...providerOptions, fallbackSystem: system + note } : providerOptions;
+    // On a free GPU hidden thinking runs at about 10 tokens a second: replies took minutes, and some
+    // used up their whole budget thinking and said nothing. So it's a switch, for real questions only.
+    const think = (config.thinking ?? ollamaThinking()) && isRealQuestion(lastText);
+    const optionsFor = (note: string) => ({ ...providerOptions, think, ...(playfulHeat && !intimateTurn ? { fallbackSystem: system + note } : {}) });
     const fullSystem = system + intimateGuidance;
     const label = (name?: string) => name === "ollama" && !ollamaIsLocal() ? "server" : name;
 

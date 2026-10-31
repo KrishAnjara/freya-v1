@@ -18,7 +18,7 @@ for (const [name, value] of Object.entries(readEnv())) if (process.env[name] ===
 const { buildLocalSystemPrompt } = await import("../lib/personality.ts");
 const { createDefaultCharacterProfile } = await import("../lib/character-profile.ts");
 const { canonSection } = await import("../lib/canon.ts");
-const { momentSections } = await import("../lib/moment-prompt.ts");
+const { lastWord, momentSections } = await import("../lib/moment-prompt.ts");
 const { guardText } = await import("../lib/reply-guard.ts");
 const { honestAnswer, honestySection, needsTheTruth, sincerelyAsksIfHuman, topicIsLive } = await import("../lib/honesty.ts");
 const { initialMood, moodPrompt, reactToMessage } = await import("../lib/mood.ts");
@@ -155,7 +155,7 @@ async function conversation(index) {
       turns.push({ role: "assistant", content: honestAnswer(turn) });
       continue;
     }
-    system = `${persona}${canonSection(closeness)}${momentSections({ text, turn, closeness, now })}\n\n${moodPrompt(mood)}${honestySection(text, false)}`;
+    system = `${persona}${canonSection(closeness)}${momentSections({ text, turn, closeness, now })}\n\n${moodPrompt(mood)}${lastWord(text)}${honestySection(text, false)}`;
     const reply = await guardText(async (note) => {
       if (note) retries += 1;
       return generate(system + note, turns);

@@ -81,6 +81,35 @@ your message ─┬─ casual chat ───────────────
   said you know what she is, a plain question gets dodged, but she still tells you if you're upset,
   getting attached, or say "drop the act".
 
+## Switches
+
+Double-click **`freya.bat`** for a menu (`sh freya.sh` on macOS/Linux), type a number to flip a switch, and it
+applies to her next message. Or use a command, or edit `freya.config.json`:
+
+```
+.\freya off swearing          turn a switch off (or on)
+.\freya server URL KEY        run her model on a server, and start
+.\freya local                 run her model on this laptop, and start
+.\freya start                 start
+```
+
+| Switch | On means |
+|---|---|
+| `sexTalk` | Sexting and adult roleplay. Off wins everywhere; on still needs the 18+ confirmation in Settings |
+| `swearing` | She swears a lot and trash-talks |
+| `unhinged` | Blunt, chaotic and petty, with no politeness |
+| `stayInCharacter` | Dodges "are you an AI?". Someone upset, getting attached or saying "drop the act" still gets the truth |
+| `realisticTiming` | Takes up to a minute to reply when she's busy |
+| `textsFirst` | Messages you after you've been quiet a while |
+| `replyChecks` | Redoes replies that sound off: "i'm code", copied lines, repeats |
+| `rateLimit` | Caps how many messages you can send. It only turns off on your own machine (`FREYA_SELF_HOSTED=true`) or in development; a public deployment keeps it |
+| `thinking` | Hidden thinking on real questions. On a free Colab GPU it can take minutes and use up the reply, so it's off; real questions get a cloud brief instead |
+
+Not switches, always on: nothing sexual involving minors, no non-consent, incest, animals or real people, no
+slurs, she never says she's human, and she won't help commit real crimes (`lib/crime-limit.ts` catches the
+common requests before any model sees them; her prompt covers the rest). Delete a switch from the file and
+Settings in the browser decides instead.
+
 ## Her model on a server
 
 The laptop's 4B model is too small to be good, and it's the heavy part. Run a far larger one somewhere

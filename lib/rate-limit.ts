@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { Ratelimit } from "@upstash/ratelimit";
 import { Redis } from "@upstash/redis";
+import { loadConfig } from "@/lib/freya-config";
 
 export type ChatIdentity = {
   type: "edge" | "anonymous" | "authenticated" | "owner";
@@ -13,8 +14,9 @@ export type ChatIdentity = {
  * A hosted deployment identifies each visitor from a header its edge proxy writes, and refuses
  * to serve without one. Run locally there is no proxy, so that header never exists and every
  * request was refused. Self-hosted mode replaces per-visitor identity with a single owner
- * budget. Limiting still applies: if the app were exposed by mistake, all traffic would share
- * that one budget, which caps the damage to the owner's API quota.
+ * budget. Limiting still applies, unless the owner switches it off in freya.config.json: if the app
+ * were exposed by mistake, all traffic would share that one budget, which caps the damage to the
+ * owner's API quota.
  */
 export function isSelfHosted() {
   return process.env.FREYA_SELF_HOSTED?.trim().toLowerCase() === "true";
@@ -114,6 +116,10 @@ export async function consumeChatRateLimit(
   identity: ChatIdentity,
   now = Date.now(),
 ): Promise<RateLimitResult> {
+  // The "rateLimit" switch is for your own machine: a public deployment keeps its limits.
+  if (loadConfig().rateLimit === false && (process.env.NODE_ENV !== "production" || isSelfHosted())) {
+    return { allowed: true, limit: Number.MAX_SAFE_INTEGER, remaining: Number.MAX_SAFE_INTEGER, resetAt: now, retryAfterSeconds: 0, backend: "local" };
+  }
   const policyKey: PolicyKey = identity.type;
   const subjectHash = createHash("sha256").update(identity.subject).digest("hex");
   const policy = POLICY[policyKey];

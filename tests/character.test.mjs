@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
-import { asksWhatSheIs, DODGE_LINE, honestAnswer, honestySection, HUMAN_CLAIM, needsTheTruth, sincerelyAsksIfHuman, topicIsLive } from "../lib/honesty.ts";
+import { asksWhatSheIs, DODGE_LINE, FIRST_DODGE_LINE, honestAnswer, honestySection, HUMAN_CLAIM, needsTheTruth, sincerelyAsksIfHuman, topicIsLive } from "../lib/honesty.ts";
 import { canonSection, closenessOf, normalizeTotals } from "../lib/canon.ts";
 import { herDaySection, herMoment } from "../lib/her-day.ts";
 import { pickExamples, situationsOf, voiceExamplesSection } from "../lib/voice-examples.ts";
@@ -154,7 +154,8 @@ test("asked what she is: a flat no is a lie in any mode, and a flat yes breaks t
   // If she can't manage it twice, the last word still isn't a lie either way.
   env();
   const stay = await chat({ ...say("are you a bot"), stayInCharacter: true }, ["yeah", "yes"]);
-  assert.equal(stay.payload.reply, DODGE_LINE);
+  assert.equal(stay.payload.reply, FIRST_DODGE_LINE, "not \"you keep asking\" the first time");
+  assert.notEqual(DODGE_LINE, FIRST_DODGE_LINE);
   const plain = await chat(say("you're such a bot"), ["nope", "no"]);
   assert.match(plain.payload.reply, /i'm an AI/);
 });
@@ -482,13 +483,14 @@ test("turning her on keeps her playful, but only with the switch on", () => {
 
 // --- server mode ---------------------------------------------------------------
 
-test("a voice server gets its token, a larger window, and no brief for ordinary knowledge", async () => {
+test("a voice server gets its token, a larger window, and a brief for a real question", async () => {
   env({ OLLAMA_BASE_URL: "https://voice.example.com", OLLAMA_API_KEY: "secret-token" });
   const { calls, payload } = await chat(say("how does a red black tree stay balanced"));
-  assert.equal(calls.length, 1, "no cloud research first");
-  assert.equal(calls[0].url, "https://voice.example.com/api/chat");
-  assert.equal(calls[0].headers.Authorization, "Bearer secret-token");
-  assert.equal(calls[0].body.options.num_ctx, 8192);
+  const voice = calls.find((call) => call.url.includes("voice.example.com"));
+  assert.ok(calls.some((call) => call.url.includes("groq")), "the facts come from the cloud; thinking is too slow on a free GPU");
+  assert.equal(voice.url, "https://voice.example.com/api/chat");
+  assert.equal(voice.headers.Authorization, "Bearer secret-token");
+  assert.equal(voice.body.options.num_ctx, 8192);
   assert.equal(payload.provider, "server", "not labelled LOCAL");
 });
 

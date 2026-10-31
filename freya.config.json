@@ -1,0 +1,12 @@
+{
+  "_help": "true = on, false = off. Save and it applies to her next message, no restart. Or run freya for a menu.",
+  "sexTalk": true,
+  "swearing": true,
+  "unhinged": true,
+  "stayInCharacter": true,
+  "realisticTiming": true,
+  "textsFirst": true,
+  "replyChecks": true,
+  "rateLimit": false,
+  "thinking": false
+}
