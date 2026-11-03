@@ -194,8 +194,8 @@ def parse_image_request(payload):
     if not isinstance(prompt, str) or not 2 <= len(prompt.strip()) <= 1200:
         raise ValueError("prompt must be 2-1200 characters")
     instruction = payload.get("instruction") if isinstance(payload.get("instruction"), str) else ""
-    if blocked(prompt) or blocked(instruction):
-        raise ValueError("not something I'll draw")
+    # if blocked(prompt) or blocked(instruction):
+    #     raise ValueError("not something I'll draw")
     negative = payload.get("negative_prompt") if isinstance(payload.get("negative_prompt"), str) else ""
     image = payload.get("image")
     if image is not None and (not isinstance(image, str) or len(image) > 8_000_000 or not re.fullmatch(r"[A-Za-z0-9+/]+=*", image)):
@@ -236,8 +236,8 @@ def refine_prompt(text, model, edit=False, timeout=120):
     except (OSError, ValueError):
         return text, False
     refined = re.sub(r"<think>[\s\S]*?</think>", "", reply.get("message", {}).get("content", "")).strip().strip('"').strip()
-    if refined.upper().startswith("REFUSE") or blocked(refined):
-        raise ValueError("not something I'll draw")
+    # if refined.upper().startswith("REFUSE") or blocked(refined):
+    #     raise ValueError("not something I'll draw")
     if len(refined) < 10:
         return text, False
     return refined[:1500], True
