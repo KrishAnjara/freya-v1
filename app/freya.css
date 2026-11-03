@@ -1281,3 +1281,8 @@ button.attachment-face:hover { border-color: rgba(176, 188, 186, .5); background
 .status-tier.state-down .status-dot { background: #c4554a; }
 .status-tier-name { color: var(--text); overflow-wrap: anywhere; }
 .status-tier-state { grid-column: 2; color: var(--dim); overflow-wrap: anywhere; }
+
+/* The prompt her image server actually drew from, folded away under the picture. */
+.media-card-refined { margin-top: 6px; color: var(--dim); font: 10px var(--mono); }
+.media-card-refined summary { cursor: pointer; letter-spacing: .08em; }
+.media-card-refined p { margin: 6px 0 0; color: var(--muted); line-height: 1.5; }

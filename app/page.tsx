@@ -248,7 +248,7 @@ function sanitizeMedia(message: Message): Pick<Message, "visualization" | "pictu
       const svg = sanitizeSvg(picture.svg);
       return { picture: svg ? { status: "ready", kind: "svg", prompt, svg, ...(typeof picture.reason === "string" ? { reason: picture.reason } : {}) } : { status: "error", prompt, error: "This drawing couldn't be shown." } };
     }
-    if (picture.status === "ready" && picture.kind === "generated") return { picture: { status: "ready", kind: "generated", prompt, ...(typeof picture.model === "string" ? { model: picture.model.slice(0, 60) } : {}) } };
+    if (picture.status === "ready" && picture.kind === "generated") return { picture: { status: "ready", kind: "generated", prompt, ...(typeof picture.model === "string" ? { model: picture.model.slice(0, 60) } : {}), ...(typeof picture.refined === "string" ? { refined: picture.refined.slice(0, 1500) } : {}) } };
     return { picture: { status: "error", prompt, error: typeof picture.error === "string" ? picture.error : "This picture didn't finish." } };
   }
   return {};
@@ -2033,7 +2033,7 @@ export default function Home() {
         const attachmentId = id();
         const prepared = await prepareAttachment(new File([bytes], `freya-picture.${payload.mime.split("/")[1] || "png"}`, { type: payload.mime }), attachmentId);
         await putAttachment(attachmentId, prepared.stored);
-        patchMessage(conversationId, cardId, { attachments: [prepared.meta], picture: { status: "ready", kind: "generated", prompt: fullPrompt, model: String(payload.model || "") } });
+        patchMessage(conversationId, cardId, { attachments: [prepared.meta], picture: { status: "ready", kind: "generated", prompt: fullPrompt, model: String(payload.model || ""), ...(typeof payload.refined === "string" ? { refined: payload.refined } : {}) } });
       } else {
         const svg = sanitizeSvg(payload.svg);
         if (payload.kind !== "svg" || !svg) throw new Error("That picture couldn't be made.");

@@ -18,8 +18,8 @@ add more (see `.env.example`). Nothing is downloaded to the laptop for her model
 |---|---|
 | **What it does** | Runs her voice, a fallback model, an embedding model for memory and (optionally) pictures on Colab's GPU, behind one login and one Cloudflare address |
 | **Configure** | The form at the top of the cell: `MODEL` (empty = automatic), `FALLBACK_MODEL`, `EMBED_MODEL`, `IMAGES`, `TOKEN`. Optional: Colab **Secrets** → `HF_TOKEN` for a private model of yours |
-| **Downloads** | `huihui_ai/Qwen3.8-abliterated:27b` (q4_K_M on 20 GB+, q3_K on a T4; ~14 GB; text + vision), `huihui_ai/qwen3.5-abliterated:4B` (fallback, 3.3 GB), `nomic-embed-text` (0.3 GB), and with pictures `stabilityai/stable-diffusion-xl-base-1.0` + `ByteDance/SDXL-Lightning` 4-step LoRA (~7 GB, both openrail++) |
-| **GPU** | A free T4 (15 GB) works. The 27B fills it, so a picture unloads her text model for a moment (the next reply takes 20-40 s longer); embeddings run on the CPU. A 24 GB GPU holds everything at once |
+| **Downloads** | Voice: `DavidAU/Dark-Forest-V1-Ultra-Quality-20b-GGUF` (Q3_K_L on a T4, ~10.6 GB; Q5_K_M on 20 GB+). Helper: `huihui_ai/qwen3.5-abliterated:4B` (3.3 GB; fallback voice, reads images, refines picture prompts). `nomic-embed-text` (0.3 GB). With pictures: ComfyUI + `abenzerps/Qwen-Image-2.1-Uncensored-Quantized` (Q4_K_M model 4.6 GB, int8 text encoder 9.4 GB, VAE 0.7 GB) |
+| **GPU** | A free T4 (15 GB) works. Dark Forest fills it, so a picture unloads her voice (the next reply takes 20-40 s longer) and takes several minutes on a T4; embeddings run on the CPU |
 | **Start** | Runtime → Change runtime type → T4 GPU, then run the cell. First start: 5-15 min (downloads); later starts in the same session are quick |
 | **Connect** | Copy the printed line and run it in the freya-v1 folder: `start.bat --remote https://….trycloudflare.com --key …`. It also picks up the fallback and embedding models. Add `--laptop` to let this laptop's own `freya` answer if the server goes away |
 | **Stop** | Interrupt the cell. The laptop falls back (see the chain below) until you start it again; memory stays on the laptop |
@@ -78,10 +78,12 @@ allows but never widen it.
 
 | Role | Model | Licence | Why this one |
 |---|---|---|---|
-| Voice (Colab) | `huihui_ai/Qwen3.8-abliterated:27b` (Ollama) | Apache-2.0 (checked on Hugging Face) | Strongest that fits a T4 at q3_K; refusal direction removed without a fine-tune, so reasoning is intact; vision, tools and thinking (per Ollama's model page) |
-| Fallback / fine-tune base | `huihui-ai/Huihui-Qwen3.5-4B/9B-abliterated` | Apache-2.0 | Same family and chat format as the voice, so a fine-tune keeps her style; trains on a free T4 |
-| Embeddings | `nomic-embed-text` (Ollama) | Apache-2.0 | Small (0.3 GB), runs on the CPU beside the 27B |
-| Pictures | `stable-diffusion-xl-base-1.0` + `SDXL-Lightning` 4-step LoRA | openrail++ | Ungated, 4 steps (a few seconds a picture once loaded; an estimate, not measured here), image-to-image for edits and variations. FLUX.1-schnell (Apache-2.0) draws better but is gated and needs ~24 GB |
+| Voice (Colab) | `DavidAU/Dark-Forest-V1-Ultra-Quality-20b-GGUF` | Apache-2.0 GGUF of a merge that includes Orca-2 (Microsoft Research Licence): personal use | Your choice: uncensored roleplay, tracks several characters. A Llama-2 merge: 4096-token window, no vision, weaker at reasoning, which is why the cloud brief and reasoning panel still help it. Chat format: Alpaca (set by the server) |
+| Helper | `huihui_ai/qwen3.5-abliterated:4B` | Apache-2.0 | Sees images (Dark Forest can't), uncensored for the picture-prompt refiner, small enough to swap in |
+| Fine-tune base | `huihui-ai/Huihui-Qwen3.5-4B/9B-abliterated` | Apache-2.0 | Same family as the helper, trains on a free T4 |
+| Embeddings | `nomic-embed-text` (Ollama) | Apache-2.0 | Small (0.3 GB), runs on the CPU beside her voice |
+| Pictures | `abenzerps/Qwen-Image-2.1-Uncensored-Quantized` (Q4_K_M) via ComfyUI + `leejet/ComfyUI-GGUF` | Qwen Research License: non-commercial | Your choice. No built-in filter, so the app's limits and the server's second check apply. 20 steps by default (`IMAGE_STEPS`); several minutes a picture on a T4 |
+| Picture prompts | the helper, with a refiner prompt in `training/serve_remote.py` | | Fixes spelling and grammar, then makes the prompt vivid, realistic and bolder; refuses minors and adds nothing sexual you didn't ask for. The card shows "Drawn as" with the rewritten prompt |
 | Cloud | Grok (`XAI_MODEL`), Gemini (`GEMINI_MODEL`), Groq (`GROQ_MODEL`) | provider terms | Research, reasoning, describing attachments, fallback voice |
 
 An "abliterated" model has had its refusal behaviour removed. The app enforces the hard limits

@@ -19,8 +19,8 @@ memory panel ─────────────────── /api/memo
                                  /api/memory/reflect (extraction)                          │
 status panel ─────────────────── /api/status  (provider chain state, no secrets)           │
                                                                                             │
-   voice chain, in order:  1 Colab server  (Ollama: Qwen3.8 27B abliterated, vision) ◄──────┘
-                           2 Colab fallback (same server, a smaller model, e.g. your fine-tune)
+   voice chain, in order:  1 Colab server  (Ollama: Dark Forest 20B, roleplay; no vision) ◄──────┘
+                           2 Colab helper  (same server: Qwen3.5 4B abliterated; also her eyes)
                            3 laptop Ollama  (only if it is already running; nothing is downloaded)
                            4 Grok · Gemini · Groq (only if the turn may leave your machines)
 ```
@@ -118,9 +118,11 @@ Text files are read in the browser and sent as text (credentials redacted). PDFs
 when external processing is allowed. Every attachment keeps its note ("[Attached image: …]") in
 the history, so later turns can refer to it; the bytes ride only on the turn that sent them.
 
-**Making images** (`lib/image-generation.ts`): Colab image server first (`FREYA_IMAGE_URL`, SDXL
-base + SDXL-Lightning 4-step: text-to-image, image-to-image edits, variations, styles), then
-Gemini image models, then a labelled SVG drawing. The card always says which one made it.
+**Making images** (`lib/image-generation.ts`): Colab image server first (`FREYA_IMAGE_URL`:
+Qwen-Image 2.1 uncensored via ComfyUI; the helper model fixes spelling and grammar and rewrites
+the request into a vivid, realistic, bolder prompt first; text-to-image, edits, variations,
+styles), then Gemini image models, then a labelled SVG drawing. A refusal on the server is final,
+never retried elsewhere. The card says which model made it and shows the prompt it drew from.
 
 ## 5. Memory (`lib/memory-store.ts`, `lib/memory-recall.ts`)
 

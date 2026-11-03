@@ -8,6 +8,8 @@ export type PictureInfo = {
   prompt: string;
   kind?: "generated" | "svg";
   model?: string;
+  /** The prompt as her image server's local refiner rewrote it (spelling fixed, detail added). */
+  refined?: string;
   /** Why a drawing was made instead of a generated image. */
   reason?: string;
   svg?: string;
@@ -48,6 +50,7 @@ export function PictureCard({ info, onRefine, onVariation, onStyle }: { info: Pi
     <div className="media-card-note">
       {info.kind === "svg" ? `Drawn as vector shapes because ${FALLBACK_REASONS[info.reason ?? ""] ?? "image generation is unavailable"}.` : info.prompt}
     </div>
+    {info.kind === "generated" && info.refined && <details className="media-card-refined"><summary>Drawn as</summary><p>{info.refined}</p></details>}
     <div className="media-card-actions">
       <button type="button" onClick={onRefine}>Refine</button>
       {onVariation && <button type="button" onClick={onVariation} title="Another take on this picture">Variation</button>}

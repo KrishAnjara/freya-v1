@@ -30,7 +30,7 @@ import { canonSection, closenessOf, normalizeTotals } from "@/lib/canon";
 import { herMoment } from "@/lib/her-day";
 import { isRealQuestion, lastWord, momentSections } from "@/lib/moment-prompt";
 import { guardStream, guardText, type GuardContext } from "@/lib/reply-guard";
-import { ollamaIsLocal } from "@/lib/ollama-models";
+import { ollamaContextLength, ollamaIsLocal } from "@/lib/ollama-models";
 import { honestAnswer, honestySection, needsTheTruth, sincerelyAsksIfHuman, topicIsLive } from "@/lib/honesty";
 import { chapterContext, normalizeChapters, normalizeRelationship } from "@/lib/chapters";
 
@@ -769,7 +769,10 @@ ${initiativePrompt(mood)}` : "") +
       // Last, because the last thing it reads is what a model follows most closely.
       (textingFirst ? "" : lastWord(lastText)) +
       honestySection(lastText, stayInCharacter);
-    const promptMessages = fitHistory(turns, smallVoice && (localSpeaks || privacyMode || intimateTurn) ? LOCAL_HISTORY_MAX_CHARS : HISTORY_MAX_CHARS);
+    // A 4,096-token window (this laptop's model, or Dark Forest on the server) holds the persona and
+    // only a short history; a longer one would push the persona out of what the model reads.
+    const tightWindow = smallVoice || ollamaContextLength() <= 4096;
+    const promptMessages = fitHistory(turns, tightWindow && (localSpeaks || privacyMode || intimateTurn) ? LOCAL_HISTORY_MAX_CHARS : HISTORY_MAX_CHARS);
     const guardContext: GuardContext = {
       lastUserText: lastText,
       recentUserTexts: userTexts.slice(-4),

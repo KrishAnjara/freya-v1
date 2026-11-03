@@ -156,8 +156,8 @@ def main():
         sys.path.insert(0, os.path.join(ROOT, "training"))
         import serve_remote
         serve_remote.install_ollama()
-        candidates = next(models for floor, models in serve_remote.MODELS_BY_VRAM if serve_remote.gpu_gigabytes() >= floor)
-        serve_remote.load_fitting(candidates, serve_remote.CONTEXTS)
+        candidates = next(models for floor, models in serve_remote.QWEN_BY_VRAM if serve_remote.gpu_gigabytes() >= floor)
+        serve_remote.load_fitting(candidates, serve_remote.QWEN_CONTEXTS)
         run(f'npx -y tsx scripts/make-corpus.mjs --target {args.make_corpus} --provider ollama --out "{corpus}"')
         print(f"\nConversations are in {corpus}. Run this again without --make-corpus to train on them.")
         return

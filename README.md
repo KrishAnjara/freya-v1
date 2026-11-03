@@ -130,8 +130,9 @@ The laptop's 4B model is too small to be good, and it's the heavy part. Run a fa
 else and your laptop only runs the app:
 
 1. Upload `training/freya_server.ipynb` to [Colab](https://colab.research.google.com), choose a T4 GPU and run it.
-   It serves her 27B (which also sees images), a smaller fallback model, an embedding model for her
-   memory and, if you tick it, pictures (SDXL + Lightning), all behind one login.
+   It serves her voice (Dark Forest 20B, uncensored roleplay), a helper model (fallback voice, reads
+   images, and spell-checks and enriches picture prompts), an embedding model for her memory and, if
+   you tick it, pictures (Qwen-Image 2.1 uncensored, via ComfyUI), all behind one login.
 2. Run the line it prints, in this folder: `start.bat --remote https://….trycloudflare.com --key …`.
    Add `--prod` to use less memory, `--laptop` to let this laptop's own model answer if the server goes
    away. `start.bat --local` goes back.

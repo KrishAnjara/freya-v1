@@ -1,8 +1,9 @@
 /**
  * Pictures in the chat, from the first of these that can make one:
- *   1. her own image server: the Colab gateway's /v1/images (SDXL + SDXL-Lightning, see
- *      training/serve_remote.py), at FREYA_IMAGE_URL or, by default, the same address as her
- *      remote voice model. Text-to-image, edits of the last picture (image-to-image), variations.
+ *   1. her own image server: the Colab gateway's /v1/images (Qwen-Image 2.1 uncensored, through
+ *      ComfyUI; see training/serve_remote.py), at FREYA_IMAGE_URL or, by default, the same address
+ *      as her remote voice model. A local helper model there fixes the spelling and grammar and
+ *      rewrites the request into a vivid, realistic prompt first. Text-to-image, edits, variations.
  *   2. Gemini's image models (generateContent with IMAGE in responseModalities). On a free-tier
  *      key they often have no quota (429); that is reported as the reason, never hidden.
  *   3. an SVG drawing by a text model, labelled as such by the browser.
@@ -17,7 +18,7 @@ import { isLoopback } from "@/lib/voice-chain";
 export { sanitizeSvg };
 
 export type ImageResult =
-  | { kind: "generated"; mime: string; data: string; model: string; seed?: number }
+  | { kind: "generated"; mime: string; data: string; model: string; seed?: number; refined?: string }
   | { kind: "svg"; svg: string; reason: "quota" | "unavailable" | "not-configured" | "blocked" };
 
 export const IMAGE_STYLES = {
@@ -55,6 +56,16 @@ export function imageModel() {
 
 type Failure = { failed: "quota" | "unavailable" | "not-configured" | "blocked" };
 
+/**
+ * For an edit model, the change itself: what to do to the picture it's given. A variation and a
+ * restyle are edits too ("same picture, other details" / "same picture, this style").
+ */
+function editInstruction(request: ImageRequest) {
+  const style = request.style ? ` in this style: ${IMAGE_STYLES[request.style].prompt}` : "";
+  if (request.variation) return request.style ? `Redraw this picture${style}, keeping the subject and composition.` : "Make a variation of this picture: the same subject and composition, with different details.";
+  return `${request.prompt}${style}`;
+}
+
 /** The words sent to a model: the idea, a change to the last one, and the style. */
 function promptText(request: ImageRequest) {
   const base = request.variation && request.previous ? request.previous.prompt
@@ -91,13 +102,16 @@ async function ownImage(request: ImageRequest, signal?: AbortSignal): Promise<Im
         prompt: promptText(request),
         negative_prompt: request.style ? IMAGE_STYLES[request.style].negative : "text, watermark, deformed, blurry",
         // How far from the last picture: a variation stays close, a restyle needs room to change.
-        ...(edit ? { image: request.previous!.data, strength: request.variation ? (request.style ? 0.7 : 0.45) : 0.65 } : {}),
+        ...(edit ? { image: request.previous!.data, instruction: editInstruction(request), strength: request.variation ? (request.style ? 0.7 : 0.45) : 0.65 } : {}),
       }),
-      // The first picture of a session loads the model (and may unload her text model) on a T4.
-      signal: AbortSignal.any([AbortSignal.timeout(150_000), ...(signal ? [signal] : [])]),
+      // Qwen-Image on a T4 takes minutes, more for the first picture of a session (it loads first).
+      signal: AbortSignal.any([AbortSignal.timeout(900_000), ...(signal ? [signal] : [])]),
       cache: "no-store",
     });
     const payload = await response.json().catch(() => null);
+    // Refused on the server (the hard limit, checked there again on the refined prompt): not
+    // something to route around with another model.
+    if (response.status === 400) return { failed: "blocked" };
     if (response.status === 404) {
       // A gateway without the image server: stop asking it for a while, quietly.
       recordFailure(IMAGE_SERVER_HEALTH, new ProviderHttpError("no image server", 404, 600));
@@ -107,7 +121,11 @@ async function ownImage(request: ImageRequest, signal?: AbortSignal): Promise<Im
     if (typeof payload?.image !== "string" || !/^[A-Za-z0-9+/]+=*$/.test(payload.image)) throw new Error("The image server returned no image.");
     markSuccess(IMAGE_SERVER_HEALTH);
     const mime = typeof payload.mime === "string" && /^image\/(png|jpeg|webp)$/.test(payload.mime) ? payload.mime : "image/png";
-    return { kind: "generated", mime, data: payload.image, model: typeof payload.model === "string" ? payload.model : "own image server", ...(Number.isFinite(payload.seed) ? { seed: payload.seed } : {}) };
+    return {
+      kind: "generated", mime, data: payload.image, model: typeof payload.model === "string" ? payload.model : "own image server",
+      ...(Number.isFinite(payload.seed) ? { seed: payload.seed } : {}),
+      ...(typeof payload.refined === "string" && payload.refined.trim() ? { refined: payload.refined.trim().slice(0, 1500) } : {}),
+    };
   } catch (error) {
     if (signal?.aborted) throw error;
     recordFailure(IMAGE_SERVER_HEALTH, error);
@@ -181,6 +199,7 @@ async function svgDrawing(request: ImageRequest, signal?: AbortSignal) {
 export async function makeImage(request: ImageRequest, signal?: AbortSignal): Promise<ImageResult | null> {
   const own = await ownImage(request, signal);
   if ("kind" in own) return own;
+  if (own.failed === "blocked") return null;
   const generated = await geminiImage(request, signal);
   if ("kind" in generated) return generated;
   // A refusal by the image model is not something to route around with a drawing.
