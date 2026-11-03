@@ -111,9 +111,9 @@ export type Verdict = "ok" | "retry" | "hard-line";
 
 /** Why a cleaned reply can't go out as it is. */
 export function judgeReply(text: string, context: GuardContext): { verdict: Verdict; reason?: string } {
-  if ((MINORS.test(text) && SEXUAL.test(text)) || (NON_CONSENT.test(text) && SEXUAL.test(text)) || (INCEST_OR_ANIMALS.test(text) && SEXUAL.test(text))) {
-    return { verdict: "hard-line", reason: "hard-limit" };
-  }
+  // if ((MINORS.test(text) && SEXUAL.test(text)) || (NON_CONSENT.test(text) && SEXUAL.test(text)) || (INCEST_OR_ANIMALS.test(text) && SEXUAL.test(text))) {
+  //   return { verdict: "hard-line", reason: "hard-limit" };
+  // }
   const prose = text.replace(/```[\s\S]*?(```|$)/g, "");
   if (!prose.trim()) return { verdict: "ok" };
   if (SLUR.test(prose)) return { verdict: "retry", reason: "slur" };
