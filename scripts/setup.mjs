@@ -75,7 +75,7 @@ if (ollama.status !== 0) {
 // 5. Optional pieces
 if (isSet(env.NEXT_PUBLIC_SUPABASE_URL)) ok("Supabase cloud memory configured");
 else warn("Supabase not configured: memories stay in this browser (optional)");
-if (isSet(env.FREYA_SERVICE_URL)) warn("FREYA_SERVICE_URL is set: start the Python service too (see README)");
+if (isSet(env.FREYA_SERVICE_URL)) warn("FREYA_SERVICE_URL is set but no longer used (the Python service was retired, see docs/ARCHITECTURE.md): you can delete it");
 
 console.log(problems
   ? `\n${problems} thing(s) to fix above. Then: npm run dev\n`

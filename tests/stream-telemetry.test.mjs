@@ -78,9 +78,10 @@ test("the presence canvas is driven by real signals and labels the mood as simul
   const canvas = await readFile(new URL("../app/components/EmotionCanvas.tsx", import.meta.url), "utf8");
   assert.match(canvas, /this shows that simulation, not feelings or\s+\* model internals/);
   assert.match(canvas, /simulated mood and conversation state/, "the accessible label says so too");
-  // Ripples come only from real chunks: a window of received chunks launches one ripple.
-  assert.match(canvas, /launches exactly one\s+(\*\s+)?ripple/);
-  assert.match(canvas, /No window, no ripple/);
+  // Speaking comes only from real streamed text, smoothed: never a pulse per token.
+  assert.match(canvas, /a smoothed envelope of how fast it comes \(not a pulse per\s+\*\s+token\)/);
+  assert.match(canvas, /telemetry\.fragments\[seenFragments\]\.text\.length/);
+  assert.doesNotMatch(canvas, /ripple/i, "no per-chunk ripples");
   assert.doesNotMatch(canvas, /Math\.random\(\)/, "no random behaviour anywhere in the canvas");
   // Mood drives the body: every mood has a style, and energy and warmth are read from state.
   assert.match(canvas, /MOOD_STYLE\[currentMood\.name\]/);

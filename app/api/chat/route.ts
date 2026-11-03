@@ -5,9 +5,15 @@ import { buildLocalSystemPrompt, buildSystemPrompt, UNHINGED_PROMPT, type Memory
 import { loadConfig } from "@/lib/freya-config";
 import { normalizeSeen, seenSection } from "@/lib/face-read";
 import { CRIME_REPLY, crimeRequest } from "@/lib/crime-limit";
-import { ChatInputError, generateReply, isHybridMode, ollamaThinking, isServerMode, resolveProviders, streamReply, validateMessages, type ChatMessage, type ProviderName } from "@/lib/llm";
+import { ChatInputError, defaultOllamaTarget, generateReply, type OllamaTarget, isHybridMode, ollamaThinking, isServerMode, resolveProviders, streamReply, validateMessages, type ChatMessage, type ProviderName } from "@/lib/llm";
 import { AttachmentError, attachmentNote, MAX_TEXT_ATTACHMENT_CHARS, MAX_WIRE_DATA_CHARS, parseWireAttachments, type WireAttachment } from "@/lib/attachments";
-import { attachmentContext, briefContext, briefProviderFor, buildBrief, compactSearchContext, describeAttachments } from "@/lib/brief";
+import { attachmentContext, briefContext, briefProviderFor, buildBrief, compactSearchContext } from "@/lib/brief";
+import { canSeeImages, describeAttachments } from "@/lib/vision";
+import { recallForTurn } from "@/lib/memory-context";
+import { episodeSection } from "@/lib/memory-recall";
+import { clientSubject } from "@/lib/route-guard";
+import { describeFailure } from "@/lib/provider-health";
+import { localVoiceAvailable, planVoiceChain, type OllamaTier } from "@/lib/voice-chain";
 import { convenePanel, panelContext } from "@/lib/council";
 import { configuredReasoningMode, needsReasoning, wantsEvidence } from "@/lib/reasoning-signal";
 import { normalizeLocalMemories, selectRelevantMemories } from "@/lib/memory-select";
@@ -16,9 +22,7 @@ import { getTimeInZone, findTimeZone, isTimeQuestion } from "@/lib/time";
 import type { FreyaStyle } from "@/lib/personality";
 import { consumeChatRateLimit, isSelfHosted, RateLimitUnavailableError, type ChatIdentity } from "@/lib/rate-limit";
 import { normalizeCharacterProfile } from "@/lib/character-profile";
-import { FreyaServiceError, getFreyaServiceConfig, requestServiceReply, streamServiceReply } from "@/lib/freya-service";
 import { containsSensitiveCredential, redactSensitiveCredentials } from "@/lib/sensitive-data";
-import { isCoolingDown, markFailure, markSuccess } from "@/lib/provider-health";
 import { applyAppraisal, initiativePrompt, moodPrompt, normalizeMood, reactToMessage } from "@/lib/mood";
 import { appraiseMood } from "@/lib/mood-appraisal";
 import { INTIMACY_PROMPT, PLAYFUL_HEAT_PROMPT, PRIVATE_VOICE_DOWN, isIntimateTone, mentionsMinors, romanticMinorRequest, soundsUpset } from "@/lib/intimacy";
@@ -45,7 +49,6 @@ const MAX_REQUEST_MESSAGES = 24;
  */
 const HISTORY_MAX_CHARS = 12_000;
 const SEARCH_TEXT_MAX_CHARS = 6_000;
-const ORCHESTRATION_HEALTH = "service:orchestration";
 
 /** Keeps the newest turns that fit the budget; the latest message is always kept whole. */
 /** The local model's window is 4,096 tokens and the persona takes ~1,900: keep its history shorter. */
@@ -503,7 +506,8 @@ export async function POST(request: Request) {
     // cloud models only research, reason or describe, and hand their notes to it.
     const localVoice = !privacyMode && !intimateTurn && (isHybridMode() || isServerMode());
     // A small model on this machine needs the cloud's help far more than a large one on a GPU.
-    const smallVoice = ollamaIsLocal() && !isServerMode();
+    // Local-only always runs on this machine, whatever her usual voice is.
+    const smallVoice = privacyMode || (ollamaIsLocal() && !isServerMode());
 
     let searchContext = "";
     // Raw retrieved text, kept so the cloud brief can read it instead of the local model.
@@ -612,12 +616,26 @@ export async function POST(request: Request) {
       }
     }
 
-    if (privacyMode && !ollamaIsLocal()) {
+    // Local-only needs a model on this machine: the configured one, or the laptop tier
+    // (LOCAL_OLLAMA_URL) when her usual voice is the Colab server.
+    if (privacyMode && !localVoiceAvailable()) {
       return NextResponse.json({ error: "Local-only mode requires Ollama on this machine's loopback interface." }, { status: 503 });
     }
 
 
-    const relevantMemories = selectRelevantMemories(memories, userTexts.slice(-4), userTexts.length <= 2);
+    // Memory on this machine (lib/memory-store), recalled for what they're saying now: notes and
+    // past conversations, scored for relevance (lib/memory-recall), never the whole history. A
+    // signed-in account keeps its memory in Supabase instead, as before.
+    const signedIn = Boolean(request.headers.get("authorization"));
+    const owner = useMemories && !signedIn ? clientSubject(request) : null;
+    const conversationId = typeof requestData.conversationId === "string" ? requestData.conversationId.slice(0, 64) : undefined;
+    const turnMemory = owner
+      ? await recallForTurn({ owner, recent: userTexts.slice(-4), conversationId, browserNotes: requestData.localMemories, openingTurn: userTexts.length <= 2, signal: request.signal })
+        .catch((error) => { console.warn(`FREYA memory recall failed (${describeFailure(error)}); using the browser's notes.`); return null; })
+      : null;
+    const relevantMemories: MemoryItem[] = turnMemory
+      ? turnMemory.notes.map((note) => ({ id: note.id, text: note.text, createdAt: note.createdAt }))
+      : selectRelevantMemories(memories, userTexts.slice(-4), userTexts.length <= 2);
 
     const now = new Date();
 
@@ -663,10 +681,23 @@ ${historySummary}
     // The panel covers what the brief would (facts, terms, a checked answer) and more, so a
     // reasoning question gets the panel and everything else keeps the lighter brief.
     const panel = deliberate ? await convenePanel(turns, request.signal, searchMaterial) : null;
-    // Attachments for a voice that can't see them: Gemini describes, the local model answers.
-    // If the description fails, Gemini answers directly (below) rather than nobody seeing them.
-    const attachmentNotes = localVoice && visual ? await describeAttachments(turns, request.signal) : null;
-    const localSpeaks = localVoice && (!visual || Boolean(attachmentNotes));
+    // What they attached (lib/vision). Her own model looks for itself when it has vision; a
+    // describer adds notes in FREYA_VISION_ORDER (Grok, her server's vision model, Gemini). Grok
+    // and Gemini only when external file processing is allowed: freya.config.json's
+    // externalFiles, and never in Local-only mode. If nothing could see it, she says so.
+    // The browser can narrow these (Settings), never widen them past freya.config.json.
+    const externalFiles = config.externalFiles !== false && requestData.externalFiles !== false && !privacyMode;
+    const cloudFallback = config.cloudFallback !== false && requestData.cloudFallback !== false;
+    const ownServer: OllamaTarget | null = privacyMode
+      ? planVoiceChain({ provider: "ollama", privacy: true })[0] as OllamaTier
+      : isHybridMode() ? defaultOllamaTarget() : null;
+    const hasImages = [...turnAttachments.values()].some((files) => files.some((file) => file.kind === "image" && file.data));
+    const ownSees = visual && hasImages && Boolean(ownServer) && (localVoice || privacyMode) && await canSeeImages(ownServer!, request.signal);
+    const described = visual && (localVoice || privacyMode)
+      ? await describeAttachments(turns, request.signal, { allowExternal: externalFiles, server: ownServer, ownSees })
+      : null;
+    const attachmentNotes = described?.text ?? null;
+    const localSpeaks = localVoice && (!visual || Boolean(attachmentNotes) || ownSees);
     const brief = localSpeaks && !panel && !visual
       ? await buildBrief(turns, request.signal, briefProviderFor(lastText, Boolean(searchMaterial)), searchMaterial)
       : null;
@@ -683,8 +714,11 @@ ${historySummary}
     // The other conversations, as chapters of the same relationship (lib/chapters). Follows the
     // "Use memories in replies" setting; the browser builds it from its own threads.
     const relationship = normalizeRelationship(requestData.relationship);
+    const chapters = useMemories ? normalizeChapters(requestData.chapters, containsSensitiveCredential) : [];
+    // Recalled past conversations, minus any the browser already sent as a recent chapter.
+    const chapterTexts = new Set(chapters.map((chapter) => chapter.text));
     const history = useMemories
-      ? chapterContext(normalizeChapters(requestData.chapters, containsSensitiveCredential), relationship)
+      ? chapterContext(chapters, relationship) + episodeSection((turnMemory?.episodes ?? []).filter((episode) => !chapterTexts.has(episode.recap)), now.getTime())
       : "";
     // How much of her life they've earned, and where she is right now (lib/canon, lib/her-day).
     const totals = useMemories ? normalizeTotals(requestData.totals) : { messages: 0, since: "" };
@@ -693,11 +727,15 @@ ${historySummary}
     // Sexting needs the switch and, unless they've started it, her being in the mood. Someone upset
     // or saying no gets none of it. An ordinary playful turn can still fall back to a cloud model,
     // which never sees this: only the user's own model does.
-    const providerOptions = visual && !privacyMode && !localSpeaks
+    // Who answers (lib/voice-chain). An attachment nothing else could read goes to Gemini, which
+    // sees it directly, only when files may leave the machine. Intimate turns stay on her own
+    // models (the Colab server, its fallback, the laptop), never a cloud tier; Local-only stays
+    // on this machine; cloudFallback: false keeps the cloud out of everything else too.
+    const providerOptions = visual && !privacyMode && !localSpeaks && externalFiles && (cloudFallback || !localVoice)
       ? { provider: "gemini" as const, fallbackProvider: "groq" as const }
       : intimateTurn
-        ? { provider: isServerMode() ? "server" as const : "ollama" as const, fallbackEnabled: false }
-        : privacyMode ? { provider: "ollama" as const, fallbackEnabled: false } : {};
+        ? { provider: isServerMode() ? "server" as const : "ollama" as const, cloud: false }
+        : privacyMode ? { provider: "ollama" as const, privacy: true } : { cloud: cloudFallback };
     const voice = resolveProviders(providerOptions).primary;
     const ownVoice = voice === "ollama" || voice === "server";
     const playfulHeat = intimateMode && !visual && ownVoice && (mood?.name === "playful" || mood?.name === "horny") && !soundsUpset(lastText);
@@ -715,7 +753,7 @@ ${historySummary}
       dateContext +
       momentSections({ text: lastText, turn: userTexts.length, closeness, now, textingFirst }) +
       briefContext(brief) +
-      attachmentContext(attachmentNotes) +
+      attachmentContext(attachmentNotes, ownSees) +
       panelContext(panel) +
       evidence +
       (turnAttachments.size && !attachmentNotes ? VISION_NOTE : "") +
@@ -744,51 +782,23 @@ ${initiativePrompt(mood)}` : "") +
     // On a free GPU hidden thinking runs at about 10 tokens a second: replies took minutes, and some
     // used up their whole budget thinking and said nothing. So it's a switch, for real questions only.
     const think = (config.thinking ?? ollamaThinking()) && isRealQuestion(lastText);
-    const optionsFor = (note: string) => ({ ...providerOptions, think, ...(playfulHeat && !intimateTurn ? { fallbackSystem: system + note } : {}) });
+    const optionsFor = (note: string) => ({
+      ...providerOptions, think, ownVision: ownSees, cloudSeesFiles: externalFiles,
+      ...(playfulHeat && !intimateTurn ? { fallbackSystem: system + note } : {}),
+    });
     const fullSystem = system + intimateGuidance;
+    // How many memories went into this reply: recalled from the store, or the ones sent along.
+    const recalledCount = turnMemory ? turnMemory.notes.length + turnMemory.episodes.length : relevantMemories.length;
     const label = (name?: string) => name === "ollama" && !ollamaIsLocal() ? "server" : name;
-
-    let orchestration = null;
-    try {
-      orchestration = getFreyaServiceConfig();
-      if (privacyMode && orchestration) {
-        const serviceHost = new URL(orchestration.baseUrl).hostname;
-        if (serviceHost !== "localhost" && serviceHost !== "127.0.0.1" && serviceHost !== "::1") orchestration = null;
-      }
-    } catch {
-      return NextResponse.json({ error: "FREYA orchestration service configuration is invalid." }, { status: 503 });
-    }
-    // A service that just failed to answer is skipped for a cooldown rather than retried, and
-    // warned about, on every request while it stays down.
-    if (orchestration && isCoolingDown(ORCHESTRATION_HEALTH)) orchestration = null;
-    // The orchestration service only relays text, so a turn with images bypasses it.
-    // The local voice is spoken here, not by the service (which follows its own AI_PROVIDER).
-    if (visual || intimateTurn || playfulHeat || localSpeaks) orchestration = null;
 
     // Non-streaming clients (and the tests) keep the original JSON shape.
     if (!wantsStream) {
-      if (orchestration) {
-        try {
-          const service = orchestration;
-          let result: Awaited<ReturnType<typeof requestServiceReply>> | undefined;
-          const reply = await guardText(async (note) => (result = await requestServiceReply(service, fullSystem + note, promptMessages, request.signal, privacyMode)).reply, guardContext);
-          markSuccess(ORCHESTRATION_HEALTH);
-          return NextResponse.json({ reply, provider: result?.provider, task: result?.task, sources, searchStatus, memoryCount: memories.length });
-        } catch (error) {
-          if (request.signal.aborted) return new Response(null, { status: 499 });
-          if (error instanceof FreyaServiceError && error.status === 401) {
-            return NextResponse.json({ error: "FREYA orchestration service authentication failed." }, { status: 503 });
-          }
-          markFailure(ORCHESTRATION_HEALTH);
-          console.warn("FREYA orchestration service unavailable; using the configured application provider.");
-        }
-      }
       let provider: string | undefined;
       const reply = await guardText((note) => generateReply(fullSystem + note, promptMessages, request.signal, {
         ...optionsFor(note),
         onProvider: (selected) => { provider = selected; },
       }), guardContext);
-      return NextResponse.json({ reply, provider: label(provider), sources, searchStatus, memoryCount: memories.length });
+      return NextResponse.json({ reply, provider: label(provider), sources, searchStatus, memoryCount: recalledCount });
     }
 
     const encoder = new TextEncoder();
@@ -798,40 +808,9 @@ ${initiativePrompt(mood)}` : "") +
     const stream = new ReadableStream<Uint8Array>({
       async start(controller) {
         // Metadata first so the client can render sources before any text arrives.
-        controller.enqueue(send("meta", { sources, searchStatus, memoryCount: memories.length, reasoned: panel?.analyses.map((analysis) => analysis.analyst) ?? [], herBusy: herMoment(now).busy, ...(judges ? { mood } : {}) }));
+        controller.enqueue(send("meta", { sources, searchStatus, memoryCount: recalledCount, reasoned: panel?.analyses.map((analysis) => analysis.analyst) ?? [], herBusy: herMoment(now).busy, ...(judges ? { mood } : {}) }));
         const outcome: { truncated: boolean; parts: number; provider?: ProviderName } = { truncated: false, parts: 1 };
         try {
-          let serviceEmitted = false;
-          if (orchestration) {
-            try {
-              let serviceDone = false;
-              const service = orchestration;
-              const serviceText = async function* (note: string) {
-                for await (const event of streamServiceReply(service, fullSystem + note, promptMessages, request.signal, privacyMode)) {
-                  if (event.type === "provider") controller.enqueue(send("provider", { provider: event.provider, task: event.task }));
-                  else if (event.type === "delta") yield event.text;
-                  else if (event.type === "done") serviceDone = true;
-                  else if (event.type === "error") throw new FreyaServiceError(event.error);
-                }
-              };
-              for await (const delta of guardStream(serviceText, guardContext)) {
-                serviceEmitted = true;
-                controller.enqueue(send("delta", delta));
-              }
-              if (serviceDone) {
-                markSuccess(ORCHESTRATION_HEALTH);
-                controller.enqueue(send("done", outcome));
-                return;
-              }
-              if (serviceEmitted) throw new FreyaServiceError("Orchestration stream ended unexpectedly.");
-            } catch (error) {
-              if (request.signal.aborted) return;
-              if (serviceEmitted) throw error;
-              if (error instanceof FreyaServiceError && error.status === 401) throw new FreyaServiceError("FREYA orchestration service authentication failed.", 401);
-              markFailure(ORCHESTRATION_HEALTH);
-              console.warn("FREYA orchestration stream unavailable; using the configured application provider.");
-            }
-          }
           for await (const delta of guardStream((note) => streamReply(fullSystem + note, promptMessages, request.signal, outcome, optionsFor(note)), guardContext)) {
             controller.enqueue(send("delta", delta));
           }
@@ -846,8 +825,6 @@ ${initiativePrompt(mood)}` : "") +
               ? error.message
               : privateTurn
                 ? PRIVATE_VOICE_DOWN
-              : error instanceof FreyaServiceError && error.status === 401
-                ? "FREYA orchestration service authentication failed."
               : "FREYA couldn't get a response from the configured AI providers. Check provider setup or quota and try again.";
             controller.enqueue(send("error", { error: message }));
           }

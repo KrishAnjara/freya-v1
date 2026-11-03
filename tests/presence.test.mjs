@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
-import { chooseExpression, EXPRESSION_FILE, EXPRESSIONS, moodExpression, POSES, reactionTo, requestedExpression } from "../lib/expression.ts";
+import { EXPRESSION_FILE, EXPRESSIONS, POSES, requestedExpression } from "../lib/expression.ts";
+import { restingFace } from "../lib/expression-director.ts";
 import { MOOD_NAMES } from "../lib/mood.ts";
 import { briefProviderFor } from "../lib/brief.ts";
 import { bubbleDelay, MIN_BUBBLE_GAP_MS, paceFactor, readingDelay, typingDelay } from "../lib/reply-parts.ts";
 import { POST as chatPost } from "../app/api/chat/route.ts";
+import { resetVisionForTests } from "../lib/vision.ts";
 import { resetLocalRateLimitsForTests } from "../lib/rate-limit.ts";
 
 const originalFetch = globalThis.fetch;
@@ -19,21 +21,15 @@ afterEach(() => {
 
 test("every expression has a pose and every mood maps to an expression", () => {
   for (const expression of EXPRESSIONS) assert.ok(POSES[expression], expression);
-  for (const mood of MOOD_NAMES) assert.ok(EXPRESSIONS.includes(moodExpression(mood)), mood);
+  for (const mood of MOOD_NAMES) assert.ok(EXPRESSIONS.includes(restingFace({ name: mood, since: 0 }, 60_000).expression), mood);
 });
 
-test("expressions follow her mood; words only change her face when they ask for one", () => {
+test("a face can be asked for, and talking about a feeling isn't asking", () => {
   assert.equal(requestedExpression("smile for me"), "smile");
   assert.equal(requestedExpression("can you look surprised?"), "surprised");
   assert.equal(requestedExpression("make a sad face"), "sad");
   assert.equal(requestedExpression("I had a sad day"), null, "talking about sadness is not a request");
-  assert.equal(reactionTo("smile for me").expression, "smile");
-  for (const text of ["my dog died this morning", "omg guess what", "lmao 😂", "just checking in"]) assert.equal(reactionTo(text), null, text);
-  const now = 1_000_000;
-  const active = { expression: "surprised", ms: 3000, until: now + 1000 };
-  assert.equal(chooseExpression("curious", true, active, now), "surprised");
-  assert.equal(chooseExpression("curious", true, { ...active, until: now - 1 }, now), "thinking");
-  assert.equal(chooseExpression("melancholy", false, null, now), "sad");
+  for (const text of ["my dog died this morning", "omg guess what", "lmao 😂", "just checking in"]) assert.equal(requestedExpression(text), null, text);
 });
 
 test("only expression image names the app knows are used", () => {
@@ -70,9 +66,11 @@ test("her mood sets her texting pace: tired is slower, excited quicker, none giv
 test("hybrid: the local model is the voice, even for images (Gemini only describes them)", async () => {
   for (const [k, v] of Object.entries({ NODE_ENV: "test", AI_PROVIDER: "hybrid", GROQ_API_KEY: "test-only", GEMINI_API_KEY: "test-only", GEMINI_MODEL: "gemini-test", WEB_SEARCH_ENABLED: "false", FREYA_LOCAL_ONLY: "false", FREYA_REASONING_MODE: "off", OLLAMA_BASE_URL: "http://127.0.0.1:11434", OLLAMA_MODEL: "freya" })) setEnv(k, v);
   for (const k of ["FREYA_SERVICE_URL", "UPSTASH_REDIS_REST_URL", "UPSTASH_REDIS_REST_TOKEN", "FREYA_TRUSTED_IP_HEADER"]) setEnv(k, undefined);
+  resetVisionForTests();
   const calls = { gemini: [], ollama: [] };
   globalThis.fetch = async (url, init) => {
     const body = JSON.parse(String(init?.body ?? "{}"));
+    if (String(url).endsWith("/api/show")) return new Response(JSON.stringify({ capabilities: ["completion"] }), { status: 200 });
     if (String(url).includes("generativelanguage")) { calls.gemini.push(body); return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: "A ginger cat asleep on a stack of library books, warm lamp light." }] } }] }), { status: 200 }); }
     if (String(url).includes("11434")) { calls.ollama.push(body); return new Response(JSON.stringify({ message: { content: "omg the cat on the books" } }), { status: 200 }); }
     return new Response("{}", { status: 404 });
@@ -86,6 +84,42 @@ test("hybrid: the local model is the voice, even for images (Gemini only describ
   assert.equal(calls.gemini.length, 1, "Gemini looked at the image once");
   assert.ok(calls.gemini[0].contents.at(-1).parts.some((part) => part.inlineData), "with the image itself");
   assert.match(calls.ollama[0].messages[0].content, /ginger cat asleep/, "the description reaches the local voice");
+  assert.equal(calls.ollama[0].messages.at(-1).images, undefined, "a text-only model isn't sent the image");
+});
+
+test("a voice model with vision looks at the image itself, and nothing leaves for the cloud", async () => {
+  for (const [k, v] of Object.entries({ NODE_ENV: "test", AI_PROVIDER: "hybrid", GROQ_API_KEY: "test-only", GEMINI_API_KEY: "test-only", GEMINI_MODEL: "gemini-test", WEB_SEARCH_ENABLED: "false", FREYA_LOCAL_ONLY: "false", FREYA_REASONING_MODE: "off", OLLAMA_BASE_URL: "http://127.0.0.1:11434", OLLAMA_MODEL: "freya-vision-test", XAI_API_KEY: undefined })) setEnv(k, v);
+  for (const k of ["UPSTASH_REDIS_REST_URL", "UPSTASH_REDIS_REST_TOKEN", "FREYA_TRUSTED_IP_HEADER"]) setEnv(k, undefined);
+  resetVisionForTests();
+  const urls = [];
+  const ollama = [];
+  globalThis.fetch = async (url, init) => {
+    urls.push(String(url));
+    if (String(url).endsWith("/api/show")) return new Response(JSON.stringify({ capabilities: ["completion", "vision"] }), { status: 200 });
+    if (String(url).includes("11434")) { ollama.push(JSON.parse(String(init.body))); return new Response(JSON.stringify({ message: { content: "he looks so smug" } }), { status: 200 }); }
+    return new Response("{}", { status: 404 });
+  };
+  const response = await chatPost(new Request("http://localhost/api/chat", { method: "POST", headers: { "content-type": "application/json", "x-real-ip": "203.0.113.6" }, body: JSON.stringify({
+    messages: [{ role: "user", content: "look at him", attachments: [{ name: "cat.jpg", mime: "image/jpeg", kind: "image", data: "/9j/4AAQ" }] }],
+  }) }));
+  const payload = await response.json();
+  assert.equal(payload.reply, "he looks so smug");
+  assert.deepEqual(ollama[0].messages.at(-1).images, ["/9j/4AAQ"], "the image goes to her own model");
+  assert.doesNotMatch(ollama[0].messages.at(-1).content, /could not be passed/);
+  assert.ok(!urls.some((url) => /generativelanguage|groq|x\.ai/.test(url)), `only her own model was called: ${urls.join()}`);
+});
+
+test("with externalFiles off, no describer outside her own models is asked", async () => {
+  const { describeAttachments } = await import("../lib/vision.ts");
+  setEnv("GEMINI_API_KEY", "test-only");
+  setEnv("XAI_API_KEY", "xai-test-key");
+  setEnv("FREYA_VISION_MODEL", undefined);
+  const urls = [];
+  globalThis.fetch = async (url) => { urls.push(String(url)); return new Response("{}", { status: 500 }); };
+  const turns = [{ role: "user", content: "what does this say", inline: [{ mime: "image/jpeg", data: "/9j/4AAQ" }] }];
+  assert.equal(await describeAttachments(turns, undefined, { allowExternal: false, server: null }), null);
+  assert.deepEqual(urls, []);
+  setEnv("XAI_API_KEY", undefined);
 });
 
 test("long-form: depth requests and replies that grow long or structured become one document", async () => {
@@ -158,12 +192,6 @@ test("thinking-2.png is her playful face and is never used for ordinary thinking
   assert.equal(expressionOfFile("thinking", "2"), "playful");
   assert.equal(expressionOfFile("thinking", undefined), "thinking");
   assert.equal(expressionOfFile("smile", "2"), "smile");
-  assert.equal(moodExpression("playful"), "playful");
-  assert.equal(chooseExpression("playful", true, null, 0), "playful", "stays playful while she thinks");
-  assert.equal(chooseExpression("excited", true, null, 0), "playful", "thinking-2 while she works out a reply");
-  assert.equal(chooseExpression("excited", false, null, 0), "excited");
-  assert.equal(chooseExpression("neutral", true, null, 0), "thinking");
-  assert.equal(chooseExpression("curious", true, null, 0), "thinking");
 });
 
 test("a handled form returns to its anchor and the spin eases back in; zoom stays", async () => {

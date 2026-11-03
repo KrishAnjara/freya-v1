@@ -3,7 +3,6 @@ import { grokComplete, grokModel, hasGrok } from "@/lib/grok";
 import { geminiModel, geminiThinking } from "@/lib/gemini-config";
 import { getOllamaEndpoint, ollamaContextLength, ollamaHeaders, ollamaIsLocal } from "@/lib/ollama-models";
 import { groqModels, groqReasoningEffort, ollamaThinking } from "@/lib/llm";
-import { getFreyaServiceConfig, requestServiceReply } from "@/lib/freya-service";
 import { isSelfHosted } from "@/lib/rate-limit";
 
 /**
@@ -165,13 +164,6 @@ const whisperCheck: Check = async () => {
   return response.ok && typeof payload?.text === "string" ? "working" : "not working";
 };
 
-const orchestrationCheck: Check = async () => {
-  const config = getFreyaServiceConfig();
-  if (!config) return "not configured";
-  const reply = await requestServiceReply(config, "Answer briefly.", [{ role: "user", content: PROMPT }], AbortSignal.timeout(OLLAMA_TIMEOUT_MS));
-  return said(reply.reply) ? "working" : "not working";
-};
-
 const supabaseCheck: Check = async () => {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
@@ -202,7 +194,6 @@ async function runChecks(): Promise<HealthReport> {
     [`${ollamaIsLocal() ? "local" : "voice server"}: ollama ${process.env.OLLAMA_MODEL || "freya"}`, ollamaCheck],
     ["api: tavily search", tavilyCheck],
     ["api: groq whisper (voice transcription)", whisperCheck],
-    ["service: orchestration", orchestrationCheck],
     ["service: supabase", supabaseCheck],
     ["service: rate limiter (upstash)", rateLimiterCheck],
   ];

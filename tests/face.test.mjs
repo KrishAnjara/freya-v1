@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { faceWorthMentioning, mirrorExpression, normalizeSeen, readFace, seenSection } from "../lib/face-read.ts";
-import { chooseExpression, EXPRESSION_FILE, EXPRESSIONS, expressionOfFile, faceBeatDelay, facePool, imagesFor, nextFaceBeat, pickVariation, POSES } from "../lib/expression.ts";
-import { MOOD_NAMES } from "../lib/mood.ts";
+import { EXPRESSION_FILE, EXPRESSIONS, expressionOfFile, imagesFor, pickVariation, POSES } from "../lib/expression.ts";
 import { readingDelay } from "../lib/reply-parts.ts";
 import { describeThread } from "../lib/chat-thread.ts";
 
@@ -48,35 +47,10 @@ test("every expression has a pose, a file name and a way to fall back", () => {
   assert.deepEqual(imagesFor("tired", have), ["n"]);
 });
 
-test("she doesn't get stuck on one face", () => {
-  for (const mood of MOOD_NAMES) {
-    const pool = facePool(mood);
-    assert.ok(pool.length >= 2, `${mood} has one face`);
-    for (const face of pool) assert.ok(EXPRESSIONS.includes(face), face);
-    let beat = 0;
-    for (let step = 0; step < 40; step += 1) {
-      const next = nextFaceBeat(pool.length, beat);
-      assert.notEqual(next, beat, "never the same glance twice");
-      assert.ok(beat === 0 || next === 0, "a glance goes back to her main face");
-      beat = next;
-    }
-  }
-  for (const mood of MOOD_NAMES) assert.ok(facePool(mood).slice(1).every((face) => face.startsWith("look-")), `${mood} only glances, it doesn't change emotion`);
-  assert.ok(faceBeatDelay(0, () => 0) >= 25_000, "her main face holds a good while");
-  assert.ok(faceBeatDelay(1, () => 1) <= 3000, "a glance is brief");
+test("another photo of the same expression is never the one already showing", () => {
   assert.equal(pickVariation(["a", "b"], "a"), "b", "not the image she just showed");
   assert.equal(pickVariation(["a"], "a"), "a");
   assert.equal(pickVariation([], "a"), null);
-});
-
-test("what she does with her face follows what's happening", () => {
-  assert.equal(chooseExpression("neutral", false, null), "neutral");
-  assert.equal(chooseExpression("horny", false, null), "sultry");
-  assert.equal(chooseExpression("horny", true, null), "sultry-thinking");
-  assert.equal(chooseExpression("neutral", false, null, 0, { reading: true }), "reading");
-  assert.ok(new Set(Array.from({ length: 8 }, (_, beat) => chooseExpression("playful", false, null, 0, { reading: true, beat }))).size > 1, "reading faces vary");
-  assert.ok(Array.from({ length: 8 }, (_, beat) => chooseExpression("irritated", false, null, 0, { reading: true, beat })).includes("annoyed"), "and follow her mood");
-  assert.equal(chooseExpression("neutral", false, { expression: "laugh", until: 10 }, 0, { reading: true }), "laugh", "a reaction to what she read comes first");
 });
 
 test("she reads for one to five seconds, longer for longer messages", () => {

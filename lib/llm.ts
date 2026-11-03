@@ -1,7 +1,11 @@
-import { getOllamaEndpoint, ollamaContextLength, ollamaHeaders, ollamaIsLocal } from "@/lib/ollama-models";
+import { ollamaContextLength, ollamaIsLocal } from "@/lib/ollama-models";
 import { redactSensitiveCredentials } from "@/lib/sensitive-data";
 import { coolingDownMessage, describeFailure, isCoolingDown, markSuccess, ProviderHttpError, providerErrorDetail, recordFailure, retryAfterOf } from "@/lib/provider-health";
 import { geminiModel, geminiThinking } from "@/lib/gemini-config";
+import { grokModel, hasGrok } from "@/lib/grok";
+import { ChainConfigError, planVoiceChain, resolvePair, VOICE_SERVER_HEALTH, type ChainOptions, type OllamaTier, type ProviderName, type Tier } from "@/lib/voice-chain";
+
+export type { ProviderName } from "@/lib/voice-chain";
 
 /** Image or PDF bytes for providers that can see them (Gemini). Others read only the text note. */
 export type InlinePart = { mime: string; data: string };
@@ -17,8 +21,28 @@ export type ChatMessage = { role: "user" | "assistant"; content: string; inline?
 const UNSEEN_ATTACHMENT =
   "[System note: the attached image, PDF or audio could not be passed to you. You cannot see or hear it. Say so plainly in one line; do not describe, guess at, or invent its contents.]";
 
+const UNSEEN_OTHER_ATTACHMENT =
+  "[System note: the attached PDF or audio could not be passed to you (the images were). Say so plainly if it matters; never guess at what it says.]";
+
 function plainTurns(messages: ChatMessage[]) {
   return messages.map(({ role, content, inline }) => ({ role, content: inline?.length ? `${content}\n\n${UNSEEN_ATTACHMENT}` : content }));
+}
+
+/** Images Ollama can read (it decodes JPEG and PNG); the browser sends photos as JPEG. */
+const OLLAMA_IMAGE_MIMES = new Set(["image/jpeg", "image/png"]);
+
+/**
+ * Turns for Ollama. A model with vision (the Colab 27B, Qwen3.5) gets the images themselves in
+ * Ollama's `images` field, so FREYA looks at them herself; anything it can't take is named as
+ * unseen, the same as for a text-only model.
+ */
+function ollamaTurns(messages: ChatMessage[], vision: boolean) {
+  return messages.map(({ role, content, inline }) => {
+    const images = vision ? (inline ?? []).filter((part) => OLLAMA_IMAGE_MIMES.has(part.mime)).map((part) => part.data) : [];
+    const unseen = (inline?.length ?? 0) - images.length;
+    const note = unseen > 0 ? `\n\n${images.length ? UNSEEN_OTHER_ATTACHMENT : UNSEEN_ATTACHMENT}` : "";
+    return { role, content: `${content}${note}`, ...(images.length ? { images } : {}) };
+  });
 }
 
 function geminiContents(messages: ChatMessage[]) {
@@ -50,18 +74,39 @@ const VOICE_SERVER_TIMEOUT_MS = 90_000;
  * Loading the model as well took 128s when measured on this laptop, so the limit leaves room
  * for a busy CPU: running out of it fails the message when the local model is FREYA's voice.
  */
-function ollamaTimeoutMs() {
-  return Math.max(10_000, Number(process.env.OLLAMA_TIMEOUT_MS) || (ollamaIsLocal() ? 300_000 : 90_000));
+function ollamaTimeoutMs(local = ollamaIsLocal()) {
+  return Math.max(10_000, Number(process.env.OLLAMA_TIMEOUT_MS) || (local ? 300_000 : 90_000));
 }
-/** A voice server that just failed is skipped for a while instead of being waited on again. */
-const VOICE_SERVER_HEALTH = "voice-server";
-function voiceServerDown() {
-  return !ollamaIsLocal() && isCoolingDown(VOICE_SERVER_HEALTH);
+
+/** One Ollama endpoint and model: the Colab server, its fallback model, or the laptop. */
+export type OllamaTarget = Pick<OllamaTier, "baseUrl" | "model" | "key" | "local" | "health" | "label"> & { vision?: boolean };
+
+/** OLLAMA_BASE_URL / OLLAMA_MODEL, as every caller used before the chain existed. */
+export function defaultOllamaTarget(model?: string): OllamaTarget {
+  const tier = planVoiceChain({ provider: "ollama", fallbackEnabled: false, ollamaModel: model })[0] as OllamaTier;
+  return { baseUrl: tier.baseUrl, model: tier.model, key: tier.key, local: tier.local, health: tier.health, label: tier.label };
 }
-function noteVoiceServer(error: unknown, signal?: AbortSignal) {
-  if (ollamaIsLocal() || signal?.aborted) return;
-  recordFailure(VOICE_SERVER_HEALTH, error);
-  noteFailure(VOICE_SERVER_HEALTH, error);
+
+function ollamaHeadersFor(target: OllamaTarget): Record<string, string> {
+  return { "Content-Type": "application/json", ...(target.key ? { Authorization: `Bearer ${target.key}` } : {}) };
+}
+
+/** A remote model that just failed is skipped for a while instead of being waited on again. */
+function noteOllamaFailure(target: OllamaTarget, error: unknown, signal?: AbortSignal) {
+  if (!target.health || signal?.aborted) return;
+  recordFailure(target.health, error);
+  noteFailure(target.health, error);
+}
+
+function ollamaBody(system: string, messages: ChatMessage[], target: OllamaTarget, stream: boolean, think: boolean) {
+  return JSON.stringify({
+    model: target.model,
+    stream,
+    keep_alive: ollamaKeepAlive(),
+    think,
+    messages: [{ role: "system", content: system }, ...ollamaTurns(messages, Boolean(target.vision))],
+    options: { num_ctx: ollamaContextLength(target.local), num_predict: maxOutputTokens() },
+  });
 }
 /** Keeps the model and its prompt cache loaded between messages (Ollama's default is 5m). */
 function ollamaKeepAlive() {
@@ -266,28 +311,21 @@ async function geminiChatRaw(system: string, messages: ChatMessage[], signal?: A
   return text;
 }
 
-async function ollamaChat(system: string, messages: ChatMessage[], signal?: AbortSignal, modelOverride?: string, think = ollamaThinking()) {
-  if (voiceServerDown()) throw coolingDownError(VOICE_SERVER_HEALTH);
-  const model = modelOverride || process.env.OLLAMA_MODEL || "freya";
+async function ollamaChat(system: string, messages: ChatMessage[], signal: AbortSignal | undefined, target: OllamaTarget, think = ollamaThinking()) {
+  if (target.health && isCoolingDown(target.health)) throw coolingDownError(target.health);
   try {
-    const { response, payload } = await providerRequest(`${getOllamaEndpoint()}/api/chat`, {
+    const { response, payload } = await providerRequest(`${target.baseUrl}/api/chat`, {
       method: "POST",
-      headers: ollamaHeaders(),
-      body: JSON.stringify({
-        model,
-        stream: false,
-        keep_alive: ollamaKeepAlive(),
-        think,
-        messages: [{ role: "system", content: system }, ...plainTurns(messages)],
-        options: { num_ctx: ollamaContextLength(), num_predict: maxOutputTokens() },
-      }),
-    }, signal, ollamaTimeoutMs());
+      headers: ollamaHeadersFor(target),
+      body: ollamaBody(system, messages, target, false, think),
+    }, signal, ollamaTimeoutMs(target.local));
     if (!response.ok) throw new ProviderHttpError(`Ollama request failed (${response.status}).`, response.status, undefined, providerErrorDetail(payload));
     const text = payload?.message?.content;
     if (typeof text !== "string" || !text.trim()) throw new Error("Ollama returned no text.");
+    if (target.health) markSuccess(target.health);
     return text.trim();
   } catch (error) {
-    noteVoiceServer(error, signal);
+    noteOllamaFailure(target, error, signal);
     throw error;
   }
 }
@@ -354,6 +392,74 @@ async function* voiceStream(system: string, messages: ChatMessage[], signal?: Ab
     markSuccess(VOICE_SERVER_HEALTH);
   } catch (error) {
     if (!signal?.aborted) { recordFailure(VOICE_SERVER_HEALTH, error); noteFailure(VOICE_SERVER_HEALTH, error); }
+    throw error;
+  }
+}
+
+/**
+ * xAI's Grok as a voice: only as a fallback tier (AI_FALLBACK_PROVIDER=grok,...), never by
+ * default. Same breaker key as lib/grok's logic jobs, so a refused key sidelines both at once.
+ */
+const GROK_CHAT_URL = "https://api.x.ai/v1/chat/completions";
+const grokHealth = () => `grok:${grokModel()}`;
+
+function grokVoiceInit(system: string, messages: ChatMessage[], stream: boolean): RequestInit {
+  const key = process.env.XAI_API_KEY?.trim();
+  if (!key) throw new Error("XAI_API_KEY is not set.");
+  return {
+    method: "POST",
+    headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: grokModel(),
+      messages: [{ role: "system", content: system }, ...plainTurns(messages)],
+      temperature: 0.85,
+      max_completion_tokens: maxOutputTokens(),
+      reasoning_effort: process.env.XAI_REASONING_EFFORT?.trim() || "low",
+      ...(stream ? { stream: true } : {}),
+    }),
+  };
+}
+
+async function grokChat(system: string, messages: ChatMessage[], signal?: AbortSignal) {
+  const health = grokHealth();
+  if (isCoolingDown(health)) throw coolingDownError(health);
+  try {
+    const { response, payload } = await providerRequest(GROK_CHAT_URL, grokVoiceInit(system, messages, false), signal);
+    if (!response.ok) throw new ProviderHttpError(`Grok request failed (${response.status}).`, response.status, retryAfterOf(response), providerErrorDetail(payload));
+    const text = payload?.choices?.[0]?.message?.content;
+    if (typeof text !== "string" || !text.trim()) throw new Error("Grok returned no text.");
+    markSuccess(health);
+    return text.trim();
+  } catch (error) {
+    if (!signal?.aborted) { recordFailure(health, error); noteFailure(health, error); }
+    throw error;
+  }
+}
+
+async function* grokStream(system: string, messages: ChatMessage[], signal?: AbortSignal, state?: StreamState) {
+  const health = grokHealth();
+  if (isCoolingDown(health)) throw coolingDownError(health);
+  try {
+    const { response, release } = await providerStream(GROK_CHAT_URL, grokVoiceInit(system, messages, true), signal);
+    try {
+      if (!response.ok || !response.body) {
+        const payload = await response.json().catch(() => null);
+        throw new ProviderHttpError(`Grok request failed (${response.status}).`, response.status, retryAfterOf(response), providerErrorDetail(payload));
+      }
+      yield* readServerSentDeltas(
+        response.body,
+        (payload) => (payload as { choices?: { delta?: { content?: string } }[] })?.choices?.[0]?.delta?.content || "",
+        (payload) => {
+          const reason = (payload as { choices?: { finish_reason?: string }[] })?.choices?.[0]?.finish_reason;
+          if (reason && state) state.truncated = reason === "length";
+        },
+      );
+    } finally {
+      release();
+    }
+    markSuccess(health);
+  } catch (error) {
+    if (!signal?.aborted) { recordFailure(health, error); noteFailure(health, error); }
     throw error;
   }
 }
@@ -522,27 +628,23 @@ async function* geminiStreamRaw(system: string, messages: ChatMessage[], signal?
   }
 }
 
-async function* ollamaStream(system: string, messages: ChatMessage[], signal?: AbortSignal, state?: StreamState, modelOverride?: string, think = ollamaThinking()) {
-  if (voiceServerDown()) throw coolingDownError(VOICE_SERVER_HEALTH);
-  const model = modelOverride || process.env.OLLAMA_MODEL || "freya";
+async function* ollamaStream(system: string, messages: ChatMessage[], signal: AbortSignal | undefined, state: StreamState | undefined, target: OllamaTarget, think = ollamaThinking()) {
+  if (target.health && isCoolingDown(target.health)) throw coolingDownError(target.health);
   let release = () => {};
   let response: Response;
   try {
-    ({ response, release } = await providerStream(`${getOllamaEndpoint()}/api/chat`, {
+    ({ response, release } = await providerStream(`${target.baseUrl}/api/chat`, {
       method: "POST",
-      headers: ollamaHeaders(),
-      body: JSON.stringify({
-        model, stream: true,
-        keep_alive: ollamaKeepAlive(),
-        think,
-        messages: [{ role: "system", content: system }, ...plainTurns(messages)],
-        options: { num_ctx: ollamaContextLength(), num_predict: maxOutputTokens() },
-      }),
-    }, signal, ollamaTimeoutMs()));
-    if (!response.ok || !response.body) throw new ProviderHttpError(`Ollama request failed (${response.status}).`, response.status);
+      headers: ollamaHeadersFor(target),
+      body: ollamaBody(system, messages, target, true, think),
+    }, signal, ollamaTimeoutMs(target.local)));
+    if (!response.ok || !response.body) {
+      const payload = await response.json().catch(() => null);
+      throw new ProviderHttpError(`Ollama request failed (${response.status}).`, response.status, undefined, providerErrorDetail(payload));
+    }
   } catch (error) {
     release();
-    noteVoiceServer(error, signal);
+    noteOllamaFailure(target, error, signal);
     throw error;
   }
   try {
@@ -560,6 +662,7 @@ async function* ollamaStream(system: string, messages: ChatMessage[], signal?: A
           buffer = buffer.slice(newline + 1);
           if (line) {
             const item = JSON.parse(line);
+            if (typeof item?.error === "string") throw new ProviderHttpError("Ollama stream failed.", 500, undefined, providerErrorDetail(item));
             const text = item?.message?.content;
             if (typeof text === "string" && text) yield text;
             if (item?.done && state) state.truncated = item?.done_reason === "length";
@@ -568,51 +671,45 @@ async function* ollamaStream(system: string, messages: ChatMessage[], signal?: A
         }
       }
     } finally { reader.releaseLock(); }
+    if (target.health) markSuccess(target.health);
+  } catch (error) {
+    // A stream that broke part-way (a dropped tunnel) makes the next message skip this model.
+    noteOllamaFailure(target, error, signal);
+    throw error;
   } finally { release(); }
 }
 
-/**
- * Streams the reply as it is produced. Falls back to the secondary provider the same way
- * generateReply does, but only while nothing has been emitted yet — once the client has
- * partial text, switching providers mid-reply would splice two different answers together.
- */
-/** What a finished stream reports back to its caller. */
-export type ProviderName = "groq" | "gemini" | "ollama" | "server";
-export type ProviderOptions = {
-  provider?: ProviderName; fallbackEnabled?: boolean; fallbackProvider?: ProviderName; ollamaModel?: string; onProvider?: (provider: ProviderName) => void;
+export type ProviderOptions = ChainOptions & {
+  /** Called with the label of each tier as it is tried, last call = who answered. */
+  onProvider?: (provider: string) => void;
   /** Hidden thinking for this reply, in place of OLLAMA_THINK. */
   think?: boolean;
-  /** A different prompt for the fallback, when the main one holds things only the user's own model should see. */
+  /** A different prompt for cloud tiers, when the main one holds things only the user's own model should see. */
   fallbackSystem?: string;
+  /** Her own model can see images: send them to it (the chat route checks the model's capabilities). */
+  ownVision?: boolean;
+  /** False keeps attachment bytes away from cloud tiers (externalFiles off): they get the note only. */
+  cloudSeesFiles?: boolean;
 };
 
-const CLOUD_PROVIDERS = new Set<ProviderName>(["groq", "gemini"]);
+/** A turn's attachment bytes removed, with the note that it couldn't be passed on. */
+const withoutFiles = (turns: ChatMessage[]): ChatMessage[] =>
+  turns.map(({ inline, ...turn }) => inline?.length ? { ...turn, content: `${turn.content}\n\n${UNSEEN_ATTACHMENT}` } : turn);
 
 /**
- * Resolves AI_PROVIDER into a concrete primary and fallback.
+ * Resolves AI_PROVIDER into a concrete primary and first fallback (the start of the voice chain).
  *
- * "hybrid" means the local Ollama model writes the reply — in FREYA's voice, on this machine —
- * while a cloud model stands behind it as the fallback. The cloud also supplies a factual
- * brief before the local model speaks (see lib/brief), which is what lets a small local model
- * answer beyond what it knows.
+ * "hybrid" means the Ollama model writes the reply — in FREYA's voice, on this machine or on the
+ * Colab server — while cloud models stand behind it. The cloud also supplies a factual brief
+ * before her model speaks (see lib/brief), which lets a small model answer beyond what it knows.
  */
 export function resolveProviders(options: ProviderOptions = {}): { primary: ProviderName; fallback: ProviderName } {
-  const configured = (options.provider || process.env.AI_PROVIDER || "groq").toLowerCase();
-  const requestedFallback = (options.fallbackProvider || process.env.AI_FALLBACK_PROVIDER || "").toLowerCase() as ProviderName;
-
-  if (configured === "hybrid") {
-    // The fallback must be a cloud model: falling back from Ollama to Ollama achieves nothing.
-    const fallback = CLOUD_PROVIDERS.has(requestedFallback) ? requestedFallback : "groq";
-    return { primary: "ollama", fallback };
+  try {
+    return resolvePair(options, process.env);
+  } catch (error) {
+    if (error instanceof ChainConfigError) throw new ChatInputError(error.message);
+    throw error;
   }
-  if (configured !== "groq" && configured !== "gemini" && configured !== "ollama" && configured !== "server") {
-    throw new ChatInputError(`Unsupported AI_PROVIDER "${configured}". Use groq, gemini, ollama, server, or hybrid.`);
-  }
-  const primary = configured as ProviderName;
-  const fallback = requestedFallback && requestedFallback !== primary && ["groq", "gemini", "ollama", "server"].includes(requestedFallback)
-    ? requestedFallback
-    : primary === "groq" ? "gemini" : "groq";
-  return { primary, fallback };
 }
 
 /** True when the configured mode puts the local model in front. */
@@ -624,7 +721,51 @@ export function isHybridMode() {
 export function isServerMode() {
   return (process.env.AI_PROVIDER || "").trim().toLowerCase() === "server";
 }
-export type StreamOutcome = { truncated: boolean; parts: number; provider?: ProviderName };
+export type StreamOutcome = { truncated: boolean; parts: number; provider?: string };
+
+type Link = {
+  tier: Tier;
+  stream: (system: string, turns: ChatMessage[], signal?: AbortSignal, state?: StreamState) => AsyncIterable<string>;
+  chat: (system: string, turns: ChatMessage[], signal?: AbortSignal) => Promise<string>;
+};
+
+/** The voice chain for this reply (lib/voice-chain), each tier bound to its adapter. */
+export function voiceLinks(options: ProviderOptions = {}): Link[] {
+  let tiers: Tier[];
+  try {
+    tiers = planVoiceChain(options, process.env, hasGrok());
+  } catch (error) {
+    if (error instanceof ChainConfigError) throw new ChatInputError(error.message);
+    throw error;
+  }
+  return tiers.map((tier): Link => {
+    if (tier.kind === "ollama") {
+      // Only the configured voice gets the images: the chat route checked that model can see.
+      const target: OllamaTarget = { ...tier, vision: Boolean(options.ownVision) && tier.label === "ollama" };
+      return {
+        tier,
+        stream: (system, turns, signal, state) => ollamaStream(system, turns, signal, state, target, options.think),
+        chat: (system, turns, signal) => ollamaChat(system, turns, signal, target, options.think),
+      };
+    }
+    const adapters = {
+      server: { stream: voiceStream, chat: voiceChat },
+      groq: { stream: groqStream, chat: groqChat },
+      gemini: { stream: geminiStream, chat: geminiChat },
+      grok: { stream: grokStream, chat: grokChat },
+    } as const;
+    const { stream, chat } = adapters[tier.kind];
+    if (tier.own || options.cloudSeesFiles !== false) return { tier, stream, chat };
+    return {
+      tier,
+      stream: (system, turns, signal, state) => stream(system, withoutFiles(turns), signal, state),
+      chat: (system, turns, signal) => chat(system, withoutFiles(turns), signal),
+    };
+  });
+}
+
+/** Her own model gets the whole prompt; a cloud tier gets the version written for it, if any. */
+const promptFor = (link: Link, system: string, options: ProviderOptions) => link.tier.own ? system : options.fallbackSystem ?? system;
 
 /**
  * Streams a reply, continuing it across the provider's output ceiling.
@@ -634,7 +775,7 @@ export type StreamOutcome = { truncated: boolean; parts: number; provider?: Prov
  * the same stream, so the reader sees one continuous reply. After its continuation budget it
  * gives up and reports `truncated`, letting the UI offer the choice to the reader.
  *
- * Provider fallback applies only before anything has been emitted: once the reader has partial
+ * The voice chain is walked only before anything has been emitted: once the reader has partial
  * text, switching providers mid-reply would splice two different answers together.
  */
 export async function* streamReply(
@@ -648,17 +789,7 @@ export async function* streamReply(
   if (!messages.length || messages[messages.length - 1].role !== "user") {
     throw new ChatInputError("Send at least one user message, ending with a user message.");
   }
-  const { primary: provider, fallback: fallbackName } = resolveProviders(options);
-  const fallbackEnabled = options.fallbackEnabled ?? ((process.env.AI_FALLBACK_ENABLED || "true").toLowerCase() !== "false");
-  const providers = {
-    groq: groqStream,
-    gemini: geminiStream,
-    server: voiceStream,
-    ollama: (prompt: string, turns: ChatMessage[], requestSignal?: AbortSignal, state?: StreamState) =>
-      ollamaStream(prompt, turns, requestSignal, state, options.ollamaModel, options.think),
-  };
-  const primary = providers[provider];
-  const secondary = providers[fallbackName];
+  const links = voiceLinks(options);
 
   let emitted = 0;
   let answer = "";
@@ -676,26 +807,27 @@ export async function* streamReply(
     ];
 
     const startedThisPass = emitted;
-    try {
-      if (outcome) outcome.provider = provider;
-      options.onProvider?.(provider);
-      for await (const delta of primary(system, turn, signal, state)) {
-        emitted += delta.length;
-        answer += delta;
-        yield delta;
-      }
-      // Nothing at all, with no error: a safety filter blocked it, or a server had a bad moment.
-      if (!emitted) throw new Error("The model returned an empty response.");
-    } catch (primaryError) {
-      if (emitted || !fallbackEnabled || signal?.aborted) throw primaryError;
-      if (outcome) outcome.provider = fallbackName;
-      options.onProvider?.(fallbackName);
-      for await (const delta of secondary(options.fallbackSystem ?? system, turn, signal, state)) {
-        emitted += delta.length;
-        answer += delta;
-        yield delta;
+    let lastError: unknown = null;
+    let answered = false;
+    for (const link of links) {
+      try {
+        if (outcome) outcome.provider = link.tier.label;
+        options.onProvider?.(link.tier.label);
+        for await (const delta of link.stream(promptFor(link, system, options), turn, signal, state)) {
+          emitted += delta.length;
+          answer += delta;
+          yield delta;
+        }
+        // Nothing at all, with no error: a safety filter blocked it, or a server had a bad moment.
+        if (!emitted) throw new Error("The model returned an empty response.");
+        answered = true;
+        break;
+      } catch (error) {
+        if (emitted > startedThisPass || signal?.aborted) throw error;
+        lastError = error;
       }
     }
+    if (!answered) throw lastError ?? new Error("No AI provider is configured.");
 
     if (!state.truncated) break;
     // A pass that hit the ceiling without producing anything would loop forever.
@@ -711,40 +843,26 @@ export async function* streamReply(
   if (!emitted) throw new Error("The model returned an empty response.");
 }
 
+const TIER_NAMES: Record<string, string> = { groq: "Groq", gemini: "Gemini", ollama: "Ollama", server: "Voice server", grok: "Grok", "server-fallback": "Voice server fallback", laptop: "Laptop Ollama" };
+
 export async function generateReply(system: string, input: unknown, signal?: AbortSignal, options: ProviderOptions = {}) {
   const messages = validateMessages(input, MAX_PREPARED_MESSAGE_CHARS);
   if (!messages.length || messages[messages.length - 1].role !== "user") {
     throw new ChatInputError("Send at least one user message, ending with a user message.");
   }
-  const { primary: provider, fallback: fallbackName } = resolveProviders(options);
-  const fallbackEnabled = options.fallbackEnabled ?? ((process.env.AI_FALLBACK_ENABLED || "true").toLowerCase() !== "false");
-  const providers = {
-    groq: groqChat,
-    gemini: geminiChat,
-    server: voiceChat,
-    ollama: (prompt: string, turns: ChatMessage[], requestSignal?: AbortSignal) =>
-      ollamaChat(prompt, turns, requestSignal, options.ollamaModel, options.think),
-  };
-  const primary = providers[provider];
-  const secondary = providers[fallbackName];
-  const providerLabels = { groq: "Groq", gemini: "Gemini", ollama: "Ollama", server: "Voice server" };
-  const primaryName = providerLabels[provider];
-  const secondaryName = providerLabels[fallbackName];
-
-  try {
-    options.onProvider?.(provider);
-    return await primary(system, messages, signal);
-  } catch (primaryError) {
-    if (!fallbackEnabled || signal?.aborted) throw primaryError;
+  const links = voiceLinks(options);
+  const failures: string[] = [];
+  let firstError: unknown = null;
+  for (const link of links) {
     try {
-      options.onProvider?.(fallbackName);
-      return await secondary(options.fallbackSystem ?? system, messages, signal);
-    } catch (fallbackError) {
-      const primaryMessage = primaryError instanceof Error ? primaryError.message : String(primaryError);
-      const fallbackMessage = fallbackError instanceof Error ? fallbackError.message : String(fallbackError);
-      throw new Error(
-        `Both AI providers failed. ${primaryName}: ${primaryMessage} Fallback ${secondaryName}: ${fallbackMessage}`
-      );
+      options.onProvider?.(link.tier.label);
+      return await link.chat(promptFor(link, system, options), messages, signal);
+    } catch (error) {
+      if (signal?.aborted || links.length === 1) throw error;
+      firstError ??= error;
+      failures.push(`${TIER_NAMES[link.tier.label] ?? link.tier.label}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
+  if (!failures.length) throw firstError;
+  throw new Error(`${links.length === 2 ? "Both" : "All"} AI providers failed. ${failures.join(" ")}`);
 }

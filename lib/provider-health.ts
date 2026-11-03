@@ -59,6 +59,13 @@ export function coolingDownMessage(key: string, now = Date.now()) {
   return `cooling down for ${left}${reason ? ` after: ${reason}` : ""}`;
 }
 
+/** For the status panel: how long a key is still skipped, and why. Null when it's fine. */
+export function healthOf(key: string, now = Date.now()): { coolingForSeconds: number; reason?: string } | null {
+  if (!isCoolingDown(key, now)) return null;
+  const until = cooldowns.get(key) ?? now;
+  return { coolingForSeconds: Math.max(1, Math.round((until - now) / 1000)), ...(reasons.get(key) ? { reason: reasons.get(key) } : {}) };
+}
+
 export function markSuccess(key: string) {
   cooldowns.delete(key);
   reasons.delete(key);

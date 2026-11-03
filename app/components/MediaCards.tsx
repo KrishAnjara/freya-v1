@@ -32,8 +32,14 @@ export function VisualizationCard({ info, onShow, onRefine, tagged = false }: { 
   </div>;
 }
 
-/** The label under a picture: what it is, honestly, plus a way to refine it. */
-export function PictureCard({ info, onRefine }: { info: PictureInfo; onRefine: () => void }) {
+/** Styles a picture can be redrawn in (the server's list in lib/image-generation, by key). */
+export const PICTURE_STYLES: [string, string][] = [
+  ["photo", "Photo"], ["cinematic", "Cinematic"], ["illustration", "Illustration"], ["anime", "Anime"], ["watercolor", "Watercolour"],
+  ["oil", "Oil painting"], ["render", "3D render"], ["pixel", "Pixel art"], ["sketch", "Sketch"],
+];
+
+/** The label under a picture: what it is, honestly, plus ways to refine it, vary it or restyle it. */
+export function PictureCard({ info, onRefine, onVariation, onStyle }: { info: PictureInfo; onRefine: () => void; onVariation?: () => void; onStyle?: (style: string) => void }) {
   if (info.status === "loading") return <div className="media-card picture-card status-loading" role="status"><div className="media-card-kicker">PICTURE</div><div className="media-card-title">Making it…</div></div>;
   if (info.status === "error") return <div className="media-card picture-card status-error"><div className="media-card-kicker">PICTURE</div><div className="media-card-title">{info.error || "That picture couldn't be made."}</div></div>;
   return <div className={`media-card picture-card kind-${info.kind}`}>
@@ -42,6 +48,13 @@ export function PictureCard({ info, onRefine }: { info: PictureInfo; onRefine: (
     <div className="media-card-note">
       {info.kind === "svg" ? `Drawn as vector shapes because ${FALLBACK_REASONS[info.reason ?? ""] ?? "image generation is unavailable"}.` : info.prompt}
     </div>
-    <div className="media-card-actions"><button type="button" onClick={onRefine}>Refine</button></div>
+    <div className="media-card-actions">
+      <button type="button" onClick={onRefine}>Refine</button>
+      {onVariation && <button type="button" onClick={onVariation} title="Another take on this picture">Variation</button>}
+      {onStyle && <select aria-label="Redraw in a style" value="" onChange={(event) => { if (event.target.value) onStyle(event.target.value); }}>
+        <option value="">Style…</option>
+        {PICTURE_STYLES.map(([key, label]) => <option key={key} value={key}>{label}</option>)}
+      </select>}
+    </div>
   </div>;
 }

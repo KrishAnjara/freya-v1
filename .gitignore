@@ -31,3 +31,9 @@ training/data/
 *.log
 .DS_Store
 Thumbs.db
+
+# Local backups made before large changes
+backups/
+
+# Her memory store (SQLite): personal, never committed
+data/

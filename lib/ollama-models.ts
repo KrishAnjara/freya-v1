@@ -21,8 +21,7 @@ export function ollamaIsLocal() {
 }
 
 /** The context window to ask for: small on a laptop CPU, larger on a server's GPU. */
-export function ollamaContextLength() {
-  const local = ollamaIsLocal();
+export function ollamaContextLength(local = ollamaIsLocal()) {
   const fallback = local ? 4096 : 8192;
   return Math.max(1024, Math.min(local ? 8192 : 32768, Number(process.env.OLLAMA_NUM_CTX) || fallback));
 }

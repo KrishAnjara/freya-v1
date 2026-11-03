@@ -324,72 +324,9 @@ test("Ollama outage uses the explicitly configured hosted fallback", async () =>
   assert.equal((await response.json()).reply, "A grounded test reply.");
 });
 
-test("Next.js delegates to the authenticated Python service and reports the actual provider", async () => {
-  setChatEnv();
-  setEnv("FREYA_SERVICE_URL", "http://127.0.0.1:8000");
-  setEnv("FREYA_SERVICE_TOKEN", "unit-test-token-that-is-at-least-32-characters");
-  let serviceCalls = 0;
-  globalThis.fetch = async (url, init) => {
-    assert.equal(String(url), "http://127.0.0.1:8000/v1/chat");
-    assert.equal(new Headers(init.headers).get("authorization"), "Bearer unit-test-token-that-is-at-least-32-characters");
-    serviceCalls += 1;
-    return new Response(JSON.stringify({ reply: "Python local reply", provider: "ollama", task: "lightweight_conversation" }), { status: 200 });
-  };
-  const response = await POST(request({ messages: [{ role: "user", content: "Hello" }] }));
-  assert.equal(response.status, 200);
-  const payload = await response.json();
-  assert.equal(payload.provider, "ollama");
-  assert.equal(payload.reply, "Python local reply");
-  assert.equal(serviceCalls, 1);
-});
 
-test("Python service outage falls back through the existing configured provider", async () => {
-  setChatEnv();
-  setEnv("FREYA_SERVICE_URL", "http://127.0.0.1:8000");
-  setEnv("FREYA_SERVICE_TOKEN", "unit-test-token-that-is-at-least-32-characters");
-  globalThis.fetch = async (url) => {
-    if (String(url).includes("127.0.0.1:8000")) return new Response("offline", { status: 503 });
-    assert.match(String(url), /api\.groq\.com/);
-    return groqSuccess();
-  };
-  const response = await POST(request({ messages: [{ role: "user", content: "Hello" }] }));
-  assert.equal(response.status, 200);
-  assert.equal((await response.json()).reply, "A grounded test reply.");
-});
 
-test("Python service authentication failure fails closed instead of bypassing its boundary", async () => {
-  setChatEnv();
-  setEnv("FREYA_SERVICE_URL", "http://127.0.0.1:8000");
-  setEnv("FREYA_SERVICE_TOKEN", "unit-test-token-that-is-at-least-32-characters");
-  let calls = 0;
-  globalThis.fetch = async () => { calls += 1; return new Response("unauthorized", { status: 401 }); };
-  const response = await POST(request({ messages: [{ role: "user", content: "Hello" }] }));
-  assert.equal(response.status, 503);
-  assert.equal(calls, 1);
-});
 
-test("Next.js preserves Python provider identity and text across SSE streaming", async () => {
-  setChatEnv();
-  setEnv("FREYA_SERVICE_URL", "http://127.0.0.1:8000");
-  setEnv("FREYA_SERVICE_TOKEN", "unit-test-token-that-is-at-least-32-characters");
-  globalThis.fetch = async (url) => {
-    assert.match(String(url), /v1\/chat\/stream$/);
-    const events = [
-      'event: provider\ndata: {"provider":"ollama","task":"lightweight_conversation"}\n\n',
-      'event: delta\ndata: {"text":"Local "}\n\n',
-      'event: delta\ndata: {"text":"stream."}\n\n',
-      'event: done\ndata: {}\n\n',
-    ].join("");
-    return new Response(events, { status: 200, headers: { "content-type": "text/event-stream" } });
-  };
-  const response = await POST(request({ stream: true, messages: [{ role: "user", content: "Hello" }] }));
-  assert.equal(response.status, 200);
-  const body = await response.text();
-  assert.match(body, /event: provider/);
-  assert.match(body, /"provider":"ollama"/);
-  assert.match(body, /event: delta\ndata: "Local stream\."/, "text is released once it's been checked (lib/reply-guard)");
-  assert.match(body, /event: done/);
-});
 
 test("privacy mode selects Ollama and disables hosted fallback on the direct path", async () => {
   setChatEnv();

@@ -1,15 +1,12 @@
 /**
- * FREYA's facial expression on the portrait. It follows her mood, not the words in a message:
- *   1. they asked for a face ("smile for me"), or their own face on camera got a response: short-lived;
- *   2. she is reading their message: eyes down, flavoured by her mood;
- *   3. she is working out a reply: thinking;
- *   4. otherwise her current (simulated) mood, with glances away and back so she doesn't freeze.
+ * FREYA's facial expressions on the portrait: the poses that drive the procedural face rig, the
+ * faces someone can ask for ("smile for me"), and which expression photos exist. Which face she
+ * shows, when and how strongly is decided by lib/expression-director, never at random.
  *
  * POSES drive the procedural face rig (brows, mouth corners, lids, lips, head tilt, gaze).
  * When an image for an expression exists (see public/portrait/expressions/README.md), the
  * portrait crossfades to it and the pose only adds subtle motion on top. Pure, so tested.
  */
-import type { MoodName } from "@/lib/mood";
 
 export const EXPRESSIONS = ["neutral", "smile", "playful", "laugh", "curious", "surprised", "sad", "affectionate", "thinking", "confused", "confident", "reading", "look-left", "look-right", "look-up", "look-down", "sultry", "sultry-thinking", "excited", "interested", "tired", "bored", "annoyed", "disgusted"] as const;
 export type Expression = (typeof EXPRESSIONS)[number];
@@ -44,68 +41,6 @@ export const POSES: Record<Expression, Pose> = {
   disgusted: { brow: -0.6, smile: -0.4, squint: 0.5, tilt: -0.3, lips: 0.05, gazeX: -0.2, gazeY: 0 },
 };
 
-/** Her faces in each mood. The first is her main one; the others are brief glances away from it. */
-const MOOD_FACES: Record<MoodName, Expression[]> = {
-  neutral: ["neutral", "look-left", "look-right", "look-up", "look-down"],
-  happy: ["smile", "look-left", "look-right"],
-  playful: ["playful", "look-left", "look-right"],
-  warm: ["affectionate", "look-down", "look-left"],
-  curious: ["curious", "look-up", "look-left"],
-  interested: ["interested", "look-left", "look-right"],
-  horny: ["sultry", "look-down", "look-left"],
-  content: ["neutral", "look-left", "look-right"],
-  excited: ["excited", "look-up", "look-right"],
-  bored: ["bored", "look-up", "look-left", "look-right"],
-  tired: ["tired", "look-down"],
-  restless: ["curious", "look-left", "look-right", "look-up"],
-  melancholy: ["sad", "look-down", "look-left"],
-  irritated: ["confident", "look-up"],
-  sulking: ["sad", "look-down"],
-  annoyed: ["annoyed", "look-up"],
-  disgusted: ["disgusted", "look-left"],
-};
-const READING_FACES: Partial<Record<MoodName, Expression[]>> = {
-  playful: ["reading", "playful", "smile"],
-  horny: ["reading", "sultry", "sultry-thinking"],
-  warm: ["reading", "affectionate"],
-  excited: ["reading", "smile", "excited"],
-  interested: ["reading", "interested", "curious"],
-  curious: ["reading", "curious"],
-  tired: ["reading", "tired"],
-  bored: ["reading", "bored"],
-  melancholy: ["reading", "sad"],
-  sulking: ["reading", "sad"],
-  irritated: ["reading", "annoyed"],
-  annoyed: ["reading", "annoyed"],
-  disgusted: ["reading", "disgusted"],
-};
-const THINKING_FACES: Partial<Record<MoodName, Expression[]>> = {
-  playful: ["playful"],
-  excited: ["playful"],
-  horny: ["sultry-thinking", "sultry"],
-};
-
-export function facePool(mood: MoodName): Expression[] {
-  return MOOD_FACES[mood] ?? MOOD_FACES.neutral;
-}
-
-export function moodExpression(mood: MoodName): Expression {
-  return facePool(mood)[0];
-}
-
-/** From her main face she glances somewhere at random; from a glance she comes back. */
-export function nextFaceBeat(poolSize: number, beat: number, random: () => number = Math.random) {
-  if (beat % poolSize !== 0 || poolSize < 2) return 0;
-  return 1 + Math.floor(random() * (poolSize - 1));
-}
-
-/** A glance is brief, her main face holds for a while. */
-export function faceBeatDelay(beat: number, random: () => number = Math.random) {
-  return beat === 0 ? 25_000 + random() * 45_000 : 1500 + random() * 1500;
-}
-
-export type Reaction = { expression: Expression; ms: number };
-
 const REQUESTS: [RegExp, Expression][] = [
   [/\b(laugh|giggle)\b/, "laugh"],
   [/\b(smile|grin)\b/, "smile"],
@@ -126,21 +61,6 @@ export function requestedExpression(text: string): Expression | null {
   if (!/^(can you|could you|will you|pls|please|now|ok|okay|freya,?)?\s*(smile|grin|laugh|giggle|look|make|show|give me|do|pull)\b|\b(face|expression)\b|\bfor me\b/.test(clean)) return null;
   for (const [pattern, expression] of REQUESTS) if (pattern.test(clean)) return expression;
   return null;
-}
-
-/** Only when they ask for a face. Everything else shows through her mood. */
-export function reactionTo(text: string): Reaction | null {
-  const requested = requestedExpression(text);
-  return requested ? { expression: requested, ms: 8000 } : null;
-}
-
-export function chooseExpression(moodName: MoodName, thinking: boolean, reaction: (Reaction & { until: number }) | null, now = Date.now(), { beat = 0, reading = false }: { beat?: number; reading?: boolean } = {}): Expression {
-  if (reaction && reaction.until > now) return reaction.expression;
-  const pool = reading
-    ? READING_FACES[moodName] ?? ["reading", "look-down"]
-    // Playful or excited, she has the thinking-2 look while working out a reply.
-    : thinking ? THINKING_FACES[moodName] ?? ["thinking", "look-up", "look-left"] : facePool(moodName);
-  return pool[beat % pool.length];
 }
 
 /** Expression image files: "smile.png", "smile-2.webp" (a variation). Anything else is ignored. */

@@ -2,7 +2,7 @@
 
 ## Implemented
 
-- Next.js App Router chat with Groq, Gemini, or local Ollama providers; optional bounded FastAPI orchestration.
+- Next.js App Router chat with Groq, Gemini, or local Ollama providers.
 - Browser session conversation history, explicit browser-local preferences, optional authenticated Supabase memory with row-level security, and user controls to review and delete stored memory.
 - Optional grounded web search, rate limiting, bounded request payloads, provider timeouts, and optional streaming.
 - Three.js canvas visuals, configurable persona, user-invoked bounded reflection, and optional browser speech features.
@@ -10,7 +10,7 @@
 
 ## Release gates
 
-1. Run `npm ci`, `npm run typecheck`, `npm run lint`, `npm test`, `npm run build`, and `python -m pytest freya_service/tests` in CI.
+1. Run `npm ci`, `npm run typecheck`, `npm run lint`, `npm test`, `npm run build`, and `python -m pytest training/tests` in CI.
 2. Run `npm audit` and an up-to-date Python dependency audit in a network-enabled release environment; review and resolve findings.
 3. Configure production provider and Upstash credentials in the host secret store. Verify trusted proxy IP header behavior and failure handling in a preview deployment.
 4. If cloud memory is enabled, apply the SQL migrations and verify authentication, RLS isolation, deletion, and redirect/email settings using disposable accounts.

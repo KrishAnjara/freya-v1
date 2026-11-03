@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { guardRequest, hostedProvidersAllowed } from "@/lib/route-guard";
-import { imageRequestBlocked, makeImage } from "@/lib/image-generation";
+import { imageRequestBlocked, isImageStyle, makeImage } from "@/lib/image-generation";
+import { describeFailure } from "@/lib/provider-health";
 
 /**
  * Pictures in the chat (/image, or asking FREYA to draw something). Returns a generated image
@@ -29,14 +30,17 @@ export async function POST(request: Request) {
     }
     : undefined;
   if (imageRequestBlocked(`${previous?.prompt ?? ""} ${prompt}`)) return NextResponse.json({ error: "That's not something I'll draw." }, { status: 400 });
+  const style = isImageStyle(body.style) ? body.style : undefined;
+  // A variation needs something to vary.
+  const variation = body.variation === true && Boolean(previous);
 
   try {
-    const result = await makeImage({ prompt, previous }, request.signal);
+    const result = await makeImage({ prompt, previous, style, variation }, request.signal);
     if (!result) return NextResponse.json({ error: "That picture couldn't be made. Try describing it differently." }, { status: 422 });
     return NextResponse.json(result, { headers: { "Cache-Control": "no-store" } });
   } catch (error) {
     if (request.signal.aborted) return new NextResponse(null, { status: 499 });
-    console.warn(`FREYA image failed (${error instanceof Error ? error.message.slice(0, 40) : "error"}).`);
+    console.warn(`FREYA image failed (${describeFailure(error)}).`);
     return NextResponse.json({ error: "Pictures aren't working right now. Try again in a moment." }, { status: 503 });
   }
 }

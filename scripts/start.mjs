@@ -6,6 +6,8 @@
 //   ... --format chatml        force the chat format of a fine-tuned file (normally detected)
 //   ... --remote URL --key KEY run her model on a server instead (training/freya_server.ipynb
 //                              prints this line for you); this machine then runs no model
+//   ... --laptop               with --remote: if the Colab server goes away, this laptop's own
+//                              "freya" answers before any cloud model (slow on a CPU; nothing is downloaded)
 //   ... --local                back to the model on this machine
 //
 // If you put a fine-tuned model from Colab at training/freya-gguf/freya-trained.gguf, it
@@ -58,7 +60,11 @@ async function identifyServer(url, key) {
   if (tags.ok) {
     const payload = await tags.json().catch(() => null);
     const names = (payload?.models ?? []).map((model) => model.name);
-    if (Array.isArray(payload?.models)) return { kind: "ollama", model: names.some((name) => /^freya(:|$)/.test(name)) ? "freya" : names[0] ?? "freya" };
+    if (Array.isArray(payload?.models)) {
+      // The FREYA gateway (training/serve_remote.py) also says what else it serves.
+      const health = await ask("/v1/health").then((response) => response.ok ? response.json() : null).catch(() => null);
+      return { kind: "ollama", model: names.some((name) => /^freya(:|$)/.test(name)) ? "freya" : names[0] ?? "freya", gateway: health?.models ?? null };
+    }
   }
   const base = url.endsWith("/v1") ? url : `${url}/v1`;
   const models = await fetch(`${base}/models`, { headers, signal: AbortSignal.timeout(20_000) }).catch(() => null);
@@ -89,10 +95,20 @@ if (process.argv.includes("--local")) {
     say("That server didn't list a model. Add --model NAME.");
     process.exit(1);
   }
+  const gateway = server.gateway ?? {};
+  const extras = {
+    ...(typeof gateway.fallback === "string" && gateway.fallback ? { FREYA_FALLBACK_MODEL: gateway.fallback } : {}),
+    ...(typeof gateway.vision === "string" && gateway.vision ? { FREYA_VISION_MODEL: gateway.vision } : {}),
+    ...(typeof gateway.embed === "string" && gateway.embed ? { FREYA_EMBED_MODEL: gateway.embed } : {}),
+    ...(process.argv.includes("--laptop") ? { LOCAL_OLLAMA_URL: "http://127.0.0.1:11434", LOCAL_OLLAMA_MODEL: "freya" } : {}),
+  };
   setVoiceServer(server.kind === "ollama"
-    ? { AI_PROVIDER: "hybrid", OLLAMA_BASE_URL: url, OLLAMA_API_KEY: key, OLLAMA_MODEL: option("model") || server.model, OLLAMA_NUM_CTX: option("ctx") || "8192", OLLAMA_THINK: process.argv.includes("--think") ? "true" : "false" }
-    : { AI_PROVIDER: "server", VOICE_BASE_URL: server.base, VOICE_API_KEY: key, VOICE_MODEL: server.model });
+    ? { AI_PROVIDER: "hybrid", OLLAMA_BASE_URL: url, OLLAMA_API_KEY: key, OLLAMA_MODEL: option("model") || server.model, OLLAMA_NUM_CTX: option("ctx") || "8192", OLLAMA_THINK: process.argv.includes("--think") ? "true" : "false", ...extras }
+    : { AI_PROVIDER: "server", VOICE_BASE_URL: server.base, VOICE_API_KEY: key, VOICE_MODEL: server.model, ...(extras.LOCAL_OLLAMA_URL ? { LOCAL_OLLAMA_URL: extras.LOCAL_OLLAMA_URL, LOCAL_OLLAMA_MODEL: "freya" } : {}) });
   say(`Her model runs on ${new URL(url).host}. This machine runs no model.`);
+  if (extras.FREYA_FALLBACK_MODEL) say(`If it fails mid-session, ${extras.FREYA_FALLBACK_MODEL} on the same server answers.`);
+  if (extras.FREYA_EMBED_MODEL) say(`Memory is matched by meaning with ${extras.FREYA_EMBED_MODEL}.`);
+  if (extras.LOCAL_OLLAMA_URL) say("If the server goes away, this laptop's freya answers before any cloud model.");
 }
 const env = readEnv();
 const voiceIsRemote = env.AI_PROVIDER === "server" || !/^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:|\/|$)/.test(env.OLLAMA_BASE_URL || "http://127.0.0.1:11434");

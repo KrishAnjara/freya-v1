@@ -37,6 +37,7 @@ Worth keeping (lasting and meaningful):
 - upcoming or unresolved things worth following up ("open"): an exam, test, interview, trip or appointment (with its date), results they're waiting on, something they were going to try
 - recurring interests and activities
 - running jokes or references between them and Freya ("joke")
+- something Freya said she'd follow up on, with its date when there is one ("open"): "Freya said she'd ask how the interview on 2026-11-12 went." Only real promises she made, not small talk
 
 Not worth keeping: small talk, passing moods, one-off questions, anything only true right now, what Freya said about herself, your guesses, and anything they asked not to be remembered. Never keep passwords, keys, card or account numbers, exact addresses, phone numbers, emails or sexual details. Health details only if they clearly shared them as ongoing context that matters to them.
 

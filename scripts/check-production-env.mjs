@@ -60,21 +60,6 @@ if (selfHosted) {
   }
 }
 
-const serviceUrl = process.env.FREYA_SERVICE_URL?.trim();
-if (serviceUrl) {
-  try {
-    const parsed = new URL(serviceUrl);
-    const local = ["localhost", "127.0.0.1", "::1"].includes(parsed.hostname);
-    if (parsed.protocol !== "https:" && !(parsed.protocol === "http:" && local)) {
-      failures.push("FREYA_SERVICE_URL must use HTTPS outside localhost");
-    }
-  } catch {
-    failures.push("FREYA_SERVICE_URL must be a valid URL");
-  }
-  const token = required("FREYA_SERVICE_TOKEN");
-  if (token && token.length < 32) failures.push("FREYA_SERVICE_TOKEN must be at least 32 characters");
-}
-
 if (process.env.WEB_SEARCH_ENABLED?.toLowerCase() === "true" && !process.env.GEMINI_API_KEY?.trim() && !process.env.TAVILY_API_KEY?.trim()) {
   failures.push("WEB_SEARCH_ENABLED requires GEMINI_API_KEY or TAVILY_API_KEY");
 }

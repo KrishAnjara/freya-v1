@@ -32,7 +32,6 @@ test("health probes every service and reports only working / not working / not c
     assert.equal(body.services["cloud: groq m2"], "not working");
     assert.equal(body.services["api: groq whisper (voice transcription)"], "working");
     assert.equal(body.services["local: ollama freya"], "not working");
-    assert.equal(body.services["service: orchestration"], "not configured");
     assert.ok(Object.values(body.services).every((status) => ["working", "not working", "not configured"].includes(status)));
     assert.doesNotMatch(JSON.stringify(body), /org_secret|test-only|ready/);
   } finally {

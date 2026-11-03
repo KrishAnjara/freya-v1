@@ -34,17 +34,20 @@ import { playChime } from "@/lib/chime";
 import VoiceControls, { type SpeechRequest } from "@/app/components/VoiceControls";
 import { CHARACTER_PROFILE_KEY, createDefaultCharacterProfile, normalizeCharacterProfile, type CharacterProfile } from "@/lib/character-profile";
 import dynamic from "next/dynamic";
-import type { CanvasForm, CanvasSignal } from "@/app/components/EmotionCanvas";
-import { PictureCard, VisualizationCard, type PictureInfo, type VisualizationInfo } from "@/app/components/MediaCards";
+import type { CanvasForm, CanvasQuality, CanvasSignal } from "@/app/components/EmotionCanvas";
+import { PICTURE_STYLES, PictureCard, VisualizationCard, type PictureInfo, type VisualizationInfo } from "@/app/components/MediaCards";
 import { commandHints, parseCommand, pictureRequest } from "@/lib/composer-commands";
 import { FORM_POINTS, validateSpec, type VisualSpec } from "@/lib/visualize";
 import { cloudForSpec } from "@/lib/visualize-client";
-import { chooseExpression, reactionTo, type Reaction, faceBeatDelay, facePool, nextFaceBeat } from "@/lib/expression";
+import { requestedExpression } from "@/lib/expression";
+import { appraiseMessage, appraiseReply, EXPRESSION_INTENSITIES, isLongMessage, type ExpressionIntensity } from "@/lib/expression-director";
+import { useExpressionDirector } from "@/app/components/useExpressionDirector";
+import StatusPanel from "@/app/components/StatusPanel";
 import { sanitizeSvg } from "@/lib/svg-safety";
 import { captureExplicitPreference } from "@/lib/memory-capture";
 import { deriveReflectionCandidates } from "@/lib/reflection";
 import { summarizeOlderMessages } from "@/lib/conversation-summary";
-import { applyChangesLocally, describeChanges, LOCAL_MEMORY_LIMIT, loadForgotten, MEMORY_RESET_KEY, normalizeStoredMemories, reflectionWindow, rememberForgotten, type StoredMemory } from "@/lib/memory-client";
+import { applyChangesLocally, describeChanges, fetchDiskMemory, forgetOnDisk, LOCAL_MEMORY_LIMIT, loadForgotten, mergeMemories, MEMORY_RESET_KEY, normalizeStoredMemories, pushDiskMemories, reflectionWindow, rememberForgotten, sameMemories, type StoredEpisode, type StoredMemory } from "@/lib/memory-client";
 import type { MemoryChanges } from "@/lib/memory-reflection";
 import { containsSensitiveCredential } from "@/lib/sensitive-data";
 
@@ -140,6 +143,10 @@ const INTIMATE_KEY = "freya.v1.intimateMode";
 const STAY_IN_CHARACTER_KEY = "freya.v1.stayInCharacter";
 const REALISTIC_TIMING_KEY = "freya.v1.realisticTiming";
 const CAMERA_KEY = "freya.v1.camera";
+const EXPRESSION_KEY = "freya.v1.expressionIntensity";
+const CANVAS_QUALITY_KEY = "freya.v1.canvasQuality";
+const EXTERNAL_FILES_KEY = "freya.v1.externalFiles";
+const CLOUD_FALLBACK_KEY = "freya.v1.cloudFallback";
 /** She says something about your face at most this often. */
 const FACE_TEXT_EVERY_MS = 10 * 60_000;
 const REASONING_KEY = "freya.v1.reasoning";
@@ -428,6 +435,11 @@ export default function Home() {
   const [memoryOpen, setMemoryOpen] = useState(false);
   const [memoryEnabled, setMemoryEnabled] = useState(true);
   const memoriesRef = useRef<Memory[]>([]);
+  /** Memory kept on this computer (/api/memory): whether this install has it, and the recaps it keeps. */
+  const [diskMemory, setDiskMemory] = useState(false);
+  const diskMemoryRef = useRef(false);
+  const [episodes, setEpisodes] = useState<StoredEpisode[]>([]);
+  const [memoryQuery, setMemoryQuery] = useState("");
   const reflectingRef = useRef(new Set<string>());
   const reflectTimersRef = useRef(new Map<string, number>());
   const reflectRef = useRef<(conversationId: string) => void>(() => {});
@@ -477,8 +489,8 @@ export default function Home() {
   /** Her day has her busy, so she hasn't picked it up yet. */
   const [herAway, setHerAway] = useState(false);
   /** Which face she's on: glances away and back, and which one she reads with. */
-  const [faceBeat, setFaceBeat] = useState(0);
-  const [readingBeat, setReadingBeat] = useState(0);
+  /** Whether the message she's reading is long enough to show her reading it. */
+  const [readingLong, setReadingLong] = useState(false);
   /** Camera: whether it's asked for, how it's going, and what it reads on their face. */
   const [cameraOn, setCameraOn] = useState(false);
   const [cameraLive, setCameraLive] = useState(false);
@@ -503,14 +515,24 @@ export default function Home() {
   const [feedbackCount, setFeedbackCount] = useState(0);
   /** The conversation where the panel is working right now, for the "thinking it through" label. */
   const [deliberatingIn, setDeliberatingIn] = useState("");
-  /** A short-lived facial reaction (their news, a joke, "smile for me"); then her mood shows again. */
-  const [reaction, setReaction] = useState<(Reaction & { until: number }) | null>(null);
-  const react = useCallback((next: Reaction | null) => { if (next) setReaction({ ...next, until: Date.now() + next.ms }); }, []);
-  useEffect(() => {
-    if (!reaction) return;
-    const timer = window.setTimeout(() => setReaction((current) => current === reaction ? null : current), Math.max(0, reaction.until - Date.now()));
-    return () => window.clearTimeout(timer);
-  }, [reaction]);
+  /** How much her face shows (Settings → Expressions). */
+  const [expressionIntensity, setExpressionIntensity] = useState<ExpressionIntensity>("natural");
+  /** How much the presence canvas draws (auto steps down on slow machines). */
+  const [canvasQuality, setCanvasQuality] = useState<CanvasQuality>("auto");
+  /** This browser's own limits on top of freya.config.json: they can only narrow it, never widen it. */
+  const [externalFilesOn, setExternalFilesOn] = useState(true);
+  const [cloudFallbackOn, setCloudFallbackOn] = useState(true);
+  const [statusOpen, setStatusOpen] = useState(false);
+  // Her face (lib/expression-director): neutral at rest, reactions only to what was actually
+  // said, held briefly, with cooldowns, never at random.
+  const portrait = useExpressionDirector({
+    mood,
+    activity: readingIn === activeId && readingIn && !herAway ? "reading" : typingIn === activeId && typingIn ? "typing" : "idle",
+    longMessage: readingLong,
+    deliberating: deliberatingIn === activeId && Boolean(deliberatingIn),
+    intensity: expressionIntensity,
+  });
+  const offerFace = portrait.offer;
   /** Set when a reply used up its continuation budget and still had more to say. */
   const [truncatedReplyId, setTruncatedReplyId] = useState("");
   const [user, setUser] = useState<User | null>(null);
@@ -583,6 +605,12 @@ export default function Home() {
       setStayInCharacter(localStorage.getItem(STAY_IN_CHARACTER_KEY) === "true");
       setRealisticTiming(localStorage.getItem(REALISTIC_TIMING_KEY) !== "false");
       setCameraOn(localStorage.getItem(CAMERA_KEY) === "true");
+      const savedIntensity = localStorage.getItem(EXPRESSION_KEY);
+      if (EXPRESSION_INTENSITIES.includes(savedIntensity as ExpressionIntensity)) setExpressionIntensity(savedIntensity as ExpressionIntensity);
+      const savedQuality = localStorage.getItem(CANVAS_QUALITY_KEY);
+      if (savedQuality === "auto" || savedQuality === "low" || savedQuality === "high") setCanvasQuality(savedQuality);
+      setExternalFilesOn(localStorage.getItem(EXTERNAL_FILES_KEY) !== "false");
+      setCloudFallbackOn(localStorage.getItem(CLOUD_FALLBACK_KEY) !== "false");
       setFeedbackCount(loadFeedback().length);
       moodLoadedRef.current = true;
       setMood(resumeMood(loadMood()));
@@ -620,15 +648,13 @@ export default function Home() {
       localStorage.setItem(STAY_IN_CHARACTER_KEY, String(stayInCharacter));
       localStorage.setItem(REALISTIC_TIMING_KEY, String(realisticTiming));
       localStorage.setItem(CAMERA_KEY, String(cameraOn));
+      localStorage.setItem(EXPRESSION_KEY, expressionIntensity);
+      localStorage.setItem(CANVAS_QUALITY_KEY, canvasQuality);
+      localStorage.setItem(EXTERNAL_FILES_KEY, String(externalFilesOn));
+      localStorage.setItem(CLOUD_FALLBACK_KEY, String(cloudFallbackOn));
     } catch { /* Settings still apply for this session. */ }
-  }, [autonomyLevel, privacyMode, autoMemory, memoryEnabled, candidLanguage, notificationsOn, initiativeOn, soundOn, intimateMode, stayInCharacter, realisticTiming, cameraOn, hydrated]);
+  }, [autonomyLevel, privacyMode, autoMemory, memoryEnabled, candidLanguage, notificationsOn, initiativeOn, soundOn, intimateMode, stayInCharacter, realisticTiming, cameraOn, expressionIntensity, canvasQuality, externalFilesOn, cloudFallbackOn, hydrated]);
 
-  // She glances away and back, so she never freezes on one face.
-  const facePoolSize = facePool(mood.name).length;
-  useEffect(() => {
-    const timer = window.setTimeout(() => setFaceBeat((beat) => nextFaceBeat(facePoolSize, beat)), faceBeatDelay(faceBeat % facePoolSize));
-    return () => window.clearTimeout(timer);
-  }, [faceBeat, facePoolSize]);
 
   // The camera runs only while it's switched on, here and in freya.config.json.
   const cameraAllowed = hydrated && cameraOn && switches.camera !== false;
@@ -680,8 +706,8 @@ export default function Home() {
     const expression = theirFace && mirrorExpression(theirFace);
     if (!expression || Date.now() - lastMirrorRef.current < 45_000) return;
     lastMirrorRef.current = Date.now();
-    react({ expression, ms: 3500 });
-  }, [theirFace, react]);
+    offerFace({ expression, level: 0.35, ms: 3500, reason: "their face" });
+  }, [theirFace, offerFace]);
 
   // Anything they type while she's getting to their message makes her reply show what it answers.
   const typedSinceSentRef = useRef(false);
@@ -828,7 +854,7 @@ export default function Home() {
       try {
         loadSavedCharacterProfile();
         loadConversations();
-        if (active) setMemories(readLocalMemories());
+        if (active) { setMemories(readLocalMemories()); void syncDiskMemory(); }
       } catch {
         if (active) {
           setConversations([createConversation()]);
@@ -851,7 +877,7 @@ export default function Home() {
       try { loadConversations(); } catch { setConversations([createConversation()]); }
       setHydrated(true);
       if (data.session?.user) void loadCloudMemories();
-      else setMemories(readLocalMemories());
+      else { setMemories(readLocalMemories()); void syncDiskMemory(); }
     });
     const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
       if (!active) return;
@@ -864,6 +890,23 @@ export default function Home() {
     // Hydration runs once on mount; re-running it would discard in-progress state.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  /**
+   * Notes on this computer's disk and in this browser, merged (newer edit wins, forgotten ones stay
+   * out), so clearing the browser or using another one doesn't erase what she knows. Only without
+   * an account: a signed-in account keeps its notes in Supabase.
+   */
+  async function syncDiskMemory() {
+    const disk = await fetchDiskMemory();
+    diskMemoryRef.current = Boolean(disk);
+    setDiskMemory(Boolean(disk));
+    if (!disk) return;
+    setEpisodes(disk.episodes);
+    const merged = mergeMemories(readLocalMemories(), disk.notes, loadForgotten());
+    setMemories(merged);
+    try { localStorage.setItem(MEMORY_KEY, JSON.stringify(merged)); } catch { /* the disk has them */ }
+    if (!sameMemories(merged, disk.notes)) pushDiskMemories(merged).catch((error) => reportError("memory", error));
+  }
 
   async function loadCloudMemories() {
     if (!supabase) return;
@@ -1258,7 +1301,18 @@ export default function Home() {
 
   function saveLocalMemories(next: Memory[]) {
     setMemories(next);
-    localStorage.setItem(MEMORY_KEY, JSON.stringify(next));
+    try { localStorage.setItem(MEMORY_KEY, JSON.stringify(next)); } catch { /* kept on disk when that's set up */ }
+    if (diskMemoryRef.current) pushDiskMemories(next).catch((error) => notify(reportError("memory", error, "That memory change couldn't be saved to this computer. It's kept in this browser for now."), "error"));
+  }
+
+  /** Forgets one past conversation's recap. */
+  async function deleteEpisode(episodeId: string) {
+    try {
+      await forgetOnDisk(`episode=${encodeURIComponent(episodeId)}`);
+      setEpisodes((current) => current.filter((episode) => episode.id !== episodeId));
+    } catch (error) {
+      notify(reportError("memory", error, "That recap couldn't be deleted."), "error");
+    }
   }
 
   /**
@@ -1326,6 +1380,7 @@ export default function Home() {
           forgotten: loadForgotten(),
           today: localDate(),
           ...(conversation.recap ? { recap: conversation.recap } : {}),
+          conversation: { id: conversationId, title: conversation.title, startedAt: conversation.createdAt, messages: conversation.messages.length },
         }),
       });
       if (!response.ok) return;
@@ -1333,6 +1388,10 @@ export default function Home() {
       if (!Array.isArray(changes.add) || !Array.isArray(changes.update) || !Array.isArray(changes.remove)) return;
       if (!await applyMemoryChanges(changes)) return;
       markReflected(conversationId, window.upTo, typeof changes.recap === "string" ? changes.recap : undefined);
+      if (diskMemoryRef.current && typeof changes.recap === "string" && changes.recap) {
+        const kept: StoredEpisode = { id: conversationId, title: conversation.title, recap: changes.recap, startedAt: conversation.createdAt, updatedAt: new Date().toISOString(), messages: conversation.messages.length };
+        setEpisodes((current) => [kept, ...current.filter((episode) => episode.id !== conversationId)]);
+      }
       const line = describeChanges(changes);
       if (line) notify(line);
     } catch (error) {
@@ -1586,7 +1645,7 @@ export default function Home() {
     let pickUpAt = 0;
     typedSinceSentRef.current = false;
     if (reads) {
-      setReadingBeat(Math.floor(Math.random() * 12));
+      setReadingLong(isLongMessage(latestUserText));
       setReadingIn(job.conversationId);
     } else {
       setTypingIn(job.conversationId);
@@ -1624,6 +1683,7 @@ export default function Home() {
         patchConversation(job.conversationId, (messages) => [...messages, message]);
         lastPostedAt = performance.now();
         announceReply(job.conversationId, message, first);
+        if (job.conversationId === activeIdRef.current) offerFace(appraiseReply(text, latestUserText));
       });
     };
 
@@ -1703,7 +1763,11 @@ export default function Home() {
           // Without an account the notes live here, so they travel with the request.
           // Her other conversations, as chapters of the same relationship (lib/chapters).
           ...(memoryEnabled ? continuityOf(conversationsRef.current, job.conversationId, latestUserText) : {}),
-          ...(memoryEnabled && !memoryInCloud && memories.length ? { localMemories: memories.map((memory) => ({ id: memory.id, text: memory.text, createdAt: memory.createdAt })) } : {}),
+          ...(memoryEnabled && !memoryInCloud && memories.length ? { localMemories: memories.map((memory) => ({ id: memory.id, text: memory.text, createdAt: memory.createdAt, ...(memory.kind ? { kind: memory.kind } : {}) })) } : {}),
+          // Which conversation this is, so its own recap isn't recalled into it (lib/memory-recall).
+          conversationId: job.conversationId,
+          ...(switches.externalFiles === false || !externalFilesOn ? { externalFiles: false } : {}),
+          ...(switches.cloudFallback === false || !cloudFallbackOn ? { cloudFallback: false } : {}),
           style,
           characterProfile,
           privacyMode,
@@ -1850,7 +1914,9 @@ export default function Home() {
     };
     updateActiveMessages((previous) => [...previous, message]);
     feel(text);
-    react(reactionTo(text));
+    const asked = requestedExpression(text);
+    if (asked) offerFace({ expression: asked, level: 0.85, ms: 8000, reason: "asked" }, { force: true });
+    else offerFace(appraiseMessage(text));
     setInput("");
     setReplyingToId("");
     setPendingFiles([]);
@@ -1945,19 +2011,21 @@ export default function Home() {
   }
 
   /** A picture in the chat: generated when an image model is available, else a labelled SVG. */
-  async function runPicture(prompt: string, shown: string) {
+  async function runPicture(prompt: string, shown: string, { from, style, variation = false }: { from?: Message; style?: string; variation?: boolean } = {}) {
     if (privacyMode) { notify("Pictures need a cloud model, so they're paused in Local-only mode.", "error"); return; }
-    const last = refinesPrevious(prompt) ? [...messages].reverse().find((message) => message.picture?.status === "ready") : undefined;
+    // A variation or restyle works on the card it came from; "make it darker" on the last picture.
+    const last = from ?? (refinesPrevious(prompt) ? [...messages].reverse().find((message) => message.picture?.status === "ready") : undefined);
     let previous: { prompt: string; mime?: string; data?: string } | undefined;
     if (last?.picture) {
       previous = { prompt: last.picture.prompt };
       const stored = last.picture.kind === "generated" && last.attachments?.[0] ? await getAttachment(last.attachments[0].id).catch(() => undefined) : undefined;
       if (stored?.data && last.attachments?.[0]) previous = { ...previous, mime: last.attachments[0].mime, data: stored.data };
     }
-    const fullPrompt = previous ? `${previous.prompt}; ${prompt}` : prompt;
-    const { conversationId, cardId } = postCommand("image", shown, { picture: { status: "loading", prompt: fullPrompt } });
+    const styleName = style ? PICTURE_STYLES.find(([key]) => key === style)?.[1] : "";
+    const fullPrompt = variation && previous ? previous.prompt : previous ? `${previous.prompt}; ${prompt}` : prompt;
+    const { conversationId, cardId } = postCommand("image", shown, { picture: { status: "loading", prompt: styleName ? `${fullPrompt} (${styleName.toLowerCase()})` : fullPrompt } });
     try {
-      const response = await fetch("/api/image", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt, ...(previous ? { previous } : {}) }) });
+      const response = await fetch("/api/image", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt, ...(previous ? { previous } : {}), ...(style ? { style } : {}), ...(variation ? { variation: true } : {}) }) });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(typeof payload?.error === "string" ? payload.error : "That picture couldn't be made.");
       if (payload.kind === "generated" && typeof payload.data === "string" && typeof payload.mime === "string") {
@@ -2015,18 +2083,27 @@ export default function Home() {
 
   /**
    * Saves an edit. Editing the latest thing they said means they want an answer to the new text,
-   * so her reply to it is replaced. Editing further back only corrects the record: what followed
-   * stays, and she reads the corrected version from now on.
+   * so her reply to it is replaced. Editing further back asks: redo the conversation from there
+   * (everything after it is replaced by her answer to the new version), or keep what followed and
+   * only correct the record, so she reads the corrected version from now on.
    */
-  function saveEdit(message: Message) {
+  async function saveEdit(message: Message) {
     const text = editText.trim();
     setEditingId("");
     if (!text || text === message.content) return;
     const conversationId = activeIdRef.current;
     const index = messages.findIndex((item) => item.id === message.id);
     const isLatest = !messages.slice(index + 1).some((item) => item.role === "user" && !item.command);
+    const later = messages.slice(index + 1).filter((item) => !item.command).length;
+    const redo = isLatest || await askFor({
+      title: "Redo the conversation from here?",
+      body: `Your edit changes what she was answering. "Redo from here" removes the ${later} message${later === 1 ? "" : "s"} after it and she answers the new version. "Keep them" only corrects the record: she reads the new version from now on.`,
+      confirmLabel: "Redo from here",
+      cancelLabel: "Keep them",
+    }) === true;
     patchConversation(conversationId, (current) => current
-      .filter((item, position) => !isLatest || position <= index || item.role !== "assistant" || item.visualization || item.picture)
+      // The latest edit replaces only her answers; a redo drops everything after the message.
+      .filter((item, position) => position <= index || (isLatest ? item.role !== "assistant" || Boolean(item.visualization || item.picture) : !redo))
       .map((item) => item.id === message.id ? { ...item, content: text, edited: true, failed: false } : item));
     // Automatic memory reads it again, and a chat named after this message follows the change.
     setConversations((previous) => previous.map((conversation) => conversation.id === conversationId ? {
@@ -2034,7 +2111,7 @@ export default function Home() {
       reflectedCount: Math.min(conversation.reflectedCount ?? 0, index),
       title: conversation.title === deriveTitle(message.content) ? deriveTitle(text) : conversation.title,
     } : conversation));
-    if (isLatest) enqueueReply({ conversationId, targetId: message.id });
+    if (redo) enqueueReply({ conversationId, targetId: message.id });
   }
 
   async function addFiles(list: FileList | File[] | null) {
@@ -2244,7 +2321,7 @@ export default function Home() {
   }, [newConversation, settingsOpen]);
 
   async function clearAllMemories() {
-    const location = memoryInCloud ? "your account" : "this browser";
+    const location = memoryInCloud ? "your account" : diskMemory ? "this computer" : "this browser";
     const confirmed = await askFor({
       title: "Forget everything?",
       body: `All ${memories.length} memories kept in ${location} will be deleted, and FREYA won't re-learn them from your existing conversations. Your conversations themselves are kept. This cannot be undone.`,
@@ -2258,6 +2335,9 @@ export default function Home() {
       setMemories([]);
     } else {
       saveLocalMemories([]);
+      if (diskMemoryRef.current) {
+        try { await forgetOnDisk("scope=all"); setEpisodes([]); } catch (error) { notify(reportError("memory", error, "The recaps on this computer couldn't be deleted."), "error"); }
+      }
     }
     rememberForgotten(memories.map((memory) => memory.text));
     // Everything said so far counts as read, so nothing deleted comes back from an old chat.
@@ -2293,7 +2373,6 @@ export default function Home() {
   const lastSent = messages.at(-1);
   const received = replyingHere && typingIn !== activeId && lastSent?.role === "user" && !lastSent.command;
   const reading = received && !herAway && (!typingIn || readingIn === activeId);
-  const portraitExpression = chooseExpression(mood.name, typingIn === activeId && Boolean(typingIn), reaction, undefined, { beat: reading ? readingBeat : faceBeat, reading });
   // A command chip (a refinement with no card after it) isn't waiting for an answer.
   // Nor is a message she answered with just a reaction.
   const awaitingReply = hydrated && !replyingHere && messages.at(-1)?.role === "user" && !messages.at(-1)?.command && !messages.at(-1)?.herReaction;
@@ -2348,28 +2427,46 @@ export default function Home() {
               <div className="dialog-setting-row"><div><strong>FREYA texts first</strong><span>She may message you after you&apos;ve been quiet a while, at most twice without a reply. Off at autonomy level 0. Only while FREYA is open in a tab.</span></div><label className="toggle-row"><span className="sr-only">FREYA texts first</span><input type="checkbox" checked={switches.textsFirst ?? initiativeOn} disabled={switches.textsFirst !== undefined} onChange={(event) => setInitiativeOn(event.target.checked)} /></label></div>
               <div className="dialog-setting-row"><div><strong>Autonomy</strong><span>How much she does on her own: texting first, and suggesting new tastes for her profile.</span></div><select value={autonomyLevel} onChange={(event) => setAutonomyLevel(Number(event.target.value) as 0 | 1 | 2)} aria-label="Autonomy level"><option value={0}>Level 0 · Reply only</option><option value={1}>Level 1 · Propose for approval</option><option value={2}>Level 2 · Approve tentative interests</option></select></div>
               <div className="dialog-setting-row"><div><strong>Intimate roleplay (18+)</strong><span>Sexting and adult roleplay when you lead there, or when she&apos;s in a playful mood; she switches back to normal chat when you do. {serverSetup.voiceOnThisMachine ? "Those turns run on your local Ollama model." : "Those turns run on your voice server, never on Groq or Gemini."}</span></div><label className="toggle-row"><span className="sr-only">Intimate roleplay</span><input type="checkbox" checked={intimateMode && switches.sexTalk !== false} disabled={switches.sexTalk === false} onChange={(event) => void toggleIntimateMode(event.target.checked)} /></label></div>
+              <div className="settings-group-title">PRESENCE</div>
+              <div className="dialog-setting-row"><div><strong>Expressions</strong><span>How much her face shows. She rests at neutral and reacts to what was actually said: a brief smile at a joke, a composed look when it&apos;s serious. Off keeps her neutral.</span></div><select value={expressionIntensity} onChange={(event) => setExpressionIntensity(event.target.value as ExpressionIntensity)} aria-label="Expression intensity"><option value="off">Off</option><option value="subtle">Subtle</option><option value="natural">Natural</option><option value="expressive">Expressive</option></select></div>
+              <div className="dialog-setting-row"><div><strong>Canvas quality</strong><span>How much the presence draws. Auto starts lower on a weaker machine and steps down if frames run slow.</span></div><select value={canvasQuality} onChange={(event) => setCanvasQuality(event.target.value as CanvasQuality)} aria-label="Canvas quality"><option value="auto">Auto</option><option value="low">Low</option><option value="high">High</option></select></div>
               <div className="settings-group-title">MEMORY</div>
               <div className="dialog-setting-row"><div><strong>Use memories in replies</strong><span>FREYA brings up what she remembers about you when it&apos;s relevant.</span></div><label className="toggle-row"><span className="sr-only">Use memories in replies</span><input type="checkbox" checked={memoryEnabled} onChange={(event) => setMemoryEnabled(event.target.checked)} /></label></div>
               <div className="dialog-setting-row"><div><strong>Remember things automatically</strong><span>After a conversation goes quiet, or when you switch chats, a cloud model reads what&apos;s new and keeps what matters: people, plans, preferences, things to follow up. Small talk isn&apos;t kept. In Local-only mode only explicit &ldquo;I prefer…&rdquo; statements are saved.</span></div><label className="toggle-row"><span className="sr-only">Remember things automatically</span><input type="checkbox" checked={autoMemory} onChange={(event) => setAutoMemory(event.target.checked)} /></label></div>
               <button className={`side-action dialog-action ${memoryOpen ? "active" : ""}`} onClick={() => setMemoryOpen(!memoryOpen)} aria-expanded={memoryOpen}>◈ <span>What FREYA remembers</span><span className="count">{memories.length}</span></button>
               {memoryOpen && <div className="memory-panel dialog-memory-panel">
-                <p className="memory-description">{memoryInCloud ? "Synced to your account: only you can see them, on any device you sign in on." : `Kept in this browser only${supabase ? "; sign in under Profile to sync them to your account" : ""}. Clearing this site's data deletes them.`}</p>
+                <p className="memory-description">{memoryInCloud ? "Synced to your account: only you can see them, on any device you sign in on." : diskMemory ? "Kept on this computer (data/freya-memory.db), so clearing the browser or switching browsers doesn't erase them. Only what's relevant goes into each reply." : `Kept in this browser only${supabase ? "; sign in under Profile to sync them to your account" : ""}. Clearing this site's data deletes them.`}</p>
+                {memories.length > 6 && <input className="conversation-filter memory-search" type="search" value={memoryQuery} onChange={(event) => setMemoryQuery(event.target.value)} placeholder="Search what she remembers" aria-label="Search memories"/>}
                 <form onSubmit={addMemory} className="memory-form"><textarea value={memoryText} onChange={(event) => setMemoryText(event.target.value)} placeholder="Tell her something to remember, e.g. I prefer short answers" maxLength={240} rows={2} aria-label="New memory"/><button className="small-primary" type="submit">Save memory</button></form>
                 {memories.length === 0
                   ? <p className="empty-memories">Nothing yet. {autoMemory ? "She'll pick things up as you talk" : "Turn on automatic memory, or add one above"}.</p>
-                  : <ul className="memory-list" aria-label="Saved memories">{memories.map((memory) => <li className="memory-item" key={memory.id}>
+                  : <ul className="memory-list" aria-label="Saved memories">{memories.filter((memory) => !memoryQuery.trim() || `${memory.text} ${memory.kind ?? ""}`.toLowerCase().includes(memoryQuery.trim().toLowerCase())).map((memory) => <li className="memory-item" key={memory.id}>
                     <span>{memory.text}<small className="memory-meta">{[memory.source === "freya" ? "noticed by FREYA" : memory.source === "you" ? "added by you" : "", memory.kind && memory.kind !== "other" ? memory.kind : "", formatRelative(memory.updatedAt || memory.createdAt).toLowerCase()].filter(Boolean).join(" · ")}</small></span>
                     <button type="button" aria-label={`Edit memory: ${memory.text}`} title="Edit" onClick={() => void editMemory(memory.id)}>✎</button>
                     <button type="button" aria-label={`Delete memory: ${memory.text}`} title="Delete" onClick={() => void deleteMemory(memory.id)}>×</button>
                   </li>)}</ul>}
-                {memories.length > 0 && <button className="clear-memories" onClick={clearAllMemories}>Forget everything</button>}
+                {diskMemory && <>
+                  <div className="side-label memory-episodes-label">PAST CONVERSATIONS SHE REMEMBERS · {episodes.length}</div>
+                  {episodes.length === 0
+                    ? <p className="empty-memories">None yet. After a conversation goes quiet she keeps a short recap of it, so a new chat can pick up where an old one left off.</p>
+                    : <ul className="memory-list" aria-label="Past conversations she remembers">{episodes.filter((episode) => !memoryQuery.trim() || `${episode.title} ${episode.recap}`.toLowerCase().includes(memoryQuery.trim().toLowerCase())).slice(0, 40).map((episode) => <li className="memory-item" key={episode.id}>
+                      <span>{episode.recap}<small className="memory-meta">{[episode.title, formatRelative(episode.updatedAt).toLowerCase()].filter(Boolean).join(" · ")}</small></span>
+                      <button type="button" aria-label={`Forget the recap of: ${episode.title}`} title="Forget this recap" onClick={() => void deleteEpisode(episode.id)}>×</button>
+                    </li>)}</ul>}
+                </>}
+                {(memories.length > 0 || episodes.length > 0) && <button className="clear-memories" onClick={clearAllMemories}>Forget everything</button>}
               </div>}
+              <div className="settings-group-title">MODELS &amp; STATUS</div>
+              <button className={`side-action dialog-action ${statusOpen ? "active" : ""}`} onClick={() => setStatusOpen(!statusOpen)} aria-expanded={statusOpen}>◎ <span>Who answers, and is it up?</span></button>
+              {statusOpen && <div className="memory-panel dialog-memory-panel"><StatusPanel/></div>}
               <div className="settings-group-title">NOTIFICATIONS</div>
               <div className="dialog-setting-row"><div><strong>Notifications</strong><span>A desktop alert for every FREYA message while you are in another window or tab, or another chat is open. Unread counts show in the conversation list either way.</span></div><label className="toggle-row"><span className="sr-only">Notifications</span><input type="checkbox" checked={notificationsOn} onChange={(event) => void toggleNotifications(event.target.checked)} /></label></div>
               <div className="dialog-setting-row"><div><strong>Message sound</strong><span>A soft chime whenever FREYA sends a message.</span></div><label className="toggle-row"><span className="sr-only">Message sound</span><input type="checkbox" checked={soundOn} onChange={(event) => { setSoundOn(event.target.checked); if (event.target.checked) playChime(); }} /></label></div>
               
               <div className="settings-group-title">PRIVACY &amp; DATA</div>
               <div className="dialog-setting-row"><div><strong>Local-only privacy</strong><span>{serverSetup.voiceOnThisMachine ? <>Every reply comes from the local model on this computer{serverSetup.localModel ? ` (${serverSetup.localModel}${serverSetup.localReady ? "" : ", not running"})` : " (none found)"}; nothing is sent to cloud models. Automatic memory, images and visualisations pause.</> : "Needs her model on this computer, and right now it's on your voice server. Run start.bat --local to switch back."}</span></div><label className="toggle-row"><span className="sr-only">Local-only privacy</span><input type="checkbox" checked={privacyMode} onChange={(event) => setPrivacyMode(event.target.checked)} /></label></div>
+              <div className="dialog-setting-row"><div><strong>Let Grok or Gemini read attachments</strong><span>Your images, screenshots and PDFs may go to Grok or Gemini to be read, when her own model can&apos;t see them well enough. Off: only her own models see them, and she says when she can&apos;t open something.{switches.externalFiles === false ? " Off in freya.config.json." : ""}</span></div><label className="toggle-row"><span className="sr-only">Let Grok or Gemini read attachments</span><input type="checkbox" checked={externalFilesOn && switches.externalFiles !== false} disabled={switches.externalFiles === false} onChange={(event) => setExternalFilesOn(event.target.checked)} /></label></div>
+              <div className="dialog-setting-row"><div><strong>Cloud fallback</strong><span>When her own model is down, Grok, Gemini or Groq answer instead, and the reply says which. Off: you get an error and your message waits.{switches.cloudFallback === false ? " Off in freya.config.json." : ""}</span></div><label className="toggle-row"><span className="sr-only">Cloud fallback</span><input type="checkbox" checked={cloudFallbackOn && switches.cloudFallback !== false} disabled={switches.cloudFallback === false} onChange={(event) => setCloudFallbackOn(event.target.checked)} /></label></div>
               <div className="dialog-setting-row"><div><strong>Export</strong><span>Save the open conversation as a Markdown file.</span></div><button type="button" className="dialog-inline-button" onClick={exportActiveConversation}>Export chat</button></div>
               <div className="dialog-setting-row"><div><strong>Not her ({feedbackCount})</strong><span>Replies you marked with ⚑, and what she should have said. Put the file in training/data/ before the next fine-tune.</span></div><button type="button" className="dialog-inline-button" onClick={exportFeedback}>Export</button></div>
               <div className="shortcut-list"><div className="side-label">KEYBOARD</div><dl><dt>Ctrl / ⌘ + K</dt><dd>New conversation</dd><dt>Ctrl / ⌘ + B</dt><dd>Toggle conversation list</dd><dt>/</dt><dd>Focus the composer</dd><dt>Shift + Enter</dt><dd>New line</dd><dt>/visualize …</dt><dd>Make a new form on the canvas</dd><dt>/image …</dt><dd>Make a picture in the chat</dd></dl></div>
@@ -2493,12 +2590,12 @@ export default function Home() {
                             onChange={(event) => setEditText(event.target.value)}
                             onKeyDown={(event) => {
                               if (event.key === "Escape") { event.preventDefault(); setEditingId(""); }
-                              if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); saveEdit(message); }
+                              if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void saveEdit(message); }
                             }}
                           />
                           <div className="message-edit-actions">
                             <button type="button" onClick={() => setEditingId("")}>Cancel</button>
-                            <button type="button" onClick={() => saveEdit(message)}>Save</button>
+                            <button type="button" onClick={() => void saveEdit(message)}>Save</button>
                           </div>
                         </div>
                         : message.command
@@ -2506,7 +2603,9 @@ export default function Home() {
                         : message.visualization
                         ? <VisualizationCard info={message.visualization} onShow={() => void showVisualization(message)} onRefine={message.visualization.spec?.technique === "portrait" ? undefined : () => tagForRefine(message)} tagged={refiningId === message.id}/>
                         : message.picture
-                        ? <PictureCard info={message.picture} onRefine={startRefine}/>
+                        ? <PictureCard info={message.picture} onRefine={startRefine}
+                          onVariation={replyingHere ? undefined : () => void runPicture(message.picture!.prompt, "variation", { from: message, variation: true })}
+                          onStyle={replyingHere ? undefined : (style) => void runPicture(message.picture!.prompt, `in ${PICTURE_STYLES.find(([key]) => key === style)?.[1].toLowerCase() ?? style}`, { from: message, style, variation: true })}/>
                         : message.longform
                         ? <LongformMessage content={message.content} streaming={Boolean(message.streaming)}/>
                         : message.voice || message.spoken
@@ -2561,12 +2660,12 @@ export default function Home() {
             </div>
             {!atBottom && messages.length > 0 && <button type="button" className="jump-latest" onClick={() => { atBottomRef.current = true; setAtBottom(true); scrollToBottom(); }}>↓ Latest</button>}
           </div>
-          <EmotionCanvas signal={canvasSignal} mood={mood} form={canvasForm} onClearForm={() => setCanvasForm(null)}/>
+          <EmotionCanvas signal={canvasSignal} mood={mood} form={canvasForm} onClearForm={() => setCanvasForm(null)} quality={canvasQuality}/>
           <div className="center-privacy-note">FREYA is a fictional character played by an AI · replies can be wrong · type /visualize or /image for pictures</div>
         </section>
 
         <aside className="profile-panel" aria-label="FREYA profile">
-          <PortraitParticles expression={portraitExpression} />
+          <PortraitParticles expression={portrait.face.expression} intensity={portrait.face.level} />
           <div className="profile-name-row"><h2>FREYA, 20</h2><span className="profile-state">ONLINE · {mood.name.toUpperCase()}</span></div>
           <p className="profile-description">Hey, I&apos;m Freya. I read too much, stay up too late, and have opinions about most things.</p>
           <div className="profile-sigil" aria-hidden="true">✦</div>

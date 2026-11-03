@@ -68,6 +68,13 @@ const RECITABLE = new Set(
   ].map(normalize).filter((line) => line.length >= 14),
 );
 
+/**
+ * Customer-service openers ("Certainly!", "Great question!", "That's interesting!"). Her prompt
+ * already says no; a slip is lifted out rather than redone. "Of course" and "sure" aren't on the
+ * list: friends say those.
+ */
+const ASSISTANT_OPENER = /^\s*(certainly|absolutely|great question|what a (great|good|fascinating) question|that'?s (a |such a )?(great|good|interesting|fascinating) (question|point)|that'?s (so |really )?interesting|i'?d (be )?(happy|glad) to help( (you )?with that)?)\s*[!.,:]+\s*/i;
+
 /** Removes what should never be seen. Returns the text that's left, which may be empty. */
 export function cleanReply(raw: string, context: Pick<GuardContext, "lastUserText" | "recentUserTexts">): string {
   let text = raw
@@ -82,6 +89,7 @@ export function cleanReply(raw: string, context: Pick<GuardContext, "lastUserTex
   return parts.map((part, index) => {
     if (index % 2) return part;
     let prose = part.replace(SPEAKER_PREFIX, "");
+    if (index === 0) prose = prose.replace(ASSISTANT_OPENER, "");
     if (!keepForeign) {
       for (const script of FOREIGN) {
         script.lastIndex = 0;

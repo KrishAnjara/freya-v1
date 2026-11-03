@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
-import { guardRequest, hostedProvidersAllowed } from "@/lib/route-guard";
+import { describeFailure } from "@/lib/provider-health";
+import { clientSubject, guardRequest, hostedProvidersAllowed } from "@/lib/route-guard";
+import { getMemoryStore, normalizeEpisode } from "@/lib/memory-store";
 import { generateJson } from "@/lib/structured";
 import { containsSensitiveCredential, redactSensitiveCredentials } from "@/lib/sensitive-data";
 import { MAX_REFLECTION_TURNS, REFLECTION_PROMPT, reflectionInput, validateChanges, validateRecap, type KnownMemory, type ReflectionTurn } from "@/lib/memory-reflection";
@@ -57,10 +59,18 @@ export async function POST(request: Request) {
     });
     const changes = validateChanges(result.data, memories, forgotten, containsSensitiveCredential);
     const recap = validateRecap((result.data as { recap?: unknown } | null)?.recap, forgotten, containsSensitiveCredential);
+    // Kept as this conversation's episode, so later chats can recall it (lib/memory-recall).
+    const conversation = body.conversation as Record<string, unknown> | undefined;
+    const store = recap && conversation ? getMemoryStore() : null;
+    const owner = store ? clientSubject(request) : null;
+    if (store && owner) {
+      const episode = normalizeEpisode({ ...conversation, recap, updatedAt: new Date().toISOString() });
+      if (episode) store.upsertEpisode(owner, episode);
+    }
     return NextResponse.json({ ...changes, recap, provider: result.provider }, { headers: { "Cache-Control": "no-store" } });
   } catch (error) {
     if (request.signal.aborted) return new NextResponse(null, { status: 499 });
-    console.warn(`FREYA memory reflection failed (${error instanceof Error ? error.message.slice(0, 40) : "error"}).`);
+    console.warn(`FREYA memory reflection failed (${describeFailure(error)}).`);
     return NextResponse.json({ error: "Automatic memory couldn't run this time." }, { status: 503 });
   }
 }

@@ -9,5 +9,7 @@
   "replyChecks": true,
   "rateLimit": false,
   "thinking": false,
-  "camera": true
+  "camera": true,
+  "cloudFallback": true,
+  "externalFiles": true
 }

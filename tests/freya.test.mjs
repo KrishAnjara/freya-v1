@@ -368,7 +368,9 @@ test("visual canvas uses explicit UI signals and honors performance/accessibilit
   const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
   assert.match(canvas, /type CanvasSignal = "idle" \| "composing" \| "generating" \| "responding" \| "interrupted"/);
   assert.match(canvas, /prefers-reduced-motion/);
-  assert.match(canvas, /Math\.min\(window\.devicePixelRatio \|\| 1, 1\.5\)/);
+  // Pixel ratio is capped (1.5, or 1 at low quality), and the point count can step down.
+  assert.match(canvas, /Math\.min\(window\.devicePixelRatio \|\| 1, level === "low" \? 1 : 1\.5\)/);
+  assert.match(canvas, /setDrawRange\(0, COUNTS\[level\]\)/);
   assert.match(canvas, /geometry\.dispose\(\)/);
   assert.match(canvas, /renderer\.dispose\(\)/);
   assert.match(page, /dynamic\(\(\) => import\("@\/app\/components\/EmotionCanvas"\)/);

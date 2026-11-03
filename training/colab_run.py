@@ -27,13 +27,20 @@ Options:
   --epochs N     training epochs (default 2)
   --smoke        10 training steps and no export: just checks everything loads
   --no-eval      skip the persona evaluation
-  --save-to DIR  copy the result there (mount Google Drive first, as above)
+  --save-to DIR  copy the result there (mount Google Drive first, as above); checkpoints go there too,
+                 so a session that's cut off resumes where it stopped
+  --hf-repo NAME upload the adapter and the GGUF to your Hugging Face account (USER/NAME); needs
+                 HF_TOKEN (Colab: Secrets), with write access
+  --hf-private   make that repo private (recommended: it holds your conversations' style)
+  --learning-rate, --rank, --max-seq, --batch, --grad-accum   training settings (see train_lora.py)
+  --merged       also save a merged 16-bit copy (large; for vLLM or another quantisation)
 
 Your own conversations: put .jsonl files in training/data/ before running (see
 training/README.md). Every file is validated; disallowed content stops the run.
 """
 
 import argparse
+import re
 import glob
 import os
 import shutil
@@ -67,6 +74,49 @@ def ollama_ready():
         return False
 
 
+MODEL_CARD = """---
+base_model: {base}
+library_name: peft
+tags: [lora, unsloth, gguf, freya]
+---
+# FREYA voice: LoRA fine-tune of {base}
+
+Trained with training/train_lora.py from the freya-v1 project on {conversations} validated conversations
+({epochs} epochs, rank {rank}, learning rate {learning_rate}).
+
+- `lora/`: the adapter (load on top of `{base}`).
+- `freya-trained.gguf`: the adapter merged into the base and quantised (q4_k_m) for Ollama.
+{merged}
+A fine-tune changes how the model sounds, not what it knows; her persona, memory and context come from
+the app at runtime. Every training file was checked: nothing sexual involving minors, no non-consent,
+and nothing that teaches her to claim to be human when sincerely asked.
+
+To serve it on Colab: `python training/serve_remote.py --model hf:{repo}/freya-trained.gguf`
+(or as the fallback: `--fallback-model hf.co/{repo}`).
+"""
+
+
+def upload_to_hub(args, gguf):
+    """Uploads the adapter, the GGUF and a model card. Private when --hf-private."""
+    from huggingface_hub import HfApi
+    api = HfApi(token=os.environ["HF_TOKEN"])
+    api.create_repo(args.hf_repo, private=args.hf_private, exist_ok=True)
+    out = os.path.join(ROOT, "training", "freya-gguf")
+    lora = os.path.join(out, "lora")
+    count = sum(1 for _ in open(os.path.join(ROOT, "training", "freya-train.jsonl"), encoding="utf-8"))
+    card = MODEL_CARD.format(base=args.base, conversations=count, epochs=args.epochs, rank=args.rank, learning_rate=args.learning_rate, repo=args.hf_repo,
+                             merged="- `merged/`: the merged 16-bit model.\n" if args.merged else "")
+    api.upload_file(path_or_fileobj=card.encode(), path_in_repo="README.md", repo_id=args.hf_repo)
+    if os.path.isdir(lora):
+        api.upload_folder(folder_path=lora, path_in_repo="lora", repo_id=args.hf_repo)
+    if os.path.exists(gguf):
+        api.upload_file(path_or_fileobj=gguf, path_in_repo="freya-trained.gguf", repo_id=args.hf_repo)
+    merged = os.path.join(out, "merged")
+    if args.merged and os.path.isdir(merged):
+        api.upload_folder(folder_path=merged, path_in_repo="merged", repo_id=args.hf_repo)
+    print(f"Uploaded to https://huggingface.co/{args.hf_repo}" + (" (private)" if args.hf_private else ""))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--base", default=QWEN35)
@@ -75,7 +125,19 @@ def main():
     parser.add_argument("--no-eval", action="store_true")
     parser.add_argument("--save-to", default="")
     parser.add_argument("--make-corpus", type=int, default=0)
+    parser.add_argument("--hf-repo", default="")
+    parser.add_argument("--hf-private", action="store_true")
+    parser.add_argument("--learning-rate", type=float, default=1e-4)
+    parser.add_argument("--rank", type=int, default=32)
+    parser.add_argument("--max-seq", type=int, default=2048)
+    parser.add_argument("--batch", type=int, default=2)
+    parser.add_argument("--grad-accum", type=int, default=4)
+    parser.add_argument("--merged", action="store_true")
     args = parser.parse_args()
+    if args.hf_repo and not re.fullmatch(r"[\w.-]+/[\w.-]+", args.hf_repo):
+        sys.exit("--hf-repo must look like USER/NAME")
+    if args.hf_repo and not os.environ.get("HF_TOKEN"):
+        sys.exit("--hf-repo needs HF_TOKEN. In Colab: Secrets (key icon) > add HF_TOKEN (a write token from huggingface.co/settings/tokens).")
     started = time.time()
     corpus = os.path.join(args.save_to, "freya-corpus.jsonl") if args.save_to else "training/data/freya-corpus.jsonl"
 
@@ -84,7 +146,7 @@ def main():
         sys.exit("No GPU. In Colab: Runtime > Change runtime type > T4 GPU, then run the cell again.")
 
     step("2/6 Install training tools and Node.js")
-    run(f"{sys.executable} -m pip install -q unsloth trl datasets")
+    run(f"{sys.executable} -m pip install -q unsloth trl datasets huggingface_hub")
     if shutil.which("node") is None:
         run("curl -fsSL https://deb.nodesource.com/setup_20.x | bash - > /dev/null && apt-get install -y -qq nodejs > /dev/null")
     run("node --version")
@@ -110,7 +172,10 @@ def main():
 
     step(f"4/6 Train on {args.base}" + (" (smoke test)" if args.smoke else ""))
     extra = "--max-steps 10 --no-gguf" if args.smoke else ""
-    run(f'{sys.executable} training/train_lora.py --data {data} --base "{args.base}" --epochs {args.epochs} --out training/freya-gguf {extra}')
+    # Checkpoints on Drive, so a disconnected session picks up where it stopped.
+    checkpoints = os.path.join(args.save_to, "checkpoints") if args.save_to and not args.smoke else "checkpoints"
+    settings = f"--learning-rate {args.learning_rate} --rank {args.rank} --max-seq {args.max_seq} --batch {args.batch} --grad-accum {args.grad_accum}" + (" --merged" if args.merged else "")
+    run(f'{sys.executable} training/train_lora.py --data {data} --base "{args.base}" --epochs {args.epochs} --out training/freya-gguf --checkpoints "{checkpoints}" {settings} {extra}')
     if args.smoke:
         print("\nSmoke test passed: everything loads and trains. Run again without --smoke for the real model.")
         return
@@ -151,6 +216,10 @@ def main():
             if os.path.isdir(lora):
                 shutil.copytree(lora, os.path.join(args.save_to, "lora"), dirs_exist_ok=True)
             print(f"Saved to {args.save_to}/freya-trained.gguf")
+
+    if args.hf_repo:
+        step("Upload to Hugging Face")
+        upload_to_hub(args, model)
 
     minutes = (time.time() - started) / 60
     print(f"""

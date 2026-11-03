@@ -1267,3 +1267,17 @@ button.attachment-face:hover { border-color: rgba(176, 188, 186, .5); background
 .message.search-hit .assistant-body, .message.search-hit .message-text { border-color: rgba(220, 228, 226, .28); }
 .message.search-current .assistant-body, .message.search-current .message-text { border-color: rgba(220, 228, 226, .85); }
 @media (max-width: 560px) { .chat-search input { width: 130px; } }
+
+/* Memory panel: search and the recaps of past conversations, in the panel's own style. */
+.memory-search { width: 100%; margin: 6px 0 10px; }
+.side-label.memory-episodes-label { padding: 18px 0 8px; }
+
+/* Settings → Models & status: the voice chain, in order, with a dot for each tier's state. */
+.status-chain { display: grid; gap: 6px; margin: 4px 0 10px; padding: 0; list-style: none; }
+.status-tier { display: grid; grid-template-columns: 10px minmax(0, 1fr); gap: 2px 8px; align-items: baseline; font: 10px var(--mono); color: var(--muted); }
+.status-tier .status-dot { width: 7px; height: 7px; border-radius: 50%; background: #5d6a6c; }
+.status-tier.state-ready .status-dot { background: #8fc7a0; }
+.status-tier.state-cooling .status-dot { background: #d6b46f; }
+.status-tier.state-down .status-dot { background: #c4554a; }
+.status-tier-name { color: var(--text); overflow-wrap: anywhere; }
+.status-tier-state { grid-column: 2; color: var(--dim); overflow-wrap: anywhere; }

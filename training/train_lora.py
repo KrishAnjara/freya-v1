@@ -78,6 +78,15 @@ def validate(paths):
     return conversations, pairs
 
 
+def last_checkpoint(folder):
+    """The newest checkpoint-N folder in `folder`, or None: a run that was cut off picks up there."""
+    import os
+    if not os.path.isdir(folder):
+        return None
+    steps = [(int(name.split("-")[-1]), name) for name in os.listdir(folder) if re.fullmatch(r"checkpoint-\d+", name)]
+    return os.path.join(folder, max(steps)[1]) if steps else None
+
+
 def with_system(messages, persona):
     return messages if messages[0].get("role") == "system" or not persona else [{"role": "system", "content": persona}, *messages]
 
@@ -126,6 +135,12 @@ def main():
     parser.add_argument("--max-steps", type=int, default=-1, help="stop early, e.g. 10 for a smoke test")
     parser.add_argument("--validate-only", action="store_true")
     parser.add_argument("--no-gguf", action="store_true", help="save only the LoRA adapter")
+    parser.add_argument("--learning-rate", type=float, default=1e-4)
+    parser.add_argument("--batch", type=int, default=2, help="conversations per step; 2 fits a T4 at --max-seq 2048")
+    parser.add_argument("--grad-accum", type=int, default=4, help="steps added up before each update (effective batch = batch x this)")
+    parser.add_argument("--checkpoints", default="checkpoints", help="where checkpoints go; on Colab put this on Drive so a lost session resumes")
+    parser.add_argument("--save-steps", type=int, default=50)
+    parser.add_argument("--merged", action="store_true", help="also save the adapter merged into the base, as 16-bit safetensors")
     args = parser.parse_args()
 
     paths = sorted({path for pattern in args.data for path in glob.glob(pattern)})
@@ -179,27 +194,39 @@ def main():
         eval_dataset=unseen if held_back else None,
         args=SFTConfig(
             dataset_text_field="text",
-            per_device_train_batch_size=2,
-            gradient_accumulation_steps=4,
+            per_device_train_batch_size=args.batch,
+            gradient_accumulation_steps=args.grad_accum,
+            per_device_eval_batch_size=args.batch,
             num_train_epochs=args.epochs,
             max_steps=args.max_steps,
-            learning_rate=1e-4,
+            learning_rate=args.learning_rate,
             warmup_ratio=0.05,
             logging_steps=5,
             eval_strategy="steps" if held_back else "no",
             eval_steps=max(10, len(texts) // 40),
-            output_dir="checkpoints",
+            output_dir=args.checkpoints,
+            # Checkpoints survive a Colab disconnect when they're on Drive; the last two are kept.
+            save_strategy="steps",
+            save_steps=args.save_steps,
+            save_total_limit=2,
             report_to="none",
         ),
     )
     # Learn only from FREYA's replies, not from the system prompt or the user's turns.
     trainer = train_on_responses_only(trainer, instruction_part="<|im_start|>user\n", response_part="<|im_start|>assistant\n")
-    trainer.train()
+    resume = last_checkpoint(args.checkpoints)
+    if resume:
+        print(f"Resuming from {resume} (a previous session got this far).")
+    trainer.train(resume_from_checkpoint=resume)
 
     model.save_pretrained(f"{args.out}/lora")
     tokenizer.save_pretrained(f"{args.out}/lora")
     if len(pairs) >= args.min_pairs and args.max_steps < 0:
         preference_round(model, tokenizer, pairs, persona, args)
+    if args.merged:
+        # The whole model in 16-bit (about 2 bytes a parameter): for vLLM, transformers, or a
+        # different quantisation later. Large; skip it unless you need it.
+        model.save_pretrained_merged(f"{args.out}/merged", tokenizer, save_method="merged_16bit")
     if not args.no_gguf:
         # Merges the adapter into the base and writes one quantised GGUF Ollama can load.
         model.save_pretrained_gguf(args.out, tokenizer, quantization_method="q4_k_m")

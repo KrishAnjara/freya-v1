@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { describeFailure } from "@/lib/provider-health";
 import { guardRequest, hostedProvidersAllowed } from "@/lib/route-guard";
 import { generateJson } from "@/lib/structured";
 import { REFINE_PROMPT, validateSpec, VISUALIZE_PROMPT } from "@/lib/visualize";
@@ -43,7 +44,7 @@ export async function POST(request: Request) {
     return NextResponse.json({ spec, provider: result.provider }, { headers: { "Cache-Control": "no-store" } });
   } catch (error) {
     if (request.signal.aborted) return new NextResponse(null, { status: 499 });
-    console.warn(`FREYA visualize failed (${error instanceof Error ? error.message.slice(0, 40) : "error"}).`);
+    console.warn(`FREYA visualize failed (${describeFailure(error)}).`);
     return NextResponse.json({ error: "The visualisation couldn't be made right now. Try again in a moment." }, { status: 503 });
   }
 }

@@ -266,30 +266,9 @@ test("self-hosted mode still enforces a ceiling", async () => {
   assert.equal(last.allowed, false, "the 61st request in ten minutes must be refused");
 });
 
-// --- orchestration service URL ------------------------------------------------------
 
-test("a loopback orchestration service is accepted in production", async () => {
-  // Regression: `next start` runs with NODE_ENV=production, and loopback HTTP used to be
-  // allowed only outside production, so every request failed even though the startup check
-  // had already accepted the same URL.
-  const { getFreyaServiceConfig } = await import("../lib/freya-service.ts");
-  setEnv("NODE_ENV", "production");
-  setEnv("FREYA_SERVICE_TOKEN", "x".repeat(40));
-  for (const url of ["http://127.0.0.1:8000", "http://localhost:8000", "http://[::1]:8000"]) {
-    setEnv("FREYA_SERVICE_URL", url);
-    assert.ok(getFreyaServiceConfig(), `${url} should be accepted`);
-  }
-});
 
-test("a remote orchestration service still requires HTTPS", async () => {
-  const { getFreyaServiceConfig } = await import("../lib/freya-service.ts");
-  setEnv("NODE_ENV", "production");
-  setEnv("FREYA_SERVICE_TOKEN", "x".repeat(40));
-  setEnv("FREYA_SERVICE_URL", "http://service.example.com");
-  assert.throws(() => getFreyaServiceConfig(), /HTTPS/);
-  setEnv("FREYA_SERVICE_URL", "https://service.example.com");
-  assert.ok(getFreyaServiceConfig());
-});
+
 
 // --- production env check ------------------------------------------------------
 

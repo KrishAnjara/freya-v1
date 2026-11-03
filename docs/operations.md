@@ -74,23 +74,12 @@ it to Auto, Always or Off in Settings.
 
 Without Supabase, memories and the character dossier stay in the browser.
 
-## Optional Python orchestration service
+## Python orchestration service (retired)
 
-`freya_service/` is a separate FastAPI service with Ollama, Groq and Gemini adapters, task
-routing, bounded timeouts and concurrency, and JSON and SSE endpoints. The Next.js route calls
-it only when `FREYA_SERVICE_URL` is set, after its own auth, rate-limit, memory and search
-checks. It stores no conversations.
-
-```bash
-python -m venv freya_service/.venv
-# Windows: freya_service\.venv\Scripts\activate    macOS/Linux: source freya_service/.venv/bin/activate
-python -m pip install -r freya_service/requirements.txt
-python -m uvicorn app.main:app --app-dir freya_service --host 127.0.0.1 --port 8000
-```
-
-Set the same random `FREYA_SERVICE_TOKEN` (32+ characters) in both environments and
-`FREYA_SERVICE_URL=http://127.0.0.1:8000` for Next.js. Production service URLs must use HTTPS.
-Run its tests from the project root: `python -m pytest freya_service/tests`.
+`freya_service/` duplicated the provider routing the Next.js server already does, was bypassed
+for every turn in hybrid mode, and no script started it, so it was removed on 2026-11-03 (a copy is
+in `backups/`). Python now runs where it is needed: the Colab gateway (`training/serve_remote.py`),
+which serves the models. `FREYA_SERVICE_URL` and `FREYA_SERVICE_TOKEN` are ignored.
 
 ## Deployment
 

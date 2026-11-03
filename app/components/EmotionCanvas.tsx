@@ -6,8 +6,11 @@ import type { MoodName, MoodState } from "@/lib/mood";
 import { initialFormPose, moveForm, rotateForm, stepFormPose, zoomForm } from "@/lib/form-pose";
 import { FORM_POINTS, type PointCloud } from "@/lib/visualize";
 import { state as telemetry, subscribeTelemetry, telemetryRevision } from "@/lib/stream-telemetry";
+import { PRESENCE_FRAGMENT, PRESENCE_VERTEX } from "@/app/components/presence-shader";
 
 export type CanvasSignal = "idle" | "composing" | "generating" | "responding" | "interrupted";
+/** How much the canvas draws: auto steps down on its own when frames run slow. */
+export type CanvasQuality = "auto" | "low" | "high";
 
 /**
  * A /visualize result shown on the canvas: loading (particles swirl), refining (the form stays
@@ -21,20 +24,23 @@ const FORM_COUNT = FORM_POINTS;
  * FREYA's presence: a particle body that shows her simulated inner state.
  *
  * Every behaviour is driven by a real signal, never by chance:
- *   MOOD       the app's mood state (lib/mood): its name sets the body's shape and motion,
- *              energy sets breathing speed and size, warmth sets the colour temperature.
- *   LISTENING  the user is typing: the body leans towards the composer and brightens.
- *   THINKING   a reply was requested and nothing has arrived yet: it draws in and orbits.
- *   SPEAKING   streamed chunks arriving: each 80 ms window of real chunks launches exactly one
- *              ripple from the front of the body. No window, no ripple.
+ *   MOOD       the app's mood state (lib/mood): its name sets the body's shape, flow and light,
+ *              energy sets breathing and size, warmth the colour temperature. Changes blend over
+ *              two to three seconds; nothing jumps.
+ *   LISTENING  the user is typing: the body leans towards the composer and brightens a little.
+ *   THINKING   a reply was requested and nothing has arrived yet: it draws in and slowly turns.
+ *   SPEAKING   streamed text arriving: a smoothed envelope of how fast it comes (not a pulse per
+ *              token) brightens and quickens the surface slightly while she talks.
  *   ATTENTION  the pointer: the body turns slightly towards it.
+ * The surface moves by layered noise on the GPU, so it is organic and never visibly loops.
  * The mood is a character simulation the app keeps; this shows that simulation, not feelings or
  * model internals.
  */
 
-const PRESENCE = 900;
+/** Points per quality level: inner core, surface, outer haze (any prefix keeps these proportions). */
+const COUNTS = { high: 1500, medium: 1000, low: 560 } as const;
+const LAYER_SHARE = { core: 0.17, haze: 0.1 };
 const RADIUS = 1.05;
-const RIPPLE_WINDOW_MS = 80;
 
 /** Each mood's body: how it is shaped and how it moves. Values are small on purpose. */
 type MoodStyle = { scale: number; squash: number; sink: number; wave: number; waveSpeed: number; jag: number; drift: number; lean: number; glow: number; tint: [number, number, number] };
@@ -58,17 +64,52 @@ const MOOD_STYLE: Record<MoodName, MoodStyle> = {
   sulking: { scale: 0.78, squash: 0.95, sink: -0.06, wave: 0.005, waveSpeed: 0.3, jag: 0.02, drift: 0, lean: 0, glow: 0.5, tint: [0.62, 0.52, 0.58] },
 };
 
-/** Even directions on a sphere (Fibonacci lattice): the body's resting surface. */
+/** Even directions on a sphere (Fibonacci lattice). */
 function sphereDirections(count: number): Float32Array {
   const out = new Float32Array(count * 3);
   const golden = Math.PI * (3 - Math.sqrt(5));
   for (let index = 0; index < count; index += 1) {
-    const y = 1 - (index / (count - 1)) * 2;
+    const y = count === 1 ? 0 : 1 - (index / (count - 1)) * 2;
     const ring = Math.sqrt(1 - y * y);
     const angle = index * golden;
     out.set([Math.cos(angle) * ring, y, Math.sin(angle) * ring], index * 3);
   }
   return out;
+}
+
+/** A small seeded random, so the body is the same on every load. */
+function mulberry32(seed: number) {
+  return () => {
+    seed |= 0; seed = (seed + 0x6d2b79f5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/**
+ * The presence's points, shuffled so that drawing only the first N (a lower quality level)
+ * still covers the whole body evenly, in the same core/surface/haze proportions.
+ */
+function presencePoints(count: number) {
+  const coreCount = Math.round(count * LAYER_SHARE.core);
+  const hazeCount = Math.round(count * LAYER_SHARE.haze);
+  const surfaceCount = count - coreCount - hazeCount;
+  const random = mulberry32(7);
+  const points: { direction: [number, number, number]; layer: number; seed: number }[] = [];
+  for (const [layer, amount] of [[0, coreCount], [1, surfaceCount], [2, hazeCount]] as const) {
+    const directions = sphereDirections(amount);
+    for (let index = 0; index < amount; index += 1) points.push({ direction: [directions[index * 3], directions[index * 3 + 1], directions[index * 3 + 2]], layer, seed: random() });
+  }
+  for (let index = points.length - 1; index > 0; index -= 1) {
+    const other = Math.floor(random() * (index + 1));
+    [points[index], points[other]] = [points[other], points[index]];
+  }
+  const direction = new Float32Array(count * 3);
+  const layer = new Float32Array(count);
+  const seed = new Float32Array(count);
+  points.forEach((point, index) => { direction.set(point.direction, index * 3); layer[index] = point.layer; seed[index] = point.seed; });
+  return { direction, layer, seed };
 }
 
 /** A loose sphere the particles swirl on while a form is being composed. */
@@ -127,7 +168,16 @@ function activityOf(signal: CanvasSignal): Activity {
   return "idle";
 }
 
-export default function EmotionCanvas({ signal, mood, form = null, onClearForm }: { signal: CanvasSignal; mood: MoodState; form?: CanvasForm | null; onClearForm?: () => void }) {
+/** The starting level: weaker machines start lower, and auto steps down further if needed. */
+function startingLevel(quality: CanvasQuality): keyof typeof COUNTS {
+  if (quality === "low") return "low";
+  if (quality === "high") return "high";
+  const cores = navigator.hardwareConcurrency || 4;
+  const memory = (navigator as Navigator & { deviceMemory?: number }).deviceMemory ?? 8;
+  return cores <= 4 || memory <= 4 ? "medium" : "high";
+}
+
+export default function EmotionCanvas({ signal, mood, form = null, onClearForm, quality = "auto" }: { signal: CanvasSignal; mood: MoodState; form?: CanvasForm | null; onClearForm?: () => void; quality?: CanvasQuality }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const [fallback, setFallback] = useState(false);
   const signalRef = useRef(signal);
@@ -148,7 +198,8 @@ export default function EmotionCanvas({ signal, mood, form = null, onClearForm }
     try { renderer = new THREE.WebGLRenderer({ alpha: true, antialias: false, powerPreference: "low-power" }); }
     catch { setFallback(true); return; }
 
-    const pixelRatio = Math.min(window.devicePixelRatio || 1, 1.5);
+    let level = startingLevel(quality);
+    const pixelRatio = Math.min(window.devicePixelRatio || 1, level === "low" ? 1 : 1.5);
     renderer.setPixelRatio(pixelRatio);
     renderer.setClearColor(0x050607, 0);
     host.appendChild(renderer.domElement);
@@ -158,18 +209,25 @@ export default function EmotionCanvas({ signal, mood, form = null, onClearForm }
     const rig = new THREE.Group();
     scene.add(rig);
 
-    // Presence: one point per direction, displaced every frame by mood and activity.
-    const directions = sphereDirections(PRESENCE);
-    const presencePositions = new Float32Array(directions);
-    const presenceTint = new Float32Array(PRESENCE * 3);
-    const presenceSize = new Float32Array(PRESENCE).fill(0.05);
+    // Presence: built once at the highest count; a lower level draws a prefix of it.
+    const points = presencePoints(COUNTS.high);
     const presenceGeometry = new THREE.BufferGeometry();
-    presenceGeometry.setAttribute("position", new THREE.BufferAttribute(presencePositions, 3));
-    presenceGeometry.setAttribute("tint", new THREE.BufferAttribute(presenceTint, 3));
-    presenceGeometry.setAttribute("size", new THREE.BufferAttribute(presenceSize, 1));
+    // Three needs a position attribute to draw; the shader places every point from `direction`.
+    presenceGeometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(points.direction), 3));
+    presenceGeometry.setAttribute("direction", new THREE.BufferAttribute(points.direction, 3));
+    presenceGeometry.setAttribute("layer", new THREE.BufferAttribute(points.layer, 1));
+    presenceGeometry.setAttribute("seed", new THREE.BufferAttribute(points.seed, 1));
     presenceGeometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 3);
-    const presenceMaterial = pointMaterial(pixelRatio);
-    rig.add(new THREE.Points(presenceGeometry, presenceMaterial));
+    presenceGeometry.setDrawRange(0, COUNTS[level]);
+    const uniforms = {
+      time: { value: 0 }, flow: { value: 0.09 }, radius: { value: RADIUS }, amplitude: { value: 0.04 }, detail: { value: 1 },
+      squash: { value: 1 }, sink: { value: 0 }, lift: { value: 0 }, spin: { value: 0 }, speak: { value: 0 }, shiver: { value: 0 },
+      brightness: { value: 1 }, tint: { value: new THREE.Vector3(0.76, 0.76, 0.74) }, lightDir: { value: new THREE.Vector3(-0.45, 0.6, 0.7) },
+      pixelRatio: { value: pixelRatio }, focus: { value: 4.5 },
+    };
+    const presenceMaterial = new THREE.ShaderMaterial({ uniforms, vertexShader: PRESENCE_VERTEX, fragmentShader: PRESENCE_FRAGMENT, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending });
+    const presence = new THREE.Points(presenceGeometry, presenceMaterial);
+    rig.add(presence);
 
     // Visualised form (/visualize): its own point cloud, spinning slowly so it reads as 3D.
     const formPositions = new Float32Array(FORM_COUNT * 3);
@@ -199,13 +257,11 @@ export default function EmotionCanvas({ signal, mood, form = null, onClearForm }
     formGroup.add(new THREE.Points(formGeometry, formMaterial));
     rig.add(formGroup);
 
-    // Ripples: launched only by real streamed chunks (one per 80 ms window that received any).
-    type Ripple = { start: number; strength: number };
-    let ripples: Ripple[] = [];
+    // Speaking: how fast real text is arriving, smoothed into an envelope.
     let seenFragments = 0;
     let seenStart = -1;
-    let windowChars = 0;
-    let windowOpenedAt = 0;
+    let arrivedChars = 0;
+    let speak = 0;
     // Smoothed state, so moods and activities blend instead of jumping.
     const style = { ...MOOD_STYLE.neutral };
     let energy = 0.55;
@@ -213,6 +269,7 @@ export default function EmotionCanvas({ signal, mood, form = null, onClearForm }
     let listen = 0;
     let think = 0;
     let shiver = 0;
+    let spin = 0;
 
     const resize = () => {
       const bounds = host.getBoundingClientRect();
@@ -221,12 +278,10 @@ export default function EmotionCanvas({ signal, mood, form = null, onClearForm }
       renderer.setSize(width, height, false);
       camera.aspect = width / height;
       const halfAngle = Math.tan((camera.fov * Math.PI) / 360);
-      // Framed by the smaller side, so the body fills the canvas whatever shape the layout gives
-      // it. Framing by width pushed the camera back on anything less than very wide, leaving it
-      // small and faded.
+      // Framed by the smaller side, so the body fills the canvas whatever shape the layout gives it.
       camera.position.z = 1.75 / (halfAngle * Math.min(1, camera.aspect));
       camera.updateProjectionMatrix();
-      presenceMaterial.uniforms.focus.value = camera.position.z;
+      uniforms.focus.value = camera.position.z;
       formMaterial.uniforms.focus.value = camera.position.z;
     };
     const resizeObserver = new ResizeObserver(resize);
@@ -305,16 +360,34 @@ export default function EmotionCanvas({ signal, mood, form = null, onClearForm }
     let lastFrame = 0;
     let onScreen = true;
     let hasBeenVisible = false;
+    // Auto quality: frames that come too slowly while she's active step the point count down.
+    let slowFrames = 0;
+    let measuredFrames = 0;
 
     const render = (timestamp: number) => {
       animation = window.requestAnimationFrame(render);
       const activity = activityOf(signalRef.current);
       // A resting presence only breathes; half the frame rate saves power.
       if (activity === "idle" && !formRef.current && timestamp - lastFrame < 32) return;
-      const dt = lastFrame ? Math.min(0.1, (timestamp - lastFrame) / 1000) : 1 / 60;
+      const interval = lastFrame ? timestamp - lastFrame : 16;
+      const dt = Math.min(0.1, interval / 1000);
       lastFrame = timestamp;
       const t = timestamp / 1000;
-      const blend = 1 - Math.exp(-dt * 1.6);
+      // Moods reshape the body over two to three seconds.
+      const blend = 1 - Math.exp(-dt * 0.9);
+
+      if (quality === "auto" && activity !== "idle" && level !== "low") {
+        measuredFrames += 1;
+        if (interval > 26) slowFrames += 1;
+        if (measuredFrames >= 120) {
+          if (slowFrames > 60) {
+            level = level === "high" ? "medium" : "low";
+            presenceGeometry.setDrawRange(0, COUNTS[level]);
+          }
+          measuredFrames = 0;
+          slowFrames = 0;
+        }
+      }
 
       // Mood: ease towards the current mood's body, energy and warmth.
       const currentMood = moodRef.current;
@@ -325,23 +398,23 @@ export default function EmotionCanvas({ signal, mood, form = null, onClearForm }
       }
       energy += (currentMood.energy - energy) * blend;
       warmth += (currentMood.warmth - warmth) * blend;
-      listen += ((activity === "listening" ? 1 : 0) - listen) * (1 - Math.exp(-dt * 4));
-      think += ((activity === "thinking" ? 1 : 0) - think) * (1 - Math.exp(-dt * 3));
+      listen += ((activity === "listening" ? 1 : 0) - listen) * (1 - Math.exp(-dt * 3));
+      think += ((activity === "thinking" ? 1 : 0) - think) * (1 - Math.exp(-dt * 2));
       shiver *= Math.exp(-dt * 3);
       if (telemetry.phase === "error" || telemetry.phase === "aborted" || signalRef.current === "interrupted") shiver = Math.max(shiver, telemetry.endedAt !== null && performance.now() - (telemetry.startedAt + telemetry.endedAt) < 600 ? 1 : 0);
+      // The turn only ever moves forward, so it stops where it is instead of spinning back.
+      spin += dt * think * 0.7;
 
-      // Speaking: real chunks, collected into windows; each window launches one ripple.
-      if (telemetry.startedAt !== seenStart) { seenStart = telemetry.startedAt; seenFragments = 0; windowChars = 0; }
+      // Speaking: characters per second of real streamed text, eased into a 0..1 envelope.
+      if (telemetry.startedAt !== seenStart) { seenStart = telemetry.startedAt; seenFragments = 0; }
       while (seenFragments < telemetry.fragments.length) {
-        if (!windowChars) windowOpenedAt = timestamp;
-        windowChars += telemetry.fragments[seenFragments].text.length || 1;
+        arrivedChars += telemetry.fragments[seenFragments].text.length || 1;
         seenFragments += 1;
       }
-      if (windowChars && timestamp - windowOpenedAt >= RIPPLE_WINDOW_MS) {
-        ripples.push({ start: t, strength: Math.min(1, 0.35 + windowChars / 60) });
-        windowChars = 0;
-      }
-      ripples = ripples.filter((ripple) => t - ripple.start < 1.6).slice(-12);
+      const rate = arrivedChars / Math.max(dt, 0.001);
+      arrivedChars = 0;
+      const speakTarget = activity === "speaking" ? Math.min(1, 0.35 + rate / 400) : 0;
+      speak += (speakTarget - speak) * (1 - Math.exp(-dt * (speakTarget > speak ? 3 : 1.2)));
 
       // Form on stage: the presence all but disappears, so the form reads cleanly.
       const shownForm = formRef.current;
@@ -349,47 +422,26 @@ export default function EmotionCanvas({ signal, mood, form = null, onClearForm }
       formLevel += ((formActive ? 1 : 0) - formLevel) * (1 - Math.exp(-dt * 2.4));
 
       const breathRate = 0.45 + energy * 1.1;
-      const breath = 1 + (0.025 + energy * 0.035) * Math.sin(t * breathRate);
-      const radius = RADIUS * style.scale * (0.62 + 0.38 * energy) * breath * (1 - 0.18 * think) * (1 - 0.35 * formLevel);
-      const warmTint: [number, number, number] = [0.98, 0.7, 0.5];
+      const breath = 1 + (0.022 + energy * 0.03) * Math.sin(t * breathRate);
+      const warmTint: [number, number, number] = [0.98, 0.72, 0.52];
       const coolTint: [number, number, number] = [0.55, 0.64, 0.76];
       const temperature = style.tint.map((value, channel) => value * 0.6 + (coolTint[channel] + (warmTint[channel] - coolTint[channel]) * warmth) * 0.4);
-      const brightness = (0.75 + 0.6 * style.glow + 0.35 * listen + 0.25 * think) * (1 - 0.96 * formLevel);
-      for (let index = 0; index < PRESENCE; index += 1) {
-        const offset = index * 3;
-        const dx = directions[offset];
-        const dy = directions[offset + 1];
-        const dz = directions[offset + 2];
-        const longitude = Math.atan2(dz, dx);
-        let r = radius
-          * (1 + style.wave * Math.sin(dy * 5 + t * style.waveSpeed))
-          * (1 + style.jag * Math.sign(Math.sin(longitude * 9 + dy * 7 + t * 1.3)))
-          * (1 + style.drift * Math.sin(index * 12.9898 + t * 0.9));
-        // Speaking: ripples travel from the front (+z, towards the viewer) over the surface.
-        let lit = 0;
-        for (const ripple of ripples) {
-          const travelled = (t - ripple.start) * 2.2;
-          const distance = Math.acos(Math.max(-1, Math.min(1, dz)));
-          const band = Math.exp(-((distance - travelled) ** 2) * 10) * (1 - (t - ripple.start) / 1.6);
-          r *= 1 + 0.07 * ripple.strength * band;
-          lit = Math.max(lit, band * ripple.strength);
-        }
-        if (shiver > 0.01) r *= 1 + 0.03 * shiver * Math.sin(index * 7.1 + t * 40);
-        // Thinking: rings orbit around the vertical axis at different speeds.
-        const spin = think * t * (0.6 + Math.abs(dy) * 1.4);
-        const x = dx * Math.cos(spin) - dz * Math.sin(spin);
-        const z = dx * Math.sin(spin) + dz * Math.cos(spin);
-        presencePositions[offset] = x * r;
-        // Low moods sag: the lower half settles more than the top.
-        presencePositions[offset + 1] = dy * r * style.squash + style.sink * (1 - dy) * 0.5 + listen * 0.12;
-        presencePositions[offset + 2] = z * r;
-        const shade = brightness * (0.75 + 0.25 * Math.sin(index * 3.7 + t * 0.7)) + lit * 0.5;
-        for (let channel = 0; channel < 3; channel += 1) presenceTint[offset + channel] = temperature[channel] * shade;
-        presenceSize[index] = 0.068 + lit * 0.06 + listen * 0.01;
-      }
-      presenceGeometry.getAttribute("position").needsUpdate = true;
-      presenceGeometry.getAttribute("tint").needsUpdate = true;
-      presenceGeometry.getAttribute("size").needsUpdate = true;
+      uniforms.time.value = t;
+      // Calm moods flow slowly; lively ones a little faster. Speech quickens it slightly.
+      uniforms.flow.value = 0.05 + style.waveSpeed * 0.055 + speak * 0.05;
+      uniforms.radius.value = RADIUS * style.scale * (0.62 + 0.38 * energy) * breath * (1 - 0.16 * think) * (1 - 0.35 * formLevel);
+      uniforms.amplitude.value = 0.035 + style.wave * 0.9 + style.drift * 0.6 + speak * 0.02;
+      uniforms.detail.value = 0.6 + style.jag * 8;
+      uniforms.squash.value = style.squash;
+      uniforms.sink.value = style.sink;
+      uniforms.lift.value = listen * 0.1;
+      uniforms.spin.value = spin;
+      uniforms.speak.value = speak;
+      uniforms.shiver.value = shiver;
+      // Restrained: brighter while listening or talking, never glaring.
+      uniforms.brightness.value = (0.62 + 0.42 * style.glow + 0.18 * listen + 0.12 * think + 0.12 * speak) * (1 - 0.96 * formLevel);
+      (uniforms.tint.value as THREE.Vector3).set(temperature[0], temperature[1], temperature[2]);
+      presence.visible = formLevel < 0.995;
 
       // Visualised form: swirl while composing, settle into the shape, fade out when cleared.
       // A different form starts from a clean pose; a refinement of this one keeps it.
@@ -437,11 +489,11 @@ export default function EmotionCanvas({ signal, mood, form = null, onClearForm }
 
       // Attention: the body turns towards the pointer; curious moods lean in further.
       // With a form on stage the pointer belongs to the form, so the scene itself holds still.
-      const reach = 0.35 + style.lean;
+      const reach = 0.3 + style.lean;
       const noticeX = formInHand() ? 0 : pointerX;
       const noticeY = formInHand() ? 0 : pointerY;
-      rig.rotation.y += (noticeX * reach + Math.sin(t * 0.11) * 0.12 * (1 - formLevel) - rig.rotation.y) * (1 - Math.exp(-dt * 1.4));
-      rig.rotation.x += (noticeY * -0.2 - listen * 0.18 + Math.sin(t * 0.09) * 0.05 * (1 - formLevel) - rig.rotation.x) * (1 - Math.exp(-dt * 1.4));
+      rig.rotation.y += (noticeX * reach + Math.sin(t * 0.07) * 0.1 * (1 - formLevel) - rig.rotation.y) * (1 - Math.exp(-dt * 1.2));
+      rig.rotation.x += (noticeY * -0.18 - listen * 0.15 + Math.sin(t * 0.05) * 0.04 * (1 - formLevel) - rig.rotation.x) * (1 - Math.exp(-dt * 1.2));
       renderer.render(scene, camera);
     };
 
@@ -476,7 +528,7 @@ export default function EmotionCanvas({ signal, mood, form = null, onClearForm }
       renderer.dispose();
       renderer.domElement.remove();
     };
-  }, []);
+  }, [quality]);
 
   const activity = activityOf(signal);
   return <section

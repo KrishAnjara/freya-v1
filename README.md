@@ -6,7 +6,7 @@ through hard questions with a panel of cloud models, and can run on a local mode
 machine.
 
 Built with Next.js 15 and React 19. Cloud models: Grok, Groq, Gemini, Tavily search. Local model:
-Ollama (Qwen3.5 4B). Optional: Supabase (cross-device memory), a Python orchestration service.
+Ollama (Qwen3.5 4B). Optional: Supabase (cross-device memory).
 
 ## Quick start (Windows, macOS, Linux)
 
@@ -39,7 +39,7 @@ your message ─┬─ casual chat ───────────────
               ├─ live facts, dates, news ─► Tavily search ─► Gemini brief ─┤
               ├─ logic, code, explanations ─► Grok/Groq brief ─────────────┤
               ├─ hard question ─► reasoning panel: Grok or Groq ∥ Gemini ──┤
-              ├─ image/PDF/voice note ─► Gemini describes it ──────────────┘
+              ├─ image/PDF/voice note ─► she looks herself, and/or Grok · her vision model · Gemini describe it ─┘
               ├─ /visualize, /image ─► 3D form on the canvas / picture in the chat
               └─ intimate (opt-in, 18+) or Local-only mode ─► your own model only, never a cloud provider
 ```
@@ -47,16 +47,23 @@ your message ─┬─ casual chat ───────────────
 - **FREYA's voice** (`AI_PROVIDER`): `hybrid` makes the `freya` model the voice of every reply,
   on this machine or on a server of yours (below); Grok, Groq, Gemini and Tavily only research, reason,
   describe or draw, and their notes go into its prompt (they never answer the user themselves). `groq`
-  and `gemini` use those as the voice, and `server` uses any OpenAI-compatible server. The fallback only
-  answers when the voice is unreachable, and the reply's label shows who answered.
+  and `gemini` use those as the voice, and `server` uses any OpenAI-compatible server. When her voice is
+  unreachable the **voice chain** (`lib/voice-chain.ts`) tries, in order: a smaller model on the same
+  server, this laptop (`--laptop`), then Grok, Gemini and Groq (`AI_FALLBACK_PROVIDER`, if
+  `cloudFallback` allows it). It switches only before the first word, keeps the whole context, and the
+  reply's label shows who answered. Settings → Models & status shows the chain live.
   Replies arrive as separate chat messages at least a second apart; long or structured answers
   arrive as one typed-out document.
 - **Server-owned settings:** models, routing, reasoning and sampling come from the server's
   environment (`.env.example` lists them); the browser can't override them.
-- **Memory** (`lib/memory-reflection.ts`): after a conversation goes quiet, or when you switch
-  chats, a cloud model reads what's new and keeps what matters (people, plans, preferences,
-  things to follow up). Signed in, notes live in your account; otherwise in this browser. You
-  can review, edit and delete them in Settings → Memory.
+- **Memory** (`lib/memory-reflection.ts`, `lib/memory-store.ts`, `lib/memory-recall.ts`): after a conversation
+  goes quiet, or when you switch chats, a cloud model reads what's new and keeps what matters (people,
+  plans, preferences, things to follow up, what she promised to ask about) plus a short recap of that
+  conversation. On your own machine both live in `data/freya-memory.db` (SQLite), so clearing the browser
+  doesn't erase her; signed in, notes live in your account. Each reply gets only what's relevant to what
+  you're saying (BM25 word matching, recency, follow-ups that are due, and meaning when an embedding model
+  is set up), so something from last week comes back without you repeating it. Settings → Memory lists
+  notes and past-conversation recaps to search, edit and delete.
 - **Reasoning panel** (`lib/council.ts`): for maths, code, logic and decisions, two models from
   different families solve the question independently; FREYA answers from both. Settings →
   Deep reasoning: Auto / Always / Off.
@@ -66,11 +73,12 @@ your message ─┬─ casual chat ───────────────
   knows why she feels it. Left alone it expires in steps, she's sad after 8 hours without you, and it resets
   after 5 days. She tires of very long chats, and hearing from you after a while makes her happy or excited.
   `horny` needs the 18+ switch. It shapes her tone; she may text first after you've been quiet a while (Settings → FREYA texts first). The
-  canvas shows it (`app/components/EmotionCanvas.tsx`): its particle body takes the mood's shape,
-  energy and warmth, leans in while you type, draws in while she thinks and ripples with each
-  real chunk of her reply. Her portrait's expression follows the same signals
-  (`lib/expression.ts`); add expression images as described in
-  `public/portrait/expressions/README.md`.
+  canvas shows it (`app/components/EmotionCanvas.tsx`): its particle body (layered noise on the GPU, lit,
+  with a core and haze) takes the mood's shape, energy and warmth over a few seconds, leans in while you
+  type, draws in while she thinks and brightens slightly while she talks. Her portrait's face is decided
+  by `lib/expression-director.ts`: neutral at rest, brief reactions only to what was actually said, held
+  and then eased back, with cooldowns so nothing repeats; Settings → Expressions sets how much shows.
+  Add expression images as described in `public/portrait/expressions/README.md`.
 
 - **Character** (`lib/personality.ts`, `lib/canon.ts`, `lib/her-day.ts`, `lib/voice-examples.ts`):
   she has a fictional life, and only what someone has earned goes in the prompt, so she can't overshare.
@@ -108,6 +116,8 @@ applies to her next message. Or use a command, or edit `freya.config.json`:
 | `rateLimit` | Caps how many messages you can send. It only turns off on your own machine (`FREYA_SELF_HOSTED=true`) or in development; a public deployment keeps it |
 | `camera` | Lets her see your expression. Off wins everywhere; on still needs switching on in Settings. Runs in the browser: no video is stored or sent, only a one-word guess, and it doesn't identify anyone |
 | `thinking` | Hidden thinking on real questions. On a free Colab GPU it can take minutes and use up the reply, so it's off; real questions get a cloud brief instead |
+| `cloudFallback` | Grok, Gemini or Groq answer when her own models are down. Off: you get an error and your message waits. Intimate turns never go to the cloud either way |
+| `externalFiles` | Grok or Gemini may read your images and PDFs. Off: only her own models see them, and she says when she can't open something |
 
 Not switches, always on: nothing sexual involving minors, no non-consent, incest, animals or real people, no
 slurs, she never says she's human, and she won't help commit real crimes (`lib/crime-limit.ts` catches the
@@ -120,11 +130,16 @@ The laptop's 4B model is too small to be good, and it's the heavy part. Run a fa
 else and your laptop only runs the app:
 
 1. Upload `training/freya_server.ipynb` to [Colab](https://colab.research.google.com), choose a T4 GPU and run it.
+   It serves her 27B (which also sees images), a smaller fallback model, an embedding model for her
+   memory and, if you tick it, pictures (SDXL + Lightning), all behind one login.
 2. Run the line it prints, in this folder: `start.bat --remote https://….trycloudflare.com --key …`.
-   Add `--prod` to use less memory. `start.bat --local` goes back.
+   Add `--prod` to use less memory, `--laptop` to let this laptop's own model answer if the server goes
+   away. `start.bat --local` goes back.
 
-When the server stops, she falls back to Groq until you start it again. Intimate turns never do: you get
-an error instead. **Read this before relying on it:** Colab's rules prohibit web services unrelated to
+When the server stops, she falls back through the chain above until you start it again; her memory is on
+your laptop, so nothing is lost. Intimate turns never reach a cloud model: you get an error instead. Setup,
+models and limits: [docs/SETUP.md](docs/SETUP.md); problems: [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md);
+how it fits together: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). **Read this before relying on it:** Colab's rules prohibit web services unrelated to
 interactive compute, so Google can end a session or act on your account; free sessions last 12 hours at
 most, and the address changes every time; and it runs on Google's machine and through Cloudflare, so it
 isn't private. For something dependable, rent a GPU and run `python training/serve_remote.py` there.
@@ -176,7 +191,7 @@ lib/                server and shared logic (providers, persona, mood, council, 
 scripts/            setup, doctor, Modelfile generation, evaluation
 ollama/             generated Modelfile and chat templates for the local model
 training/           examples, dataset, LoRA training script and Colab notebook
-freya_service/      optional Python (FastAPI) orchestration service
+data/              her memory store (SQLite, git-ignored)
 supabase/           SQL for optional cross-device memory
 tests/              node:test suites (no network; every provider is mocked)
 docs/               operations, deployment and project history

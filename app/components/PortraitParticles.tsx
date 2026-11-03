@@ -124,10 +124,17 @@ function falloff(distance: number) {
   return t * t * (3 - 2 * t);
 }
 
-export default function PortraitParticles({ expression = "neutral" }: { expression?: Expression }) {
+/**
+ * `intensity` (0..1) is how strongly the expression shows (lib/expression-director): the pose is
+ * scaled by it, and the expression's photo is used only from half strength up; below that the
+ * face moves a little and the photo stays her resting one.
+ */
+export default function PortraitParticles({ expression = "neutral", intensity = 1 }: { expression?: Expression; intensity?: number }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const expressionRef = useRef<Expression>(expression);
+  const intensityRef = useRef(intensity);
   useEffect(() => { expressionRef.current = expression; }, [expression]);
+  useEffect(() => { intensityRef.current = Math.max(0, Math.min(1, intensity)); }, [intensity]);
   const [fallback, setFallback] = useState(false);
   const [failed, setFailed] = useState(false);
   const [disturbed, setDisturbed] = useState(false);
@@ -215,9 +222,11 @@ export default function PortraitParticles({ expression = "neutral" }: { expressi
     let expressionImages: ExpressionImages = {};
     const loaded = new Map<string, { image: HTMLImageElement; heights: Float32Array }>();
     const loading = new Set<string>();
-    let nextVariationAt = 0;
-    /** The image she was using for each expression, so coming back from a glance isn't a new face. */
+    /** The image she was using for each expression, so coming back to it isn't a new face... */
     const chosen = new Map<Expression, string>();
+    /** ...unless it's been a while, when another photo of the same expression keeps her from looking frozen. */
+    const lastSeenAt = new Map<Expression, number>();
+    const FRESH_VARIATION_AFTER_S = 300;
     let shownUrl = "base";
     let shownImage: HTMLImageElement | null = null;
     let shownHeights: Float32Array | undefined;
@@ -418,13 +427,17 @@ export default function PortraitParticles({ expression = "neutral" }: { expressi
 
         // Expression: chosen by the app from mood and conversation (lib/expression), never at
         // random. With an image for it on screen, the pose only adds a little life on top.
-        const current = expressionRef.current;
+        const requested = expressionRef.current;
+        const level = intensityRef.current;
+        // A faint expression moves the face but keeps her resting photo.
+        const current: Expression = level >= 0.5 || requested === "neutral" ? requested : "neutral";
+        const posed = requested;
         // She keeps one image for an expression, and only now and then changes it for another of the
         // same. A glance with no image of its own moves her eyes and leaves her face alone.
-        const refresh = time > nextVariationAt;
-        if (current !== lastExpression || refresh) {
+        if (current !== lastExpression) {
+          if (lastExpression) lastSeenAt.set(lastExpression, time);
           lastExpression = current;
-          if (refresh) nextVariationAt = time + 60 + Math.random() * 90;
+          const refresh = time - (lastSeenAt.get(current) ?? time) > FRESH_VARIATION_AFTER_S;
           const options = imagesFor(current, expressionImages);
           const known = chosen.get(current);
           const next = known && !refresh && options.includes(known) ? known : pickVariation(options, shownUrl);
@@ -453,13 +466,16 @@ export default function PortraitParticles({ expression = "neutral" }: { expressi
             fadeTo = null;
           }
         }
-        const pose = POSES[current];
+        const neutralPose = POSES.neutral;
+        const fullPose = POSES[posed];
+        const strength = posed === "neutral" ? 0 : Math.max(0.15, level);
+        const pose = Object.fromEntries(Object.entries(fullPose).map(([key, value]) => [key, neutralPose[key as keyof typeof neutralPose] + (value - neutralPose[key as keyof typeof neutralPose]) * strength])) as typeof fullPose;
         const poseWeight = shownUrl === "base" || shownUrl === expressionImages.neutral?.[0] ? 1 : 0.3;
         // A slow, small sway keeps a held expression alive without repeating a gesture.
         browTarget = pose.brow * poseWeight + Math.sin(time * 0.37) * 0.05;
         smileTarget = pose.smile * poseWeight + Math.sin(time * 0.23 + 1) * 0.03;
         headTiltTarget = pose.tilt + Math.sin(time * 0.19) * 0.08;
-        const poseLips = pose.lips * poseWeight * (current === "laugh" ? 0.65 + 0.35 * Math.abs(Math.sin(time * 7)) : 1);
+        const poseLips = pose.lips * poseWeight * (posed === "laugh" ? 0.65 + 0.35 * Math.abs(Math.sin(time * 7)) : 1);
         // Hovering reads as attention: brows lift a little, the hint of a smile arrives.
         const attention = pointerActive ? 1 : 0;
         const browDrive = browTarget + attention * 0.3 + emphasis * 0.55;
@@ -467,7 +483,7 @@ export default function PortraitParticles({ expression = "neutral" }: { expressi
         browRaise += (browDrive - browRaise) * 0.07 * step;
         smile += (smileDrive - smile) * 0.05 * step;
         // A smile that does not reach the eyes looks false, so the lids follow the mouth.
-        squint += ((smile * 0.55 + POSES[current].squint * poseWeight + emphasis * 0.15) - squint) * 0.06 * step;
+        squint += ((smile * 0.55 + pose.squint * poseWeight + emphasis * 0.15) - squint) * 0.06 * step;
         lipOpen += (Math.max(spoken, idleLip, poseLips) - lipOpen) * Math.min(1, 0.45 * step);
         const lip = lipOpen;
         // The jaw is heavier than the lips, so it trails them instead of matching exactly.
@@ -479,8 +495,8 @@ export default function PortraitParticles({ expression = "neutral" }: { expressi
           // Around where the expression looks (up and aside when thinking, down when sad).
           const magnitude = Math.pow(Math.random(), 1.7) * 0.5;
           const angle = Math.random() * Math.PI * 2;
-          glanceTargetX = Math.max(-1, Math.min(1, POSES[current].gazeX + Math.cos(angle) * magnitude));
-          glanceTargetY = Math.max(-1, Math.min(1, POSES[current].gazeY + Math.sin(angle) * magnitude * 0.6));
+          glanceTargetX = Math.max(-1, Math.min(1, pose.gazeX + Math.cos(angle) * magnitude));
+          glanceTargetY = Math.max(-1, Math.min(1, pose.gazeY + Math.sin(angle) * magnitude * 0.6));
           nextGlance = time + 0.9 + Math.random() * 2.6;
         }
         // When the pointer is over her, she follows it instead of glancing idly.
@@ -489,7 +505,7 @@ export default function PortraitParticles({ expression = "neutral" }: { expressi
           glanceTargetY = Math.max(-1, Math.min(1, pointerWorldY / Math.max(halfHeight, 0.001)));
         }
         // With the camera on, she looks at them, except while she's deliberately glancing away.
-        const seen = pointerActive || current.startsWith("look-") || current === "reading" ? null : faceGaze();
+        const seen = pointerActive || posed.startsWith("look-") || posed === "reading" ? null : faceGaze();
         if (seen) {
           glanceTargetX = seen.x;
           glanceTargetY = seen.y;

@@ -118,3 +118,58 @@ export function normalizeStoredMemories(value: unknown): StoredMemory[] {
     }];
   }).slice(0, LOCAL_MEMORY_LIMIT);
 }
+
+// --- memory on this computer (/api/memory, lib/memory-store) --------------------------------
+
+/** A conversation's recap as the memory store keeps it (mirrors lib/memory-store's Episode). */
+export type StoredEpisode = { id: string; title: string; recap: string; startedAt?: string; updatedAt: string; messages?: number };
+
+/** The notes and recaps kept on disk, or null when this install doesn't keep memory on disk. */
+export async function fetchDiskMemory(): Promise<{ notes: StoredMemory[]; episodes: StoredEpisode[] } | null> {
+  try {
+    const response = await fetch("/api/memory", { cache: "no-store" });
+    if (!response.ok) return null;
+    const body = await response.json() as { enabled?: boolean; notes?: unknown; episodes?: unknown };
+    if (!body.enabled) return null;
+    const episodes = Array.isArray(body.episodes) ? body.episodes.filter((item): item is StoredEpisode => Boolean(item) && typeof item.id === "string" && typeof item.recap === "string") : [];
+    return { notes: normalizeStoredMemories(body.notes), episodes };
+  } catch {
+    return null;
+  }
+}
+
+const stamp = (memory: StoredMemory) => memory.updatedAt || memory.createdAt || "";
+
+/**
+ * This browser's notes and the disk's, as one list: one per id, the newer edit wins, anything
+ * the user told FREYA to forget stays out, newest first.
+ */
+export function mergeMemories(local: StoredMemory[], disk: StoredMemory[], forgotten: string[] = []): StoredMemory[] {
+  const gone = new Set(forgotten.map((text) => text.trim().toLowerCase()));
+  const byId = new Map<string, StoredMemory>();
+  for (const memory of [...disk, ...local]) {
+    const current = byId.get(memory.id);
+    if (!current || stamp(memory) > stamp(current)) byId.set(memory.id, memory);
+  }
+  return [...byId.values()]
+    .filter((memory) => !gone.has(memory.text.trim().toLowerCase()))
+    .sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""))
+    .slice(0, LOCAL_MEMORY_LIMIT);
+}
+
+export function sameMemories(a: StoredMemory[], b: StoredMemory[]) {
+  if (a.length !== b.length) return false;
+  const byId = new Map(b.map((memory) => [memory.id, memory]));
+  return a.every((memory) => byId.get(memory.id)?.text === memory.text && stamp(byId.get(memory.id)!) === stamp(memory));
+}
+
+/** Writes the whole list to disk. Throws when it didn't save, so the caller can say so. */
+export async function pushDiskMemories(notes: StoredMemory[]) {
+  const response = await fetch("/api/memory", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ notes }) });
+  if (!response.ok) throw new Error(`memory sync failed (${response.status})`);
+}
+
+export async function forgetOnDisk(query: string) {
+  const response = await fetch(`/api/memory?${query}`, { method: "DELETE" });
+  if (!response.ok) throw new Error(`memory delete failed (${response.status})`);
+}

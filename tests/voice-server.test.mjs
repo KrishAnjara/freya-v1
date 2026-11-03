@@ -87,3 +87,16 @@ test("with the token it works, and a reply comes through as it's written", async
   for (let part = await reader.read(); !part.done; part = await reader.read()) rest += decoder.decode(part.value);
   assert.match(rest, /second/);
 });
+
+test("the gateway says what it serves, and that pictures are off when they are", async () => {
+  const health = await call("/v1/health");
+  assert.equal(health.status, 200);
+  const body = await health.json();
+  assert.equal(body.ok, true);
+  assert.equal(body.models.voice, "freya");
+  assert.equal(body.images.enabled, false);
+  assert.doesNotMatch(JSON.stringify(body), new RegExp(TOKEN), "the key never comes back");
+  assert.equal((await call("/v1/health", {}, "wrong")).status, 401);
+  const picture = await call("/v1/images", { method: "POST", body: JSON.stringify({ prompt: "a lighthouse" }) });
+  assert.equal(picture.status, 404, "the app reads 404 as 'no image server here' and moves on");
+});
