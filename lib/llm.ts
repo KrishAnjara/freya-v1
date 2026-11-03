@@ -1,6 +1,7 @@
 import { getOllamaEndpoint, ollamaContextLength, ollamaHeaders, ollamaIsLocal } from "@/lib/ollama-models";
 import { redactSensitiveCredentials } from "@/lib/sensitive-data";
-import { isCoolingDown, markFailure, markSuccess, ProviderHttpError, retryAfterOf } from "@/lib/provider-health";
+import { coolingDownMessage, describeFailure, isCoolingDown, markSuccess, ProviderHttpError, providerErrorDetail, recordFailure, retryAfterOf } from "@/lib/provider-health";
+import { geminiModel, geminiThinking } from "@/lib/gemini-config";
 
 /** Image or PDF bytes for providers that can see them (Gemini). Others read only the text note. */
 export type InlinePart = { mime: string; data: string };
@@ -59,9 +60,8 @@ function voiceServerDown() {
 }
 function noteVoiceServer(error: unknown, signal?: AbortSignal) {
   if (ollamaIsLocal() || signal?.aborted) return;
-  const status = error instanceof ProviderHttpError ? error.status : undefined;
-  markFailure(VOICE_SERVER_HEALTH, status);
-  noteFailure(VOICE_SERVER_HEALTH, status ?? "network");
+  recordFailure(VOICE_SERVER_HEALTH, error);
+  noteFailure(VOICE_SERVER_HEALTH, error);
 }
 /** Keeps the model and its prompt cache loaded between messages (Ollama's default is 5m). */
 function ollamaKeepAlive() {
@@ -136,7 +136,7 @@ function validInline(input: unknown): InlinePart[] {
 
 async function providerRequest(url: string, init: RequestInit, requestSignal?: AbortSignal, timeoutMs = PROVIDER_TIMEOUT_MS) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const timeout = setTimeout(() => controller.abort(new DOMException(`no response in ${Math.round(timeoutMs / 1000)}s`, "TimeoutError")), timeoutMs);
   const abortFromRequest = () => controller.abort(requestSignal?.reason);
   if (requestSignal?.aborted) abortFromRequest();
   else requestSignal?.addEventListener("abort", abortFromRequest, { once: true });
@@ -184,9 +184,9 @@ function groqBody(model: string, system: string, messages: ChatMessage[], stream
   });
 }
 
-/** Logs an upstream failure by status only: never message text, which can echo account ids. */
-function noteFailure(provider: string, status: number | string) {
-  console.warn(`FREYA provider ${provider} unavailable (${status}); trying the next option.`);
+/** Logs why an upstream failed: status and the provider's reason, with keys redacted (lib/provider-health). */
+function noteFailure(provider: string, error: unknown) {
+  console.warn(`FREYA provider ${provider} unavailable (${describeFailure(error)}); trying the next option.`);
 }
 
 async function groqChat(system: string, messages: ChatMessage[], signal?: AbortSignal) {
@@ -203,7 +203,7 @@ async function groqChat(system: string, messages: ChatMessage[], signal?: AbortS
         body: groqBody(model, system, messages, false),
       }, signal);
       if (!response.ok) {
-        throw new ProviderHttpError(payload?.error?.message || `Groq request failed (${response.status}).`, response.status, retryAfterOf(response));
+        throw new ProviderHttpError(`Groq request failed (${response.status}).`, response.status, retryAfterOf(response), providerErrorDetail(payload));
       }
       const text = payload?.choices?.[0]?.message?.content;
       if (typeof text !== "string" || !text.trim()) throw new Error("The model returned an empty response.");
@@ -211,9 +211,8 @@ async function groqChat(system: string, messages: ChatMessage[], signal?: AbortS
       return text.trim();
     } catch (error) {
       if (signal?.aborted) throw error;
-      const status = error instanceof ProviderHttpError ? error.status : "network";
-      markFailure(health, typeof status === "number" ? status : undefined, error instanceof ProviderHttpError ? error.retryAfterSeconds : undefined);
-      noteFailure(health, status);
+      recordFailure(health, error);
+      noteFailure(health, error);
       lastError = error;
     }
   }
@@ -221,12 +220,12 @@ async function groqChat(system: string, messages: ChatMessage[], signal?: AbortS
 }
 
 function geminiHealthKey() {
-  return `gemini:${process.env.GEMINI_MODEL || "gemini-2.5-flash"}`;
+  return `gemini:${geminiModel()}`;
 }
 
 /** Error thrown immediately while an upstream is in cooldown, instead of waiting on it again. */
 function coolingDownError(key: string) {
-  return new Error(`${key} is cooling down after a recent failure.`);
+  return new Error(`${key} is ${coolingDownMessage(key)}.`);
 }
 
 async function geminiChat(system: string, messages: ChatMessage[], signal?: AbortSignal) {
@@ -238,9 +237,8 @@ async function geminiChat(system: string, messages: ChatMessage[], signal?: Abor
     return text;
   } catch (error) {
     if (!signal?.aborted) {
-      const status = error instanceof ProviderHttpError ? error.status : "network";
-      markFailure(health, typeof status === "number" ? status : undefined);
-      noteFailure(health, status);
+      recordFailure(health, error);
+      noteFailure(health, error);
     }
     throw error;
   }
@@ -249,7 +247,7 @@ async function geminiChat(system: string, messages: ChatMessage[], signal?: Abor
 async function geminiChatRaw(system: string, messages: ChatMessage[], signal?: AbortSignal) {
   const key = process.env.GEMINI_API_KEY;
   if (!key) throw new Error("GEMINI_API_KEY is missing. Add it to .env.local and restart the dev server.");
-  const model = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+  const model = geminiModel();
   const contents = geminiContents(messages);
   const { response, payload } = await providerRequest(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`, {
     method: "POST",
@@ -257,11 +255,11 @@ async function geminiChatRaw(system: string, messages: ChatMessage[], signal?: A
     body: JSON.stringify({
       systemInstruction: { parts: [{ text: system }] },
       contents,
-      generationConfig: { temperature: 0.85, maxOutputTokens: 900 }
+      generationConfig: { temperature: 0.85, maxOutputTokens: 900, ...geminiThinking(model) }
     })
   }, signal);
   if (!response.ok) {
-    throw new ProviderHttpError(payload?.error?.message || `Gemini request failed (${response.status}).`, response.status, retryAfterOf(response));
+    throw new ProviderHttpError(`Gemini request failed (${response.status}).`, response.status, retryAfterOf(response), providerErrorDetail(payload));
   }
   const text = payload?.candidates?.[0]?.content?.parts?.map((p: { text?: string }) => p.text || "").join("").trim();
   if (typeof text !== "string" || !text) throw new Error("Gemini returned no text. Check the model name and API key.");
@@ -284,7 +282,7 @@ async function ollamaChat(system: string, messages: ChatMessage[], signal?: Abor
         options: { num_ctx: ollamaContextLength(), num_predict: maxOutputTokens() },
       }),
     }, signal, ollamaTimeoutMs());
-    if (!response.ok) throw new ProviderHttpError(`Ollama request failed (${response.status}).`, response.status);
+    if (!response.ok) throw new ProviderHttpError(`Ollama request failed (${response.status}).`, response.status, undefined, providerErrorDetail(payload));
     const text = payload?.message?.content;
     if (typeof text !== "string" || !text.trim()) throw new Error("Ollama returned no text.");
     return text.trim();
@@ -323,13 +321,13 @@ async function voiceChat(system: string, messages: ChatMessage[], signal?: Abort
   const { url, init } = voiceRequest(system, messages, false);
   try {
     const { response, payload } = await providerRequest(url, init, signal, VOICE_SERVER_TIMEOUT_MS);
-    if (!response.ok) throw new ProviderHttpError(`Voice server request failed (${response.status}).`, response.status, retryAfterOf(response));
+    if (!response.ok) throw new ProviderHttpError(`Voice server request failed (${response.status}).`, response.status, retryAfterOf(response), providerErrorDetail(payload));
     const text = payload?.choices?.[0]?.message?.content;
     if (typeof text !== "string" || !text.trim()) throw new Error("The voice server returned no text.");
     markSuccess(VOICE_SERVER_HEALTH);
     return text.trim();
   } catch (error) {
-    if (!signal?.aborted) { markFailure(VOICE_SERVER_HEALTH, error instanceof ProviderHttpError ? error.status : undefined); noteFailure(VOICE_SERVER_HEALTH, error instanceof ProviderHttpError ? error.status : "network"); }
+    if (!signal?.aborted) { recordFailure(VOICE_SERVER_HEALTH, error); noteFailure(VOICE_SERVER_HEALTH, error); }
     throw error;
   }
 }
@@ -355,7 +353,7 @@ async function* voiceStream(system: string, messages: ChatMessage[], signal?: Ab
     }
     markSuccess(VOICE_SERVER_HEALTH);
   } catch (error) {
-    if (!signal?.aborted) { markFailure(VOICE_SERVER_HEALTH, error instanceof ProviderHttpError ? error.status : undefined); noteFailure(VOICE_SERVER_HEALTH, error instanceof ProviderHttpError ? error.status : "network"); }
+    if (!signal?.aborted) { recordFailure(VOICE_SERVER_HEALTH, error); noteFailure(VOICE_SERVER_HEALTH, error); }
     throw error;
   }
 }
@@ -415,7 +413,7 @@ const CLOUD_STREAM_START_MS = 15_000;
 
 async function providerStream(url: string, init: RequestInit, requestSignal?: AbortSignal, timeoutMs = CLOUD_STREAM_START_MS) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const timeout = setTimeout(() => controller.abort(new DOMException(`no response in ${Math.round(timeoutMs / 1000)}s`, "TimeoutError")), timeoutMs);
   const abortFromRequest = () => controller.abort(requestSignal?.reason);
   if (requestSignal?.aborted) abortFromRequest();
   else requestSignal?.addEventListener("abort", abortFromRequest, { once: true });
@@ -445,7 +443,7 @@ async function* groqStream(system: string, messages: ChatMessage[], signal?: Abo
       try {
         if (!response.ok || !response.body) {
           const payload = await response.json().catch(() => ({}));
-          throw new ProviderHttpError(payload?.error?.message || `Groq request failed (${response.status}).`, response.status, retryAfterOf(response));
+          throw new ProviderHttpError(`Groq request failed (${response.status}).`, response.status, retryAfterOf(response), providerErrorDetail(payload));
         }
         for await (const delta of readServerSentDeltas(
           response.body,
@@ -466,9 +464,8 @@ async function* groqStream(system: string, messages: ChatMessage[], signal?: Abo
     } catch (error) {
       // Once text has reached the reader, switching models would splice two answers together.
       if (emitted || signal?.aborted) throw error;
-      const status = error instanceof ProviderHttpError ? error.status : "network";
-      markFailure(health, typeof status === "number" ? status : undefined, error instanceof ProviderHttpError ? error.retryAfterSeconds : undefined);
-      noteFailure(health, status);
+      recordFailure(health, error);
+      noteFailure(health, error);
       lastError = error;
     }
   }
@@ -483,9 +480,8 @@ async function* geminiStream(system: string, messages: ChatMessage[], signal?: A
     markSuccess(health);
   } catch (error) {
     if (!signal?.aborted) {
-      const status = error instanceof ProviderHttpError ? error.status : "network";
-      markFailure(health, typeof status === "number" ? status : undefined);
-      noteFailure(health, status);
+      recordFailure(health, error);
+      noteFailure(health, error);
     }
     throw error;
   }
@@ -494,7 +490,7 @@ async function* geminiStream(system: string, messages: ChatMessage[], signal?: A
 async function* geminiStreamRaw(system: string, messages: ChatMessage[], signal?: AbortSignal, state?: StreamState) {
   const key = process.env.GEMINI_API_KEY;
   if (!key) throw new Error("GEMINI_API_KEY is missing. Add it to .env.local and restart the dev server.");
-  const model = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+  const model = geminiModel();
   const contents = geminiContents(messages);
   const { response, release } = await providerStream(
     `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:streamGenerateContent?alt=sse&key=${encodeURIComponent(key)}`,
@@ -504,13 +500,13 @@ async function* geminiStreamRaw(system: string, messages: ChatMessage[], signal?
       body: JSON.stringify({
         systemInstruction: { parts: [{ text: system }] },
         contents,
-        generationConfig: { temperature: 0.85, maxOutputTokens: maxOutputTokens() },
+        generationConfig: { temperature: 0.85, maxOutputTokens: maxOutputTokens(), ...geminiThinking(model) },
       }),
     }, signal);
   try {
     if (!response.ok || !response.body) {
       const payload = await response.json().catch(() => ({}));
-      throw new ProviderHttpError(payload?.error?.message || `Gemini request failed (${response.status}).`, response.status, retryAfterOf(response));
+      throw new ProviderHttpError(`Gemini request failed (${response.status}).`, response.status, retryAfterOf(response), providerErrorDetail(payload));
     }
     yield* readServerSentDeltas(
       response.body,

@@ -240,7 +240,7 @@ test("when vision fails over to a text-only model, that model is told it cannot 
 
 test("a burst of messages is answered once; a reply with nothing on screen yet is restarted", async () => {
   const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
-  assert.match(page, /BURST_MS = 1500/, "rapid messages get a moment to finish before she answers");
+  assert.match(page, /BURST_MS = 600/, "rapid messages get a moment to finish before she answers");
   assert.match(page, /activePostedRef\.current === 0\) \{\n\s*activeChatRequest\.current\?\.abort\(\);/, "an unstarted reply is called off and restarted for the whole burst");
   assert.match(page, /if \(waiting && !interrupted\) waiting\.targetId = job\.targetId;/, "messages split by a FREYA reply are not merged");
 });

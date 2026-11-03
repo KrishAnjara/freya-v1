@@ -2,9 +2,9 @@
  * xAI's Grok, for FREYA's logic work: the reasoning panel, research briefs and structured jobs
  * (memory, visualisation). It's used whenever XAI_API_KEY is set; without one, or when it fails,
  * those jobs stay on Groq. Grok never writes a reply to the user, so it isn't one of the voice
- * providers in lib/llm. Failures are logged by status only, never with provider text.
+ * providers in lib/llm. Failures are logged with the provider's reason, redacted (lib/provider-health).
  */
-import { isCoolingDown, markFailure, markSuccess, ProviderHttpError, retryAfterOf } from "@/lib/provider-health";
+import { coolingDownMessage, isCoolingDown, markSuccess, ProviderHttpError, providerErrorDetail, recordFailure, retryAfterOf } from "@/lib/provider-health";
 
 type GrokOptions = {
   maxTokens: number;
@@ -29,7 +29,7 @@ export async function grokComplete(system: string, user: string, options: GrokOp
   const model = grokModel();
   const health = `grok:${model}`;
   if (!key) throw new Error("XAI_API_KEY is not set.");
-  if (isCoolingDown(health)) throw new Error("cooling down");
+  if (isCoolingDown(health)) throw new Error(coolingDownMessage(health));
   try {
     const response = await fetch("https://api.x.ai/v1/chat/completions", {
       method: "POST",
@@ -47,14 +47,14 @@ export async function grokComplete(system: string, user: string, options: GrokOp
       cache: "no-store",
     });
     const payload = await response.json().catch(() => null);
-    if (!response.ok) throw new ProviderHttpError(`Grok request failed (${response.status}).`, response.status, retryAfterOf(response));
+    if (!response.ok) throw new ProviderHttpError(`Grok request failed (${response.status}).`, response.status, retryAfterOf(response), providerErrorDetail(payload));
     const text = payload?.choices?.[0]?.message?.content;
     if (typeof text !== "string" || !text.trim()) throw new Error("The model returned an empty response.");
     markSuccess(health);
     return text.trim();
   } catch (error) {
     // Too slow counts as a failure, so later jobs skip it for a while; the caller hanging up doesn't.
-    if (!options.signal?.aborted) markFailure(health, error instanceof ProviderHttpError ? error.status : undefined, error instanceof ProviderHttpError ? error.retryAfterSeconds : undefined);
+    if (!options.signal?.aborted) recordFailure(health, error);
     throw error;
   }
 }

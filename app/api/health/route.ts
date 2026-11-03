@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { grokComplete, grokModel, hasGrok } from "@/lib/grok";
+import { geminiModel, geminiThinking } from "@/lib/gemini-config";
 import { getOllamaEndpoint, ollamaContextLength, ollamaHeaders, ollamaIsLocal } from "@/lib/ollama-models";
 import { groqModels, groqReasoningEffort, ollamaThinking } from "@/lib/llm";
 import { getFreyaServiceConfig, requestServiceReply } from "@/lib/freya-service";
@@ -77,11 +78,11 @@ function groqCheck(model: string): Check {
 const geminiCheck: Check = async () => {
   const key = process.env.GEMINI_API_KEY;
   if (!key) return "not configured";
-  const model = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+  const model = geminiModel();
   const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: PROMPT }] }], generationConfig: { maxOutputTokens: 400 } }),
+    body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: PROMPT }] }], generationConfig: { maxOutputTokens: 400, ...geminiThinking(model) } }),
     signal: AbortSignal.timeout(PROBE_TIMEOUT_MS), cache: "no-store",
   });
   const payload = await response.json().catch(() => null);
@@ -196,7 +197,7 @@ async function runChecks(): Promise<HealthReport> {
   const checks: [string, Check][] = [
     ...(hasGrok() ? [[`cloud: grok ${grokModel()}`, grokCheck] as [string, Check]] : []),
     ...groqModels().map((model): [string, Check] => [`cloud: groq ${model}`, groqCheck(model)]),
-    [`cloud: gemini ${process.env.GEMINI_MODEL || "gemini-2.5-flash"}`, geminiCheck],
+    [`cloud: gemini ${geminiModel()}`, geminiCheck],
     ...(process.env.VOICE_BASE_URL?.trim() ? [[`voice server: ${process.env.VOICE_MODEL}`, voiceServerCheck] as [string, Check]] : []),
     [`${ollamaIsLocal() ? "local" : "voice server"}: ollama ${process.env.OLLAMA_MODEL || "freya"}`, ollamaCheck],
     ["api: tavily search", tavilyCheck],

@@ -153,8 +153,21 @@ export function takeCompleteParts(buffer: string, final = false): { parts: strin
  * How long FREYA "types" a message before it is posted, in ms. Streams usually outrun
  * reading speed, and a burst of six bubbles at once reads as a dump, not a conversation.
  */
-export function typingDelay(part: string) {
-  return Math.min(1600, 320 + part.length * 3);
+export function typingDelay(part: string, energy?: number) {
+  return Math.round(Math.min(1600, 320 + part.length * 3) * paceFactor(energy));
+}
+
+/** The energy of the neutral mood: at this level (or with none given) timing is unchanged. */
+const NEUTRAL_ENERGY = 0.55;
+
+/**
+ * How much slower or faster she texts for a given mood energy (lib/mood): tired is up to 1.5x
+ * slower, excited up to 1.4x quicker. No energy given means her usual pace.
+ */
+export function paceFactor(energy?: number) {
+  if (energy === undefined || !Number.isFinite(energy)) return 1;
+  const clamped = Math.max(0, Math.min(1, energy));
+  return Math.max(0.7, Math.min(1.5, 1 + (NEUTRAL_ENERGY - clamped) * 1.2));
 }
 
 /**
@@ -165,12 +178,22 @@ export function busyDelay(random: () => number = Math.random) {
   return 8000 + random() * 37_000;
 }
 
+/**
+ * How long she spends reading their message before she starts typing: one to five seconds, leaning
+ * longer for a longer message. The reply is already being written meanwhile.
+ */
+export function readingDelay(text: string, random: () => number = Math.random, energy?: number) {
+  const least = Math.min(4000, 1000 + text.length * 12);
+  return Math.round((least + random() * (5000 - least)) * paceFactor(energy));
+}
+
 /** Consecutive bubbles never land closer than this: a person sends one text, then the next. */
 export const MIN_BUBBLE_GAP_MS = 1000;
 
 /** Delay before posting a bubble; a follow-up bubble waits at least MIN_BUBBLE_GAP_MS. */
-export function bubbleDelay(part: string, followUp: boolean) {
-  return followUp ? Math.max(MIN_BUBBLE_GAP_MS, typingDelay(part)) : typingDelay(part);
+export function bubbleDelay(part: string, followUp: boolean, energy?: number) {
+  const typed = typingDelay(part, energy);
+  return followUp ? Math.max(MIN_BUBBLE_GAP_MS, typed) : typed;
 }
 
 /**

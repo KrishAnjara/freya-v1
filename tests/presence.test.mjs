@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
-import { chooseExpression, EXPRESSION_FILE, EXPRESSIONS, moodExpression, POSES, reactionInReply, reactionTo, requestedExpression } from "../lib/expression.ts";
+import { chooseExpression, EXPRESSION_FILE, EXPRESSIONS, moodExpression, POSES, reactionTo, requestedExpression } from "../lib/expression.ts";
 import { MOOD_NAMES } from "../lib/mood.ts";
 import { briefProviderFor } from "../lib/brief.ts";
-import { bubbleDelay, MIN_BUBBLE_GAP_MS } from "../lib/reply-parts.ts";
+import { bubbleDelay, MIN_BUBBLE_GAP_MS, paceFactor, readingDelay, typingDelay } from "../lib/reply-parts.ts";
 import { POST as chatPost } from "../app/api/chat/route.ts";
 import { resetLocalRateLimitsForTests } from "../lib/rate-limit.ts";
 
@@ -22,16 +22,13 @@ test("every expression has a pose and every mood maps to an expression", () => {
   for (const mood of MOOD_NAMES) assert.ok(EXPRESSIONS.includes(moodExpression(mood)), mood);
 });
 
-test("expressions come from real signals: requests and reactions first, then thinking, then mood", () => {
+test("expressions follow her mood; words only change her face when they ask for one", () => {
   assert.equal(requestedExpression("smile for me"), "smile");
   assert.equal(requestedExpression("can you look surprised?"), "surprised");
   assert.equal(requestedExpression("make a sad face"), "sad");
   assert.equal(requestedExpression("I had a sad day"), null, "talking about sadness is not a request");
-  assert.equal(reactionTo("my dog died this morning").expression, "sad");
-  assert.equal(reactionTo("omg guess what").expression, "surprised");
-  assert.equal(reactionTo("lmao 😂").expression, "laugh");
-  assert.equal(reactionTo("just checking in"), null);
-  assert.equal(reactionInReply("haha that's so dumb").expression, "laugh");
+  assert.equal(reactionTo("smile for me").expression, "smile");
+  for (const text of ["my dog died this morning", "omg guess what", "lmao 😂", "just checking in"]) assert.equal(reactionTo(text), null, text);
   const now = 1_000_000;
   const active = { expression: "surprised", ms: 3000, until: now + 1000 };
   assert.equal(chooseExpression("curious", true, active, now), "surprised");
@@ -56,6 +53,18 @@ test("consecutive bubbles are at least a second apart; the first isn't delayed e
   assert.equal(bubbleDelay("hi", true), MIN_BUBBLE_GAP_MS);
   assert.ok(bubbleDelay("hi", false) < MIN_BUBBLE_GAP_MS);
   assert.ok(bubbleDelay("x".repeat(500), true) >= MIN_BUBBLE_GAP_MS);
+});
+
+test("her mood sets her texting pace: tired is slower, excited quicker, none given is unchanged", () => {
+  assert.equal(paceFactor(), 1);
+  assert.equal(paceFactor(Number.NaN), 1);
+  assert.ok(paceFactor(0.15) > 1 && paceFactor(0.15) <= 1.5);
+  assert.ok(paceFactor(0.95) < 1 && paceFactor(0.95) >= 0.7);
+  assert.equal(paceFactor(-3), paceFactor(0));
+  const text = "x".repeat(100);
+  assert.ok(typingDelay(text, 0.15) > typingDelay(text) && typingDelay(text) > typingDelay(text, 0.95));
+  assert.ok(readingDelay(text, () => 0, 0.15) > readingDelay(text, () => 0, 0.95));
+  assert.ok(bubbleDelay("hi", true, 0.95) >= MIN_BUBBLE_GAP_MS, "the one-second gap holds however fast she is");
 });
 
 test("hybrid: the local model is the voice, even for images (Gemini only describes them)", async () => {
@@ -151,6 +160,8 @@ test("thinking-2.png is her playful face and is never used for ordinary thinking
   assert.equal(expressionOfFile("smile", "2"), "smile");
   assert.equal(moodExpression("playful"), "playful");
   assert.equal(chooseExpression("playful", true, null, 0), "playful", "stays playful while she thinks");
+  assert.equal(chooseExpression("excited", true, null, 0), "playful", "thinking-2 while she works out a reply");
+  assert.equal(chooseExpression("excited", false, null, 0), "excited");
   assert.equal(chooseExpression("neutral", true, null, 0), "thinking");
   assert.equal(chooseExpression("curious", true, null, 0), "thinking");
 });

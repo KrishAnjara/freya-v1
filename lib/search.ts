@@ -1,4 +1,5 @@
-import { isCoolingDown, markFailure, markSuccess } from "@/lib/provider-health";
+import { describeFailure, isCoolingDown, markSuccess, recordFailure } from "@/lib/provider-health";
+import { geminiModel, geminiThinking } from "@/lib/gemini-config";
 
 export type SearchSource = {
   title: string;
@@ -113,11 +114,10 @@ async function searchGemini(query: string, requestSignal?: AbortSignal): Promise
 
   const model =
     process.env.GEMINI_SEARCH_MODEL ||
-    process.env.GEMINI_MODEL ||
-    "gemini-2.5-flash";
+    geminiModel();
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 12000);
+  const timeout = setTimeout(() => controller.abort(new DOMException("no response in 12s", "TimeoutError")), 12000);
   const abortFromRequest = () => controller.abort(requestSignal?.reason);
   if (requestSignal?.aborted) abortFromRequest();
   else requestSignal?.addEventListener("abort", abortFromRequest, { once: true });
@@ -151,7 +151,8 @@ async function searchGemini(query: string, requestSignal?: AbortSignal): Promise
         tools: [{ google_search: {} }],
         generationConfig: {
           temperature: 0.2,
-          maxOutputTokens: 1200
+          maxOutputTokens: 1200,
+          ...geminiThinking(model)
         }
       })
     });
@@ -342,11 +343,12 @@ export async function searchWeb(
       searchCache.set(cacheKey, { result, expires: Date.now() + (news ? NEWS_TTL_MS : GENERAL_TTL_MS) });
       if (searchCache.size > SEARCH_CACHE_MAX) searchCache.delete(searchCache.keys().next().value!);
       return result;
-    } catch {
+    } catch (error) {
       if (requestSignal?.aborted) throw new Error("Search request was cancelled.");
-      markFailure(health);
+      recordFailure(health, error);
+      console.warn(`FREYA ${health} failed (${describeFailure(error)}); trying the next option.`);
     }
   }
-  console.error("FREYA search providers failed; upstream error details are intentionally withheld.");
+  console.error("FREYA search providers all failed or are cooling down (reasons logged above).");
   throw new Error("All search providers failed.");
 }

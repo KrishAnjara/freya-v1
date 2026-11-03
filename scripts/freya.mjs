@@ -19,11 +19,12 @@ const SWITCHES = {
   swearing: "She swears a lot and trash-talks.",
   unhinged: "Blunt, chaotic and petty, with no politeness.",
   stayInCharacter: "Dodges \"are you an AI?\" instead of answering.",
-  realisticTiming: "Takes up to a minute to reply when she's busy.",
+  realisticTiming: "Reads your message for 1-5 seconds, and takes up to a minute when she's busy.",
   textsFirst: "Messages you after you've been quiet a while.",
   replyChecks: "Redoes replies that sound off: \"i'm code\", copied lines, repeats.",
   rateLimit: "Caps how many messages you can send. Only turns off on your own machine.",
   thinking: "Hidden thinking on real questions. On a free GPU a reply can take minutes.",
+  camera: "Lets her see your expression. You still switch it on in Settings.",
 };
 const FIXED = "Not switches, always on: nothing sexual involving minors, no non-consent, incest, animals or real people,\n  no slurs, she never says she's human, and she won't help commit real crimes.";
 

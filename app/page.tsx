@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { CSSProperties, FormEvent, KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { User } from "@supabase/supabase-js";
 import { getSupabaseBrowserClient } from "@/lib/supabase-browser";
 import { stopSpeaking } from "@/lib/mouth-drive";
@@ -10,6 +10,8 @@ import { beginStream, failStream, finishStream, recordChunk, recordMeta, recordP
 import { AskDialog, ToastStack, type AskRequest, type Toast } from "@/app/components/Dialogs";
 import { feedbackFor, feedbackToJsonl, loadFeedback, saveFeedback } from "@/lib/feedback";
 import type { FreyaConfig } from "@/lib/freya-config";
+import { faceWorthMentioning, mirrorExpression, type FaceExpression } from "@/lib/face-read";
+import { getFace, startFaceTracking, subscribeFace } from "@/lib/face-tracking";
 import { PRIVATE_VOICE_DOWN } from "@/lib/intimacy";
 import MarkdownContent from "@/app/components/MarkdownContent";
 import VoiceNote, { type RecordedAudio } from "@/app/components/VoiceNote";
@@ -20,8 +22,8 @@ import AttachmentList from "@/app/components/Attachments";
 import { AUDIO_MIMES, AttachmentError, MAX_ATTACHMENTS, type AttachmentKind, type AttachmentMeta, type WireAttachment } from "@/lib/attachments";
 import { deleteAttachments, getAttachment, putAttachment } from "@/lib/attachment-store";
 import { prepareAttachment } from "@/lib/prepare-attachment";
-import { becomesLongForm, bubbleDelay, chopCasually, isAside, takeCompleteParts, wantsLongForm, busyDelay } from "@/lib/reply-parts";
-import { addCuriosity, extractMoodTag, initialMood, loadMood, reactToMessage, resumeMood, saveMood, type MoodState } from "@/lib/mood";
+import { becomesLongForm, bubbleDelay, chopCasually, isAside, paceFactor, takeCompleteParts, wantsLongForm, busyDelay, readingDelay } from "@/lib/reply-parts";
+import { addCuriosity, arrive, extractMoodTag, initialMood, loadMood, mergeVerdict, normalizeMood, reactToMessage, resumeMood, saveMood, type MoodState } from "@/lib/mood";
 import { contentWords } from "@/lib/stream-telemetry";
 import { isReasoningMode, needsReasoning, type ReasoningMode } from "@/lib/reasoning-signal";
 import LongformMessage from "@/app/components/LongformMessage";
@@ -37,7 +39,7 @@ import { PictureCard, VisualizationCard, type PictureInfo, type VisualizationInf
 import { commandHints, parseCommand, pictureRequest } from "@/lib/composer-commands";
 import { FORM_POINTS, validateSpec, type VisualSpec } from "@/lib/visualize";
 import { cloudForSpec } from "@/lib/visualize-client";
-import { chooseExpression, reactionInReply, reactionTo, type Reaction } from "@/lib/expression";
+import { chooseExpression, reactionTo, type Reaction, faceBeatDelay, facePool, nextFaceBeat } from "@/lib/expression";
 import { sanitizeSvg } from "@/lib/svg-safety";
 import { captureExplicitPreference } from "@/lib/memory-capture";
 import { deriveReflectionCandidates } from "@/lib/reflection";
@@ -89,6 +91,8 @@ type Message = {
   reasoned?: string[];
   /** A composer command (/visualize, /image, "draw me…") or a tagged refinement: shown as a chip, never sent as chat. */
   command?: "visualize" | "refine" | "image";
+  /** They started typing while she got to this, so it shows what it answers. */
+  quoted?: boolean;
   /** The user's reaction to this message. */
   reaction?: string;
   /** Her reaction to this message of theirs; it may be her whole answer. */
@@ -135,9 +139,12 @@ const SOUND_KEY = "freya.v1.messageSound";
 const INTIMATE_KEY = "freya.v1.intimateMode";
 const STAY_IN_CHARACTER_KEY = "freya.v1.stayInCharacter";
 const REALISTIC_TIMING_KEY = "freya.v1.realisticTiming";
+const CAMERA_KEY = "freya.v1.camera";
+/** She says something about your face at most this often. */
+const FACE_TEXT_EVERY_MS = 10 * 60_000;
 const REASONING_KEY = "freya.v1.reasoning";
-/** Messages sent within this long of each other are answered together. */
-const BURST_MS = 1500;
+/** A moment for a run of quick messages to arrive before her reply starts; a later one restarts it anyway. */
+const BURST_MS = 600;
 const NO_MESSAGES: Message[] = [];
 const ATTACHMENT_KINDS = new Set<AttachmentKind>(["image", "pdf", "audio", "text", "file"]);
 const supabase = getSupabaseBrowserClient();
@@ -215,6 +222,7 @@ function sanitizeMessage(message: Message): Message {
     ...((REACTIONS as readonly string[]).includes(message.reaction ?? "") ? { reaction: message.reaction } : {}),
     ...((REACTIONS as readonly string[]).includes(message.herReaction ?? "") ? { herReaction: message.herReaction } : {}),
     ...(message.edited === true ? { edited: true } : {}),
+    ...(message.quoted === true ? { quoted: true } : {}),
     ...sanitizeMedia(message),
   };
 }
@@ -336,7 +344,7 @@ function formatRelative(iso: string) {
 }
 
 type ReplyStreamHandlers = {
-  onMeta: (sources: Source[], searchStatus: string, reasoned: string[], herBusy: boolean) => void;
+  onMeta: (sources: Source[], searchStatus: string, reasoned: string[], herBusy: boolean, mood: MoodState | null) => void;
   onProvider: (provider: string) => void;
   onDelta: (delta: string) => void;
   onDone: (data: { truncated?: boolean } | null) => void;
@@ -371,6 +379,7 @@ async function readReplyStream(body: ReadableStream<Uint8Array>, signal: AbortSi
               typeof searchStatus === "string" ? searchStatus : "",
               Array.isArray(reasoned) ? reasoned.filter((name): name is string => typeof name === "string") : [],
               (data as { herBusy?: unknown })?.herBusy === true,
+              normalizeMood((data as { mood?: unknown })?.mood),
             );
           } else if (event === "provider" && typeof (data as { provider?: unknown })?.provider === "string") {
             handlers.onProvider((data as { provider: string }).provider);
@@ -444,6 +453,11 @@ export default function Home() {
   const [editingId, setEditingId] = useState("");
   const [editText, setEditText] = useState("");
   const [copiedId, setCopiedId] = useState("");
+  /** Search inside the open conversation: whether the bar is open, what's typed, which match is shown. */
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchIndex, setSearchIndex] = useState(0);
+  const searchInputRef = useRef<HTMLInputElement>(null);
   /** The /visualize form on the canvas, if any. */
   const [canvasForm, setCanvasForm] = useState<CanvasForm | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -458,6 +472,17 @@ export default function Home() {
   const [atBottom, setAtBottom] = useState(true);
   /** The conversation FREYA is typing in right now, if any. */
   const [typingIn, setTypingIn] = useState("");
+  /** The conversation whose message she's reading, before she starts typing. */
+  const [readingIn, setReadingIn] = useState("");
+  /** Her day has her busy, so she hasn't picked it up yet. */
+  const [herAway, setHerAway] = useState(false);
+  /** Which face she's on: glances away and back, and which one she reads with. */
+  const [faceBeat, setFaceBeat] = useState(0);
+  const [readingBeat, setReadingBeat] = useState(0);
+  /** Camera: whether it's asked for, how it's going, and what it reads on their face. */
+  const [cameraOn, setCameraOn] = useState(false);
+  const [cameraLive, setCameraLive] = useState(false);
+  const [theirFace, setTheirFace] = useState<FaceExpression | null>(null);
   /** Conversations with a reply running or waiting in the queue. */
   const [replyingIn, setReplyingIn] = useState<string[]>([]);
   const [pendingFiles, setPendingFiles] = useState<AttachmentMeta[]>([]);
@@ -491,6 +516,12 @@ export default function Home() {
   const [user, setUser] = useState<User | null>(null);
   /** Signed in with cloud memory configured: notes live in the account, otherwise in this browser. */
   const memoryInCloud = Boolean(supabase && user);
+  const moodAccount = user?.id ?? "";
+  useEffect(() => {
+    if (moodAccountRef.current === moodAccount) return;
+    moodAccountRef.current = moodAccount;
+    if (moodLoadedRef.current) setMood(resumeMood(loadMood(moodAccount)));
+  }, [moodAccount]);
   const [authEmail, setAuthEmail] = useState("");
   const [authPassword, setAuthPassword] = useState("");
   const [authBusy, setAuthBusy] = useState(false);
@@ -518,6 +549,8 @@ export default function Home() {
   const activePostedRef = useRef(0);
   const moodRef = useRef<MoodState>(mood);
   const moodLoadedRef = useRef(false);
+  /** Whose mood this is: each account on this browser has its own. */
+  const moodAccountRef = useRef("");
   const initiativeRef = useRef({ on: true, autonomy: 1 as 0 | 1 | 2 });
   const baseTitleRef = useRef("");
 
@@ -527,7 +560,7 @@ export default function Home() {
   useEffect(() => { soundRef.current = soundOn; }, [soundOn]);
   // Saved only once the stored mood has been read: saving first overwrote it with the blank
   // starting state, so her mood was lost on every reload.
-  useEffect(() => { moodRef.current = mood; if (moodLoadedRef.current) saveMood(mood); }, [mood]);
+  useEffect(() => { moodRef.current = mood; if (moodLoadedRef.current) saveMood(mood, moodAccountRef.current); }, [mood]);
   useEffect(() => { initiativeRef.current = { on: switches.textsFirst ?? initiativeOn, autonomy: autonomyLevel }; }, [switches.textsFirst, initiativeOn, autonomyLevel]);
 
   // Chrome fills the voice list asynchronously, so prime it before the first Speak press.
@@ -549,18 +582,17 @@ export default function Home() {
       setIntimateMode(localStorage.getItem(INTIMATE_KEY) === "true");
       setStayInCharacter(localStorage.getItem(STAY_IN_CHARACTER_KEY) === "true");
       setRealisticTiming(localStorage.getItem(REALISTIC_TIMING_KEY) !== "false");
+      setCameraOn(localStorage.getItem(CAMERA_KEY) === "true");
       setFeedbackCount(loadFeedback().length);
       moodLoadedRef.current = true;
       setMood(resumeMood(loadMood()));
     } catch { /* Defaults remain safe when local settings storage is unavailable. */ }
   }, [hydrated]);
 
-  // A restarted server means she starts again at neutral (lib/mood resumeMood).
   const checkServerRun = useCallback(() => {
     fetch("/api/session", { cache: "no-store" })
       .then((response) => response.ok ? response.json() : null)
       .then((payload) => {
-        if (typeof payload?.bootId === "string") setMood((current) => resumeMood(current, Date.now(), payload.bootId));
         if (payload?.switches && typeof payload.switches === "object") setSwitches(payload.switches);
       })
       .catch(() => { /* Server unreachable: nothing to compare yet. */ });
@@ -587,8 +619,73 @@ export default function Home() {
       localStorage.setItem(INTIMATE_KEY, String(intimateMode));
       localStorage.setItem(STAY_IN_CHARACTER_KEY, String(stayInCharacter));
       localStorage.setItem(REALISTIC_TIMING_KEY, String(realisticTiming));
+      localStorage.setItem(CAMERA_KEY, String(cameraOn));
     } catch { /* Settings still apply for this session. */ }
-  }, [autonomyLevel, privacyMode, autoMemory, memoryEnabled, candidLanguage, notificationsOn, initiativeOn, soundOn, intimateMode, stayInCharacter, realisticTiming, hydrated]);
+  }, [autonomyLevel, privacyMode, autoMemory, memoryEnabled, candidLanguage, notificationsOn, initiativeOn, soundOn, intimateMode, stayInCharacter, realisticTiming, cameraOn, hydrated]);
+
+  // She glances away and back, so she never freezes on one face.
+  const facePoolSize = facePool(mood.name).length;
+  useEffect(() => {
+    const timer = window.setTimeout(() => setFaceBeat((beat) => nextFaceBeat(facePoolSize, beat)), faceBeatDelay(faceBeat % facePoolSize));
+    return () => window.clearTimeout(timer);
+  }, [faceBeat, facePoolSize]);
+
+  // The camera runs only while it's switched on, here and in freya.config.json.
+  const cameraAllowed = hydrated && cameraOn && switches.camera !== false;
+  useEffect(() => {
+    if (!cameraAllowed) return;
+    let cancelled = false;
+    let stop = () => {};
+    const unsubscribe = subscribeFace(() => {
+      const face = getFace();
+      setTheirFace(face.present ? face.expression : null);
+    });
+    startFaceTracking()
+      .then((stopCamera) => { if (cancelled) stopCamera(); else { stop = stopCamera; setCameraLive(true); } })
+      .catch((error) => {
+        if (cancelled) return;
+        setCameraOn(false);
+        notify(reportError("camera", error, error instanceof DOMException && error.name === "NotAllowedError" ? "The browser blocked the camera. Allow it in the site settings to use this." : "The camera couldn't start. It needs a webcam and an internet connection the first time."), "error");
+      });
+    return () => { cancelled = true; unsubscribe(); stop(); setCameraLive(false); setTheirFace(null); };
+    // notify is stable in practice; restarting the camera because of it would be wrong.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cameraAllowed]);
+
+  // A look held long enough that a person would say something. Same limits as texting first, and rarely.
+  const nextFaceTextRef = useRef(0);
+  useEffect(() => {
+    if (!cameraLive) return;
+    const timer = window.setInterval(() => {
+      const face = getFace();
+      const now = Date.now();
+      const { on, autonomy } = initiativeRef.current;
+      if (!face.present || !faceWorthMentioning(face.expression, now - face.since)) return;
+      if (!on || autonomy === 0 || workerRef.current || jobsRef.current.length || now < nextFaceTextRef.current) return;
+      if (moodRef.current.unprompted >= 2 || now - moodRef.current.lastUserAt < 45_000 || composerRef.current?.value.trim()) return;
+      const conversation = conversationsRef.current.find((item) => item.id === activeIdRef.current);
+      const last = conversation?.messages.at(-1);
+      if (!conversation || !last || last.role !== "assistant") return;
+      nextFaceTextRef.current = now + FACE_TEXT_EVERY_MS;
+      enqueueReply({ conversationId: conversation.id, targetId: last.id, initiative: true });
+    }, 3000);
+    return () => window.clearInterval(timer);
+    // Reads everything through refs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cameraLive]);
+
+  // Her face answers theirs straight away, but doesn't keep flinching at every change.
+  const lastMirrorRef = useRef(0);
+  useEffect(() => {
+    const expression = theirFace && mirrorExpression(theirFace);
+    if (!expression || Date.now() - lastMirrorRef.current < 45_000) return;
+    lastMirrorRef.current = Date.now();
+    react({ expression, ms: 3500 });
+  }, [theirFace, react]);
+
+  // Anything they type while she's getting to their message makes her reply show what it answers.
+  const typedSinceSentRef = useRef(false);
+  useEffect(() => { if (input.trim()) typedSinceSentRef.current = true; }, [input]);
 
   useEffect(() => {
     let active = true;
@@ -1468,7 +1565,6 @@ export default function Home() {
     // FREYA has now read everything up to the message she is answering.
     patchConversation(job.conversationId, (messages) => messages.map((message, index) =>
       (message.queued || message.failed) && index <= targetIndex ? { ...message, queued: false, failed: false } : message));
-    setTypingIn(job.conversationId);
     // Same rule the route uses, so the label only shows when the panel really runs.
     if (!initiative && !privacyMode && needsReasoning(latestUserText, serverSetup.reasoning)) setDeliberatingIn(job.conversationId);
     const controller = new AbortController();
@@ -1478,20 +1574,39 @@ export default function Home() {
 
     const posted: string[] = [];
     let provider = "";
-    let delivery = Promise.resolve();
     let lastPostedAt = performance.now();
-    /** When she's busy she picks up later, and isn't shown typing until she does. */
+    // She reads their message before she starts typing, while the reply is already being written
+    // (the request below goes out now). A fast server still waits; a slow one shows her typing.
+    const reads = (switches.realisticTiming ?? realisticTiming) && !initiative && !job.extraPrompt && !job.turn && target.role === "user";
+    const readFor = reads ? readingDelay(latestUserText, Math.random, moodRef.current.energy) : 0;
+    // Counted from when they sent it, not from when this reply got its turn.
+    const sinceSent = Math.max(0, (Date.now() - Date.parse(target.at ?? "")) || 0);
+    let readUntil = performance.now() + readFor - sinceSent;
+    /** When she's busy she picks up later, and isn't reading or typing until she does. */
     let pickUpAt = 0;
+    typedSinceSentRef.current = false;
+    if (reads) {
+      setReadingBeat(Math.floor(Math.random() * 12));
+      setReadingIn(job.conversationId);
+    } else {
+      setTypingIn(job.conversationId);
+    }
+    const readDone = reads ? (async () => {
+      while (!controller.signal.aborted && performance.now() < readUntil) {
+        if (performance.now() >= pickUpAt) setHerAway(false);
+        await delay(Math.min(200, Math.max(1, readUntil - performance.now())));
+      }
+      setHerAway(false);
+      if (controller.signal.aborted) return;
+      setReadingIn("");
+      setTypingIn(job.conversationId);
+      lastPostedAt = performance.now();
+    })() : Promise.resolve();
+    let delivery = readDone;
     const postBubble = (text: string) => {
       const first = posted.length === 0 && !job.turn;
       delivery = delivery.then(async () => {
-        if (first && pickUpAt > performance.now()) {
-          await delay(pickUpAt - performance.now());
-          if (controller.signal.aborted) return;
-          setTypingIn(job.conversationId);
-          lastPostedAt = performance.now();
-        }
-        const wait = bubbleDelay(text, posted.length > 0) - (performance.now() - lastPostedAt);
+        const wait = bubbleDelay(text, posted.length > 0, moodRef.current.energy) - (performance.now() - lastPostedAt);
         if (wait > 0) await delay(wait);
         if (controller.signal.aborted) return;
         // A reply that turns out long switches to text for the rest: nobody wants five minutes of voice notes.
@@ -1502,13 +1617,13 @@ export default function Home() {
           id: id(), role: "assistant", content: text, turn, at: new Date().toISOString(),
           ...(replyTo ? { replyTo } : {}), ...(provider ? { provider } : {}), ...(spoken ? { spoken: true } : {}),
           ...(initiative ? { initiative: true } : {}),
+          ...(first && typedSinceSentRef.current && replyTo ? { quoted: true } : {}),
         };
         posted.push(message.id);
         activePostedRef.current += 1;
         patchConversation(job.conversationId, (messages) => [...messages, message]);
         lastPostedAt = performance.now();
         announceReply(job.conversationId, message, first);
-        if (job.conversationId === activeIdRef.current) react(reactionInReply(text));
       });
     };
 
@@ -1595,9 +1710,11 @@ export default function Home() {
           autonomyLevel,
           candidLanguage,
           mood: moodRef.current,
+          appraise: !initiative && !job.extraPrompt,
           initiative,
           intimateMode,
           stayInCharacter,
+          ...(cameraLive && getFace().present ? { seen: getFace().expression } : {}),
           historySummary: summarizeOlderMessages(older),
           stream: true,
         }),
@@ -1616,9 +1733,10 @@ export default function Home() {
         if (Array.isArray(payload.sources)) sources = payload.sources;
       } else if (response.body && type.includes("text/event-stream")) {
         await readReplyStream(response.body, controller.signal, {
-          onMeta: (found, searchStatus, panel, herBusy) => {
+          onMeta: (found, searchStatus, panel, herBusy, verdict) => {
+            if (verdict) setMood((current) => mergeVerdict(current, verdict));
             recordMeta(found.length, searchStatus); sources = found; reasoned = panel; setDeliberatingIn("");
-            if (herBusy && (switches.realisticTiming ?? realisticTiming) && !initiative && !job.extraPrompt && !job.turn) { pickUpAt = performance.now() + busyDelay(); setTypingIn(""); }
+            if (herBusy && reads) { pickUpAt = performance.now() + busyDelay(); readUntil = pickUpAt + readFor; setHerAway(true); }
           },
           onProvider: (name) => { recordProvider(name); provider = name; },
           onDelta: (delta) => {
@@ -1663,6 +1781,8 @@ export default function Home() {
       notify(reportError("chat", error, reason), "error");
     } finally {
       if (activeChatRequest.current === controller) activeChatRequest.current = null;
+      setReadingIn("");
+      setHerAway(false);
       setTypingIn("");
       setDeliberatingIn("");
     }
@@ -1690,10 +1810,11 @@ export default function Home() {
     };
   }, [hydrated]);
 
-  /** How a message from them lands on her: mood, and sometimes a new thing to wonder about. */
+  /** A message from them arriving: their being here, and sometimes a new thing to wonder about. */
   function feel(text: string) {
     setMood((current) => {
-      let next = reactToMessage(resumeMood(current), text, Date.now(), { intimate: intimateMode && switches.sexTalk !== false });
+      // That they're here. What they said is judged with the reply (lib/mood-appraisal).
+      let next = arrive(current);
       const words = contentWords(text).filter((word) => word.length >= 6);
       if (words.length && Math.random() < 0.35) next = addCuriosity(next, words[Math.floor(Math.random() * words.length)]);
       return next;
@@ -1881,7 +2002,7 @@ export default function Home() {
     patchConversation(activeIdRef.current, (messages) => messages.map((item) => item.id === message.id ? { ...item, reaction: next } : item));
     setReactingToId("");
     // A reaction is part of how the conversation is going, so it can move her mood like a message.
-    if (next) feel(next);
+    if (next) setMood((current) => reactToMessage(resumeMood(current), next, Date.now(), { intimate: intimateMode && switches.sexTalk !== false }));
   }
 
   async function copyMessage(message: Message) {
@@ -1942,6 +2063,17 @@ export default function Home() {
   function removePendingFile(attachmentId: string) {
     setPendingFiles((current) => current.filter((item) => item.id !== attachmentId));
     void deleteAttachments([attachmentId]);
+  }
+
+  /** The camera is opt-in: it says what it does first, and the browser asks as well. */
+  async function toggleCamera(enabled: boolean) {
+    if (!enabled) { setCameraOn(false); return; }
+    const confirmed = await askFor({
+      title: "Let her see you?",
+      body: "FREYA reads your expression from your camera, follows you with her eyes, reacts with her face, and sometimes says something about how you look. It runs in this browser: no video is stored or sent anywhere, only a one-word guess like \"smiling\", which goes to whichever model is answering. It doesn't identify who you are, and it can be wrong. The first time it downloads a small face model.",
+      confirmLabel: "Turn on camera",
+    });
+    if (confirmed) setCameraOn(true);
   }
 
   /** Turning adult roleplay on needs an explicit 18+ confirmation; turning it off doesn't. */
@@ -2047,6 +2179,40 @@ export default function Home() {
     window.setTimeout(() => element.classList.remove("flash"), 1400);
   }
 
+  /** Moves to the next or previous search match and scrolls to it. */
+  function stepSearch(direction: 1 | -1) {
+    if (!searchMatches.length) return;
+    const next = (searchIndex + direction + searchMatches.length) % searchMatches.length;
+    setSearchIndex(next);
+    jumpToMessage(searchMatches[next]);
+  }
+
+  function closeSearch() {
+    setSearchOpen(false);
+    setSearchQuery("");
+    setSearchIndex(0);
+  }
+
+  /**
+   * Asks for another take on her latest answer: her messages for that turn are dropped and the
+   * message she was answering gets a fresh reply. Pictures and visualisations stay.
+   */
+  function regenerateReply(message: Message) {
+    if (replyingHere) { notify("Wait for her to finish replying first.", "info"); return; }
+    const conversationId = activeIdRef.current;
+    const index = messages.findIndex((item) => item.id === message.id);
+    let answered = -1;
+    for (let position = index; position >= 0; position -= 1) {
+      if (messages[position].role === "user" && !messages[position].command) { answered = position; break; }
+    }
+    if (answered < 0) return;
+    const targetId = messages[answered].id;
+    patchConversation(conversationId, (current) => current.filter((item, position) =>
+      position <= answered || item.role !== "assistant" || item.visualization || item.picture));
+    setTruncatedReplyId("");
+    enqueueReply({ conversationId, targetId });
+  }
+
   function handleKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
     if (event.key === "Escape" && (replyingToId || refiningId)) { event.preventDefault(); setReplyingToId(""); setRefiningId(""); return; }
     if (event.key === "Enter" && !event.shiftKey) {
@@ -2063,6 +2229,13 @@ export default function Home() {
         && ["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement.tagName);
       if (modifier && event.key.toLowerCase() === "k") { event.preventDefault(); newConversation(); return; }
       if (modifier && event.key.toLowerCase() === "b") { event.preventDefault(); setDrawerOpen((open) => !open); return; }
+      // Ctrl/Cmd+Shift+F searches this conversation; plain Ctrl+F stays the browser's own find.
+      if (modifier && event.shiftKey && event.key.toLowerCase() === "f") {
+        event.preventDefault();
+        setSearchOpen(true);
+        window.requestAnimationFrame(() => searchInputRef.current?.focus());
+        return;
+      }
       if (event.key === "Escape" && !settingsOpen && window.innerWidth <= 700) { setDrawerOpen(false); return; }
       if (event.key === "/" && !typing && !settingsOpen) { event.preventDefault(); composerRef.current?.focus(); }
     };
@@ -2108,9 +2281,19 @@ export default function Home() {
   const latestAssistantText = [...messages].reverse().find((message) => message.role === "assistant")?.content || "";
   const remainingChars = MAX_INPUT_CHARS - input.length;
   const thread = useMemo(() => describeThread(messages), [messages]);
+  /** Ids of the messages containing the search text, oldest first. */
+  const searchMatches = useMemo(() => {
+    const needle = searchQuery.trim().toLowerCase();
+    if (!searchOpen || needle.length < 2) return [];
+    return messages.filter((message) => !message.command && message.content.toLowerCase().includes(needle)).map((message) => message.id);
+  }, [messages, searchOpen, searchQuery]);
   const replyingHere = replyingIn.includes(activeId);
   // Her face: a fresh reaction first, then thinking while she works out a reply, then her mood.
-  const portraitExpression = chooseExpression(mood.name, typingIn === activeId && Boolean(typingIn), reaction);
+  // From the moment it's sent until she starts typing.
+  const lastSent = messages.at(-1);
+  const received = replyingHere && typingIn !== activeId && lastSent?.role === "user" && !lastSent.command;
+  const reading = received && !herAway && (!typingIn || readingIn === activeId);
+  const portraitExpression = chooseExpression(mood.name, typingIn === activeId && Boolean(typingIn), reaction, undefined, { beat: reading ? readingBeat : faceBeat, reading });
   // A command chip (a refinement with no card after it) isn't waiting for an answer.
   // Nor is a message she answered with just a reaction.
   const awaitingReply = hydrated && !replyingHere && messages.at(-1)?.role === "user" && !messages.at(-1)?.command && !messages.at(-1)?.herReaction;
@@ -2160,7 +2343,8 @@ export default function Home() {
               <div className="dialog-setting-row"><div><strong>Reply style</strong><span>Choose FREYA&apos;s conversational tone.</span></div><select value={style} onChange={(event) => setStyle(event.target.value as Style)} aria-label="Reply style"><option value="adaptive">Adaptive</option><option value="friendly">Friendly</option><option value="direct">Direct</option><option value="professional">Professional</option><option value="playful">Playful</option></select></div>
               <div className="dialog-setting-row"><div><strong>Candid language</strong><span>She swears a lot and trash-talks you when you&apos;ve earned it. No slurs or threats, and none of it when you&apos;re hurting.</span></div><label className="toggle-row"><span className="sr-only">Candid language</span><input type="checkbox" checked={switches.swearing ?? candidLanguage} disabled={switches.swearing !== undefined} onChange={(event) => setCandidLanguage(event.target.checked)} /></label></div>
               <div className="dialog-setting-row"><div><strong>Stay in character</strong><span>I know Freya is an AI, don&apos;t remind me. If you ask, she dodges instead of answering, and she never says she&apos;s human. She still tells you the truth if you&apos;re upset, getting attached, or say &ldquo;drop the act&rdquo;.</span></div><label className="toggle-row"><span className="sr-only">Stay in character</span><input type="checkbox" checked={switches.stayInCharacter ?? stayInCharacter} disabled={switches.stayInCharacter !== undefined} onChange={(event) => setStayInCharacter(event.target.checked)} /></label></div>
-              <div className="dialog-setting-row"><div><strong>Realistic timing</strong><span>When she&apos;s at work or in a lecture, her first reply can take up to a minute.</span></div><label className="toggle-row"><span className="sr-only">Realistic timing</span><input type="checkbox" checked={switches.realisticTiming ?? realisticTiming} disabled={switches.realisticTiming !== undefined} onChange={(event) => setRealisticTiming(event.target.checked)} /></label></div>
+              <div className="dialog-setting-row"><div><strong>Camera</strong><span>She reads your expression, follows you with her eyes and reacts. It runs in this browser: no video is stored or sent, only a one-word guess. It doesn&apos;t identify you.</span></div><label className="toggle-row"><span className="sr-only">Camera</span><input type="checkbox" checked={cameraOn && switches.camera !== false} disabled={switches.camera === false} onChange={(event) => void toggleCamera(event.target.checked)} /></label></div>
+              <div className="dialog-setting-row"><div><strong>Realistic timing</strong><span>She reads your message for 1-5 seconds before typing, and when she&apos;s at work or in a lecture her first reply can take up to a minute.</span></div><label className="toggle-row"><span className="sr-only">Realistic timing</span><input type="checkbox" checked={switches.realisticTiming ?? realisticTiming} disabled={switches.realisticTiming !== undefined} onChange={(event) => setRealisticTiming(event.target.checked)} /></label></div>
               <div className="dialog-setting-row"><div><strong>FREYA texts first</strong><span>She may message you after you&apos;ve been quiet a while, at most twice without a reply. Off at autonomy level 0. Only while FREYA is open in a tab.</span></div><label className="toggle-row"><span className="sr-only">FREYA texts first</span><input type="checkbox" checked={switches.textsFirst ?? initiativeOn} disabled={switches.textsFirst !== undefined} onChange={(event) => setInitiativeOn(event.target.checked)} /></label></div>
               <div className="dialog-setting-row"><div><strong>Autonomy</strong><span>How much she does on her own: texting first, and suggesting new tastes for her profile.</span></div><select value={autonomyLevel} onChange={(event) => setAutonomyLevel(Number(event.target.value) as 0 | 1 | 2)} aria-label="Autonomy level"><option value={0}>Level 0 · Reply only</option><option value={1}>Level 1 · Propose for approval</option><option value={2}>Level 2 · Approve tentative interests</option></select></div>
               <div className="dialog-setting-row"><div><strong>Intimate roleplay (18+)</strong><span>Sexting and adult roleplay when you lead there, or when she&apos;s in a playful mood; she switches back to normal chat when you do. {serverSetup.voiceOnThisMachine ? "Those turns run on your local Ollama model." : "Those turns run on your voice server, never on Groq or Gemini."}</span></div><label className="toggle-row"><span className="sr-only">Intimate roleplay</span><input type="checkbox" checked={intimateMode && switches.sexTalk !== false} disabled={switches.sexTalk === false} onChange={(event) => void toggleIntimateMode(event.target.checked)} /></label></div>
@@ -2221,9 +2405,24 @@ export default function Home() {
           <div className="center-status-bar">
             <span className="status-name">FREYA</span>
             <span className="status-separator" aria-hidden="true">·</span>
-            <span className="status-presence" aria-live="polite">{deliberatingIn === activeId && deliberatingIn ? "thinking it through…" : typingIn === activeId && typingIn ? "typing…" : replyingHere ? "will reply in a moment" : loading ? "replying in another chat" : `online · ${mood.name}`}</span>
+            <span className="status-presence" aria-live="polite">{received && herAway ? "busy, will see it soon" : reading ? "reading…" : deliberatingIn === activeId && deliberatingIn ? "thinking it through…" : typingIn === activeId && typingIn ? "typing…" : replyingHere ? "will reply in a moment" : loading ? "replying in another chat" : `online · ${mood.name}`}</span>
             <span className="status-trailing" title={activeConversation?.title}>{activeConversation?.title ?? UNTITLED}</span>
+            {messages.length > 0 && <button type="button" className="status-search-button" onClick={() => { if (searchOpen) closeSearch(); else { setSearchOpen(true); window.requestAnimationFrame(() => searchInputRef.current?.focus()); } }} aria-pressed={searchOpen} aria-label="Search this conversation" title="Search this conversation (Ctrl+Shift+F)">⌕</button>}
           </div>
+          {searchOpen && <div className="chat-search" role="search">
+            <input
+              ref={searchInputRef} type="search" value={searchQuery} placeholder="Search this conversation" aria-label="Search this conversation"
+              onChange={(event) => { setSearchQuery(event.target.value); setSearchIndex(0); }}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") { event.preventDefault(); closeSearch(); return; }
+                if (event.key === "Enter") { event.preventDefault(); stepSearch(event.shiftKey ? -1 : 1); }
+              }}
+            />
+            <span className="chat-search-count" aria-live="polite">{searchQuery.trim().length < 2 ? "" : searchMatches.length ? `${Math.min(searchIndex, searchMatches.length - 1) + 1} of ${searchMatches.length}` : "no matches"}</span>
+            <button type="button" onClick={() => stepSearch(-1)} disabled={!searchMatches.length} aria-label="Previous match">↑</button>
+            <button type="button" onClick={() => stepSearch(1)} disabled={!searchMatches.length} aria-label="Next match">↓</button>
+            <button type="button" onClick={closeSearch} aria-label="Close search">×</button>
+          </div>}
           <div
             className={`composer-wrap ${dragActive ? "drag-active" : ""}`}
             onDragOver={(event) => { if (event.dataTransfer.types.includes("Files")) { event.preventDefault(); setDragActive(true); } }}
@@ -2278,7 +2477,7 @@ export default function Home() {
                 {messages.map((message, index) => {
                   const info = thread[index];
                   const clock = info.endsRun ? formatClock(message.at) : "";
-                  return <article key={message.id} id={`message-${message.id}`} className={`message ${message.role} ${message.longform ? "longform" : ""} ${info.startsRun ? "run-start" : "run-continued"} ${info.endsRun ? "run-end" : ""}`}>
+                  return <article key={message.id} id={`message-${message.id}`} className={`message ${message.role} ${message.longform ? "longform" : ""} ${searchMatches.includes(message.id) ? (searchMatches[Math.min(searchIndex, searchMatches.length - 1)] === message.id ? "search-hit search-current" : "search-hit") : ""} ${info.startsRun ? "run-start" : "run-continued"} ${info.endsRun ? "run-end" : ""}`}>
                     <div className="avatar" aria-hidden="true">{message.role === "assistant" ? "F" : "Y"}</div>
                     <div className="message-body">
                       {info.startsRun && <div className="message-heading">
@@ -2326,6 +2525,7 @@ export default function Home() {
                         <button type="button" onClick={() => setReactingToId((current) => current === message.id ? "" : message.id)} aria-expanded={reactingToId === message.id} aria-label={`React to: ${messagePreview(message, 60)}`} title="React">☺</button>
                         <button type="button" onClick={() => void copyMessage(message)} aria-label={`Copy: ${messagePreview(message, 60)}`} title={copiedId === message.id ? "Copied" : "Copy"}>{copiedId === message.id ? "✓" : "⧉"}</button>
                         {message.role === "user" && !message.voice && !message.visualization && !message.picture && <button type="button" onClick={() => { if (replyingHere) { notify("Wait for her to finish replying, then edit it.", "info"); return; } setEditText(message.content); setEditingId(message.id); setReactingToId(""); }} aria-label={`Edit: ${messagePreview(message, 60)}`} title="Edit">✎</button>}
+                        {message.role === "assistant" && index === messages.length - 1 && !message.initiative && !replyingHere && message.content.trim() && <button type="button" onClick={() => regenerateReply(message)} aria-label={`Another take on: ${messagePreview(message, 60)}`} title="Another take">↻</button>}
                         {message.role === "assistant" && message.content.trim() && <button type="button" onClick={() => void markNotHer(message)} aria-label={`Not her: ${messagePreview(message, 60)}`} title="Not her">⚑</button>}
                         {reactingToId === message.id && <div className="reaction-picker" role="group" aria-label="Reactions">
                           {REACTIONS.map((reaction) => <button type="button" key={reaction} className={message.reaction === reaction ? "selected" : ""} onClick={() => toggleReaction(message, reaction)} aria-label={`React with ${reaction}`}>{reaction}</button>)}
@@ -2349,10 +2549,11 @@ export default function Home() {
                     </div>
                   </article>;
                 })}
+                {received && <div className="received-note" role="status">message received</div>}
                 {typingIn === activeId && typingIn && <article className="message assistant typing-row" aria-live="polite">
                   <div className="avatar" aria-hidden="true">F</div>
                   <div className="message-body">
-                    <div className="typing" aria-label={deliberatingIn === activeId ? "FREYA is thinking it through" : "FREYA is typing"}><i/><i/><i/>{deliberatingIn === activeId && <span className="typing-label">thinking it through…</span>}</div>
+                    <div className="typing" style={{ "--typing-speed": paceFactor(mood.energy) } as CSSProperties} aria-label={deliberatingIn === activeId ? "FREYA is thinking it through" : "FREYA is typing"}><i/><i/><i/>{deliberatingIn === activeId && <span className="typing-label">thinking it through…</span>}</div>
                   </div>
                 </article>}
                 <div ref={bottomRef}/>
@@ -2369,7 +2570,7 @@ export default function Home() {
           <div className="profile-name-row"><h2>FREYA, 20</h2><span className="profile-state">ONLINE · {mood.name.toUpperCase()}</span></div>
           <p className="profile-description">Hey, I&apos;m Freya. I read too much, stay up too late, and have opinions about most things.</p>
           <div className="profile-sigil" aria-hidden="true">✦</div>
-          <p className="profile-footnote">Your portrait, lit as a 3D relief. Her expression follows her simulated mood and the conversation; no face scanning or recognition.</p>
+          <p className="profile-footnote">{cameraAllowed && !cameraLive ? "Camera starting…" : cameraLive ? `Camera on${theirFace ? `: you look ${theirFace}` : ", looking for you"}. It reads your expression in this browser and only that word is sent. It doesn't identify you.` : "Your portrait, lit as a 3D relief. Her expression follows her simulated mood and the conversation."}</p>
         </aside>
       </div>
     </main>

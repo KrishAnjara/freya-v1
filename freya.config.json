@@ -8,5 +8,6 @@
   "textsFirst": true,
   "replyChecks": true,
   "rateLimit": false,
-  "thinking": false
+  "thinking": false,
+  "camera": true
 }

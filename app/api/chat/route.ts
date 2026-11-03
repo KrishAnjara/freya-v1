@@ -3,6 +3,7 @@ import { createClient } from "@supabase/supabase-js";
 import { isIP } from "node:net";
 import { buildLocalSystemPrompt, buildSystemPrompt, UNHINGED_PROMPT, type MemoryItem } from "@/lib/personality";
 import { loadConfig } from "@/lib/freya-config";
+import { normalizeSeen, seenSection } from "@/lib/face-read";
 import { CRIME_REPLY, crimeRequest } from "@/lib/crime-limit";
 import { ChatInputError, generateReply, isHybridMode, ollamaThinking, isServerMode, resolveProviders, streamReply, validateMessages, type ChatMessage, type ProviderName } from "@/lib/llm";
 import { AttachmentError, attachmentNote, MAX_TEXT_ATTACHMENT_CHARS, MAX_WIRE_DATA_CHARS, parseWireAttachments, type WireAttachment } from "@/lib/attachments";
@@ -18,7 +19,8 @@ import { normalizeCharacterProfile } from "@/lib/character-profile";
 import { FreyaServiceError, getFreyaServiceConfig, requestServiceReply, streamServiceReply } from "@/lib/freya-service";
 import { containsSensitiveCredential, redactSensitiveCredentials } from "@/lib/sensitive-data";
 import { isCoolingDown, markFailure, markSuccess } from "@/lib/provider-health";
-import { initiativePrompt, moodPrompt, normalizeMood } from "@/lib/mood";
+import { applyAppraisal, initiativePrompt, moodPrompt, normalizeMood, reactToMessage } from "@/lib/mood";
+import { appraiseMood } from "@/lib/mood-appraisal";
 import { INTIMACY_PROMPT, PLAYFUL_HEAT_PROMPT, PRIVATE_VOICE_DOWN, isIntimateTone, mentionsMinors, romanticMinorRequest, soundsUpset } from "@/lib/intimacy";
 import { canonSection, closenessOf, normalizeTotals } from "@/lib/canon";
 import { herMoment } from "@/lib/her-day";
@@ -641,7 +643,12 @@ export async function POST(request: Request) {
     const autonomyInput = requestData.autonomyLevel;
     const autonomyLevel: 0 | 1 | 2 = autonomyInput === 0 || autonomyInput === 2 ? autonomyInput : 1;
     // The browser keeps FREYA's mood; it is validated and rendered from a fixed table here.
-    const mood = normalizeMood(requestData.mood);
+    const moodBefore = normalizeMood(requestData.mood);
+    // Their latest message moves her mood here, so this reply already feels it. A model reads the
+    // conversation; anything intimate or local stays off the cloud and uses the rules in lib/mood.
+    const judges = requestData.appraise === true && Boolean(moodBefore);
+    const appraisal = judges && !privacyMode && !intimateTurn && moodBefore!.name !== "horny" ? await appraiseMood(moodBefore!, messages, request.signal) : null;
+    const mood = !judges ? moodBefore : appraisal ? applyAppraisal(moodBefore!, appraisal, now.getTime()) : reactToMessage(moodBefore!, lastText, now.getTime(), { intimate: intimateMode });
     const summaryInput = requestData.historySummary;
     const historySummary = typeof summaryInput === "string" ? redactSensitiveCredentials(summaryInput.trim().slice(0, 1800)) : "";
     const summaryContext = historySummary ? `
@@ -693,9 +700,12 @@ ${historySummary}
         : privacyMode ? { provider: "ollama" as const, fallbackEnabled: false } : {};
     const voice = resolveProviders(providerOptions).primary;
     const ownVoice = voice === "ollama" || voice === "server";
-    const playfulHeat = intimateMode && !visual && ownVoice && mood?.name === "playful" && !soundsUpset(lastText);
+    const playfulHeat = intimateMode && !visual && ownVoice && (mood?.name === "playful" || mood?.name === "horny") && !soundsUpset(lastText);
+    // "horny" only reaches her own model, with the switch on. The rest of the prompt can go to a cloud
+    // fallback, so there it reads as playful.
+    const sharedMood = mood?.name === "horny" ? { ...mood, name: "playful" as const, why: "laughing" as const } : mood;
     const intimateGuidance = !soundsUpset(lastText) && (intimateTurn || playfulHeat)
-      ? `\n\n${INTIMACY_PROMPT}${playfulHeat ? `\n\n${PLAYFUL_HEAT_PROMPT}` : ""}`
+      ? `\n\n${INTIMACY_PROMPT}${playfulHeat ? `\n\n${PLAYFUL_HEAT_PROMPT}` : ""}${playfulHeat && mood?.name === "horny" ? `\n\n${moodPrompt(mood)}` : ""}`
       : "";
     const system = persona +
       canonSection(closeness) +
@@ -711,12 +721,13 @@ ${historySummary}
       (turnAttachments.size && !attachmentNotes ? VISION_NOTE : "") +
       (mood ? `
 
-${moodPrompt(mood)}` : "") +
+${moodPrompt(sharedMood!)}` : "") +
       // Texting first is an autonomy feature: level 0 means reply-only.
       (mood && requestData.initiative === true && autonomyLevel > 0 ? `
 
 ${initiativePrompt(mood)}` : "") +
       (config.unhinged ? `\n\n${UNHINGED_PROMPT}` : "") +
+      (config.camera === false ? "" : seenSection(normalizeSeen(requestData.seen), textingFirst)) +
       // Last, because the last thing it reads is what a model follows most closely.
       (textingFirst ? "" : lastWord(lastText)) +
       honestySection(lastText, stayInCharacter);
@@ -787,7 +798,7 @@ ${initiativePrompt(mood)}` : "") +
     const stream = new ReadableStream<Uint8Array>({
       async start(controller) {
         // Metadata first so the client can render sources before any text arrives.
-        controller.enqueue(send("meta", { sources, searchStatus, memoryCount: memories.length, reasoned: panel?.analyses.map((analysis) => analysis.analyst) ?? [], herBusy: herMoment(now).busy }));
+        controller.enqueue(send("meta", { sources, searchStatus, memoryCount: memories.length, reasoned: panel?.analyses.map((analysis) => analysis.analyst) ?? [], herBusy: herMoment(now).busy, ...(judges ? { mood } : {}) }));
         const outcome: { truncated: boolean; parts: number; provider?: ProviderName } = { truncated: false, parts: 1 };
         try {
           let serviceEmitted = false;

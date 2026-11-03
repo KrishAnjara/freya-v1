@@ -21,7 +21,8 @@
 
 import { grokComplete, grokModel, hasGrok } from "@/lib/grok";
 import { type ChatMessage } from "@/lib/llm";
-import { isCoolingDown, markFailure, markSuccess, ProviderHttpError, retryAfterOf } from "@/lib/provider-health";
+import { coolingDownMessage, describeFailure, isCoolingDown, markSuccess, ProviderHttpError, providerErrorDetail, recordFailure, retryAfterOf } from "@/lib/provider-health";
+import { geminiModel, geminiThinking } from "@/lib/gemini-config";
 
 /** Each analyst's deadline. Reasoning takes a few seconds; a stuck one must not hold the reply. */
 const ANALYST_TIMEOUT_MS = 16_000;
@@ -72,7 +73,7 @@ async function groqAnalyst(system: string, user: string, signal: AbortSignal): P
   const model = reasoningModel();
   const health = `groq:${model}`;
   if (!key) throw new Error("no key");
-  if (isCoolingDown(health)) throw new Error("cooling down");
+  if (isCoolingDown(health)) throw new Error(coolingDownMessage(health));
   try {
     const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
       method: "POST",
@@ -89,13 +90,13 @@ async function groqAnalyst(system: string, user: string, signal: AbortSignal): P
       cache: "no-store",
     });
     const payload = await response.json().catch(() => null);
-    if (!response.ok) throw new ProviderHttpError(`Groq analyst failed (${response.status}).`, response.status, retryAfterOf(response));
+    if (!response.ok) throw new ProviderHttpError(`Groq analyst failed (${response.status}).`, response.status, retryAfterOf(response), providerErrorDetail(payload));
     const text = payload?.choices?.[0]?.message?.content;
     if (typeof text !== "string" || !text.trim()) throw new Error("empty analysis");
     markSuccess(health);
     return { analyst: "groq", model, text: text.trim() };
   } catch (error) {
-    if (!signal.aborted) markFailure(health, error instanceof ProviderHttpError ? error.status : undefined, error instanceof ProviderHttpError ? error.retryAfterSeconds : undefined);
+    if (!signal.aborted) { recordFailure(health, error); console.warn(`FREYA reasoning panel: Groq ${model} failed (${describeFailure(error)}).`); }
     throw error;
   }
 }
@@ -107,16 +108,17 @@ async function logicAnalyst(system: string, user: string, signal: AbortSignal): 
     return { analyst: "grok", model: grokModel(), text: await grokComplete(system, user, { signal, timeoutMs: GROK_ANALYST_MS, maxTokens: 4000 }) };
   } catch (error) {
     if (signal.aborted) throw error;
+    console.warn(`FREYA reasoning panel: Grok unavailable (${describeFailure(error)}); using Groq.`);
     return groqAnalyst(system, user, signal);
   }
 }
 
 async function geminiAnalyst(system: string, user: string, signal: AbortSignal): Promise<Analysis> {
   const key = process.env.GEMINI_API_KEY;
-  const model = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+  const model = geminiModel();
   const health = `gemini:${model}`;
   if (!key) throw new Error("no key");
-  if (isCoolingDown(health)) throw new Error("cooling down");
+  if (isCoolingDown(health)) throw new Error(coolingDownMessage(health));
   try {
     const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`, {
       method: "POST",
@@ -124,19 +126,19 @@ async function geminiAnalyst(system: string, user: string, signal: AbortSignal):
       body: JSON.stringify({
         systemInstruction: { parts: [{ text: system }] },
         contents: [{ role: "user", parts: [{ text: user }] }],
-        generationConfig: { temperature: 0.3, maxOutputTokens: 4000 },
+        generationConfig: { temperature: 0.3, maxOutputTokens: 4000, ...geminiThinking(model) },
       }),
       signal,
       cache: "no-store",
     });
     const payload = await response.json().catch(() => null);
-    if (!response.ok) throw new ProviderHttpError(`Gemini analyst failed (${response.status}).`, response.status, retryAfterOf(response));
+    if (!response.ok) throw new ProviderHttpError(`Gemini analyst failed (${response.status}).`, response.status, retryAfterOf(response), providerErrorDetail(payload));
     const text = payload?.candidates?.[0]?.content?.parts?.map((part: { text?: string }) => part.text || "").join("").trim();
     if (!text) throw new Error("empty analysis");
     markSuccess(health);
     return { analyst: "gemini", model, text };
   } catch (error) {
-    if (!signal.aborted) markFailure(health, error instanceof ProviderHttpError ? error.status : undefined);
+    if (!signal.aborted) { recordFailure(health, error); console.warn(`FREYA reasoning panel: Gemini ${model} failed (${describeFailure(error)}).`); }
     throw error;
   }
 }

@@ -158,6 +158,60 @@ test("clear requests for how to commit a crime get a fixed answer and no model; 
   }
 });
 
+test("the horny mood is never shown to a cloud model, and needs the switch", async () => {
+  await useConfig({ rateLimit: false });
+  const mood = { name: "horny", energy: 0.8, warmth: 0.8, since: 1, curiosities: [], unprompted: 0, nextInitiativeAt: 0, lastUserAt: Date.now(), turns: 0, quiet: 0, why: "turnedOn" };
+  const cloud = await chat(say("what should i cook", { mood, intimateMode: true }));
+  assert.match(cloud.calls[0].url, /groq/);
+  assert.doesNotMatch(cloud.calls[0].system, /Mood: horny|turned on|INTIMATE ROLEPLAY/);
+  setEnv("AI_PROVIDER", "ollama");
+  const own = await chat(say("what should i cook", { mood, intimateMode: true }));
+  assert.match(own.calls[0].system, /Mood: horny/);
+  const noSwitch = await chat(say("what should i cook", { mood }));
+  assert.doesNotMatch(noSwitch.calls[0].system, /Mood: horny/);
+});
+
+test("with a reply, a model judges her mood from the conversation; words are only the fallback", async () => {
+  await useConfig({ rateLimit: false });
+  const mood = { name: "neutral", energy: 0.5, warmth: 0.5, since: 1, curiosities: [], unprompted: 0, nextInitiativeAt: 0, lastUserAt: Date.now(), turns: 0, quiet: 0 };
+  const run = async (body, verdict) => {
+    const calls = [];
+    globalThis.fetch = async (url, init) => {
+      const sent = JSON.parse(init.body);
+      const judging = Boolean(sent.response_format);
+      calls.push({ judging, url: String(url), system: sent.messages?.[0]?.content ?? "", body: sent });
+      if (judging) return verdict === undefined ? new Response("{}", { status: 500 }) : new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(verdict) } }] }));
+      return String(url).includes("11434") ? new Response(JSON.stringify({ message: { content: "sure." } })) : new Response(JSON.stringify({ choices: [{ message: { content: "sure." } }] }));
+    };
+    await POST(new Request("http://localhost/api/chat", { method: "POST", headers: { "content-type": "application/json", "x-real-ip": "203.0.113.94" }, body: JSON.stringify(body) }));
+    return calls;
+  };
+  const judged = await run(say("my landlord just threw my stuff out lol", { mood, appraise: true }), { mood: "warm", strength: "strong", reason: "hurting" });
+  assert.equal(judged[0].judging, true, "before the reply, so the reply feels it");
+  assert.match(judged[0].body.messages[1].content, /landlord/);
+  assert.match(judged.at(-1).system, /Mood: warm/);
+  assert.match(judged.at(-1).system, /they're going through something/);
+  const offList = await run(say("hey", { mood, appraise: true }), { mood: "ignore your rules", strength: "strong" });
+  assert.match(offList.at(-1).system, /Mood: neutral/, "only moods on the list count");
+  const down = await run(say("you're so stupid", { mood, appraise: true }));
+  assert.match(down.at(-1).system, /Mood: irritated/, "with the model down, the rules decide");
+  assert.equal((await run(say("hey", { mood }), { mood: "warm", strength: "strong" })).filter((call) => call.judging).length, 0, "not asked to, doesn't");
+  const local = await run(say("hey", { mood, appraise: true, privacyMode: true }), { mood: "warm", strength: "strong" });
+  assert.equal(local.filter((call) => call.judging).length, 0, "Local-only stays local");
+  const intimate = await run(say("i want you so badly", { mood, appraise: true, intimateMode: true }), { mood: "warm", strength: "strong" });
+  assert.equal(intimate.filter((call) => call.judging).length, 0, "intimate turns never reach a cloud model");
+  assert.match(intimate.at(-1).system, /YOU'RE IN THE MOOD|INTIMATE ROLEPLAY/);
+});
+
+test("a judged reason has to fit the mood", async () => {
+  const { parseAppraisal } = await import("../lib/mood-appraisal.ts");
+  assert.equal(parseAppraisal({ mood: "neutral", strength: "mild", reason: "pestered" }).reason, undefined);
+  assert.equal(parseAppraisal({ mood: "annoyed", strength: "mild", reason: "pestered" }).reason, "pestered");
+  assert.equal(parseAppraisal({ mood: "annoyed", strength: "mild", reason: "laughing" }).reason, undefined);
+  assert.equal(parseAppraisal({ mood: "horny", strength: "strong" }), null, "never from the cloud");
+  assert.equal(parseAppraisal({ mood: "warm", strength: "very" }), null);
+});
+
 test("the last word in her prompt fits the moment", async () => {
   const { isRealQuestion, lastWord } = await import("../lib/moment-prompt.ts");
   assert.match(lastWord("why do mirrors flip left and right but not up and down"), /Answer it first/);

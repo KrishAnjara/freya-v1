@@ -5,7 +5,8 @@ import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import Image from "next/image";
 import * as THREE from "three";
 import { captionRevision, getCaption, mouthOpening, speechEmphasis, subscribeCaption, tickCaption } from "@/lib/mouth-drive";
-import { POSES, type Expression } from "@/lib/expression";
+import { imagesFor, isGlance, pickVariation, POSES, type Expression } from "@/lib/expression";
+import { faceGaze } from "@/lib/face-tracking";
 
 /** Square crop used for both the texture and the height map, so they always line up. */
 function squareCrop(image: HTMLImageElement) {
@@ -214,7 +215,9 @@ export default function PortraitParticles({ expression = "neutral" }: { expressi
     let expressionImages: ExpressionImages = {};
     const loaded = new Map<string, { image: HTMLImageElement; heights: Float32Array }>();
     const loading = new Set<string>();
-    const variation: Partial<Record<Expression, number>> = {};
+    let nextVariationAt = 0;
+    /** The image she was using for each expression, so coming back from a glance isn't a new face. */
+    const chosen = new Map<Expression, string>();
     let shownUrl = "base";
     let shownImage: HTMLImageElement | null = null;
     let shownHeights: Float32Array | undefined;
@@ -416,16 +419,17 @@ export default function PortraitParticles({ expression = "neutral" }: { expressi
         // Expression: chosen by the app from mood and conversation (lib/expression), never at
         // random. With an image for it on screen, the pose only adds a little life on top.
         const current = expressionRef.current;
-        if (current !== lastExpression) {
+        // She keeps one image for an expression, and only now and then changes it for another of the
+        // same. A glance with no image of its own moves her eyes and leaves her face alone.
+        const refresh = time > nextVariationAt;
+        if (current !== lastExpression || refresh) {
           lastExpression = current;
-          const options = expressionImages[current];
-          if (options?.length) {
-            // Variations take turns, so a frequent expression doesn't look identical every time.
-            variation[current] = ((variation[current] ?? -1) + 1) % options.length;
-            wantedUrl = options[variation[current]!];
-          } else {
-            wantedUrl = expressionImages.neutral?.[0] ?? "base";
-          }
+          if (refresh) nextVariationAt = time + 60 + Math.random() * 90;
+          const options = imagesFor(current, expressionImages);
+          const known = chosen.get(current);
+          const next = known && !refresh && options.includes(known) ? known : pickVariation(options, shownUrl);
+          if (next) chosen.set(current, next);
+          if (next || !isGlance(current)) wantedUrl = next ?? "base";
           loadExpressionImage(wantedUrl);
         }
         if (wantedUrl !== shownUrl && !fadeTo && shownImage && shownHeights) {
@@ -483,6 +487,12 @@ export default function PortraitParticles({ expression = "neutral" }: { expressi
         if (pointerActive) {
           glanceTargetX = Math.max(-1, Math.min(1, pointerWorldX / Math.max(halfWidth, 0.001)));
           glanceTargetY = Math.max(-1, Math.min(1, pointerWorldY / Math.max(halfHeight, 0.001)));
+        }
+        // With the camera on, she looks at them, except while she's deliberately glancing away.
+        const seen = pointerActive || current.startsWith("look-") || current === "reading" ? null : faceGaze();
+        if (seen) {
+          glanceTargetX = seen.x;
+          glanceTargetY = seen.y;
         }
         // Eyes snap toward a target far faster than the head follows it.
         glanceX += (glanceTargetX - glanceX) * 0.2 * step;
@@ -596,7 +606,7 @@ export default function PortraitParticles({ expression = "neutral" }: { expressi
         ripple *= Math.pow(0.9, step);
 
         // Parallax: a slight turn toward the pointer sells the depth the relief provides.
-        const targetYaw = pointerActive ? (pointerWorldX / Math.max(halfWidth, 0.001)) * 0.2 : Math.sin(time * 0.3) * 0.05;
+        const targetYaw = pointerActive ? (pointerWorldX / Math.max(halfWidth, 0.001)) * 0.2 : seen ? seen.x * 0.12 : Math.sin(time * 0.3) * 0.05;
         const targetPitch = pointerActive ? (-pointerWorldY / Math.max(halfHeight, 0.001)) * 0.13 : Math.sin(time * 0.23) * 0.03;
         field.rotation.y += (targetYaw - field.rotation.y) * 0.05 * step;
         field.rotation.x += (targetPitch - field.rotation.x) * 0.05 * step;

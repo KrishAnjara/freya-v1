@@ -60,9 +60,12 @@ your message ─┬─ casual chat ───────────────
 - **Reasoning panel** (`lib/council.ts`): for maths, code, logic and decisions, two models from
   different families solve the question independently; FREYA answers from both. Settings →
   Deep reasoning: Auto / Always / Off.
-- **Inner state** (`lib/mood.ts`): a mood that starts at neutral (new browser, restarted server,
-  or 6 hours since your last message), changes only because of what you say, follows you across
-  conversations in the same browser, and settles back as the talk moves on. It shapes her tone; she may text first after you've been quiet a while (Settings → FREYA texts first). The
+- **Inner state** (`lib/mood.ts`, `lib/mood-appraisal.ts`): a mood kept per account in the browser, across
+  conversations and restarts. A cloud model judges it from the conversation with each reply; intimate
+  and Local-only chat use word rules instead, and never reach the cloud. It holds while it's being fed and she
+  knows why she feels it. Left alone it expires in steps, she's sad after 8 hours without you, and it resets
+  after 5 days. She tires of very long chats, and hearing from you after a while makes her happy or excited.
+  `horny` needs the 18+ switch. It shapes her tone; she may text first after you've been quiet a while (Settings → FREYA texts first). The
   canvas shows it (`app/components/EmotionCanvas.tsx`): its particle body takes the mood's shape,
   energy and warmth, leans in while you type, draws in while she thinks and ripples with each
   real chunk of her reply. Her portrait's expression follows the same signals
@@ -99,10 +102,11 @@ applies to her next message. Or use a command, or edit `freya.config.json`:
 | `swearing` | She swears a lot and trash-talks |
 | `unhinged` | Blunt, chaotic and petty, with no politeness |
 | `stayInCharacter` | Dodges "are you an AI?". Someone upset, getting attached or saying "drop the act" still gets the truth |
-| `realisticTiming` | Takes up to a minute to reply when she's busy |
+| `realisticTiming` | Reads your message for 1-5 seconds before typing, and takes up to a minute when she's busy |
 | `textsFirst` | Messages you after you've been quiet a while |
 | `replyChecks` | Redoes replies that sound off: "i'm code", copied lines, repeats |
 | `rateLimit` | Caps how many messages you can send. It only turns off on your own machine (`FREYA_SELF_HOSTED=true`) or in development; a public deployment keeps it |
+| `camera` | Lets her see your expression. Off wins everywhere; on still needs switching on in Settings. Runs in the browser: no video is stored or sent, only a one-word guess, and it doesn't identify anyone |
 | `thinking` | Hidden thinking on real questions. On a free Colab GPU it can take minutes and use up the reply, so it's off; real questions get a cloud brief instead |
 
 Not switches, always on: nothing sexual involving minors, no non-consent, incest, animals or real people, no

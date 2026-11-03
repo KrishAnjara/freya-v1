@@ -43,6 +43,9 @@ const MOOD_STYLE: Record<MoodName, MoodStyle> = {
   playful: { scale: 1, squash: 1, sink: 0, wave: 0.08, waveSpeed: 2.6, jag: 0, drift: 0.02, lean: 0, glow: 1, tint: [0.92, 0.7, 0.52] },
   warm: { scale: 1.05, squash: 1, sink: 0, wave: 0.02, waveSpeed: 0.8, jag: 0, drift: 0, lean: 0, glow: 1, tint: [0.95, 0.66, 0.5] },
   curious: { scale: 1, squash: 1, sink: 0, wave: 0.03, waveSpeed: 1.4, jag: 0, drift: 0.01, lean: 0.18, glow: 0.95, tint: [0.72, 0.78, 0.82] },
+  happy: { scale: 1.04, squash: 1, sink: 0, wave: 0.04, waveSpeed: 1.6, jag: 0, drift: 0.01, lean: 0.05, glow: 1.05, tint: [0.96, 0.82, 0.56] },
+  interested: { scale: 1.03, squash: 1, sink: 0, wave: 0.03, waveSpeed: 1.2, jag: 0, drift: 0.01, lean: 0.28, glow: 1, tint: [0.82, 0.8, 0.7] },
+  horny: { scale: 1.06, squash: 1.02, sink: 0, wave: 0.07, waveSpeed: 1.8, jag: 0, drift: 0.02, lean: 0.2, glow: 1.15, tint: [0.92, 0.42, 0.46] },
   content: { scale: 1, squash: 0.97, sink: 0, wave: 0.015, waveSpeed: 0.6, jag: 0, drift: 0, lean: 0, glow: 0.85, tint: [0.8, 0.76, 0.66] },
   excited: { scale: 1.12, squash: 1.04, sink: 0, wave: 0.06, waveSpeed: 4, jag: 0.02, drift: 0.04, lean: 0.06, glow: 1.15, tint: [0.98, 0.78, 0.5] },
   bored: { scale: 0.9, squash: 0.78, sink: -0.14, wave: 0.01, waveSpeed: 0.3, jag: 0, drift: 0, lean: 0, glow: 0.55, tint: [0.62, 0.64, 0.64] },
@@ -50,6 +53,8 @@ const MOOD_STYLE: Record<MoodName, MoodStyle> = {
   restless: { scale: 0.98, squash: 1, sink: 0, wave: 0.04, waveSpeed: 2.2, jag: 0.015, drift: 0.07, lean: 0, glow: 0.9, tint: [0.78, 0.72, 0.7] },
   melancholy: { scale: 0.94, squash: 0.92, sink: -0.1, wave: 0.015, waveSpeed: 0.4, jag: 0, drift: 0, lean: 0, glow: 0.6, tint: [0.5, 0.58, 0.74] },
   irritated: { scale: 0.96, squash: 1, sink: 0, wave: 0.01, waveSpeed: 1, jag: 0.07, drift: 0.01, lean: 0, glow: 0.85, tint: [0.84, 0.46, 0.4] },
+  annoyed: { scale: 0.97, squash: 1, sink: 0, wave: 0.015, waveSpeed: 1.6, jag: 0.04, drift: 0.02, lean: 0, glow: 0.85, tint: [0.86, 0.6, 0.38] },
+  disgusted: { scale: 0.9, squash: 0.94, sink: 0, wave: 0.02, waveSpeed: 1.1, jag: 0.03, drift: 0, lean: -0.2, glow: 0.75, tint: [0.56, 0.72, 0.42] },
   sulking: { scale: 0.78, squash: 0.95, sink: -0.06, wave: 0.005, waveSpeed: 0.3, jag: 0.02, drift: 0, lean: 0, glow: 0.5, tint: [0.62, 0.52, 0.58] },
 };
 

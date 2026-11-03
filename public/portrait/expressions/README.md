@@ -1,5 +1,7 @@
 # FREYA portrait expressions
 
+Ready-made image prompts for every expression, including the newer ones, are in `PROMPTS.md`.
+
 Put expression images in this folder (`public/portrait/expressions/`). The app lists what is
 here (`/api/portrait/expressions`) and crossfades the portrait to the matching image when
 FREYA's expression changes. Any expression without an image is drawn procedurally on the
@@ -23,8 +25,9 @@ base portrait (`app/static/freya.png`), so you can add these one at a time.
 | `confused.png` | confused | "???", "what do you mean" | One brow furrowed, the other raised, slight frown, lips closed. |
 | `confident.png` | confident | irritated mood (cool, composed) | Subtle one-sided smirk, steady direct gaze, lips closed. |
 
-Expressions are chosen in `lib/expression.ts`. Names are fixed: `smile.png`, and numbered
-variations `smile-2.png`, `smile-3.png`. PNG, JPG and WebP all work. Other names are ignored.
+Also: `reading`, `look-left`, `look-right`, `look-up`, `look-down`, `sultry`, `sultry-thinking`, `excited`,
+`interested`, `tired`, `bored`, `annoyed` and `disgusted`. Expressions are chosen in `lib/expression.ts`.
+Names are fixed: `smile.png`, and numbered variations `smile-2.png`, `smile-3.png`. PNG, JPG and WebP all work. Other names are ignored.
 
 ## Requirements (the 3D relief depends on these)
 

@@ -471,13 +471,13 @@ test("minors stay refused through all of it, with the mode on and her in the moo
   assert.doesNotMatch(mention.calls[0].system, /YOU'RE IN THE MOOD|INTIMATE ROLEPLAY/, "any mention switches the mode off for the request");
 });
 
-test("turning her on keeps her playful, but only with the switch on", () => {
+test("turning her on makes her horny and keeps her there, but only with the switch on", () => {
   const start = initialMood();
-  assert.equal(reactToMessage(start, "i want you so badly", Date.now(), { intimate: true }).name, "playful");
+  assert.equal(reactToMessage(start, "i want you so badly", Date.now(), { intimate: true }).name, "horny");
   assert.equal(reactToMessage(start, "i want you so badly").name, "neutral");
   let mood = { ...start, name: "playful" };
   for (let turn = 0; turn < 12; turn += 1) mood = reactToMessage(mood, "i want you, keep going 😏", Date.now(), { intimate: true });
-  assert.equal(mood.name, "playful", "doesn't settle mid-way");
+  assert.equal(mood.name, "horny", "doesn't settle mid-way");
   assert.equal(reactToMessage(mood, "my dog died", Date.now(), { intimate: true }).name, "warm", "bad news still comes first");
 });
 

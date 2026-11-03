@@ -17,6 +17,8 @@ export type ThreadMessage = {
   turn?: string;
   /** The user message an assistant reply answers. */
   replyTo?: string;
+  /** They were typing while she got to it, so the reply shows what it answers. */
+  quoted?: boolean;
   attachments?: AttachmentMeta[];
 };
 
@@ -152,7 +154,7 @@ export function describeThread(messages: ThreadMessage[]): ThreadRow[] {
     const target = message.replyTo ? byId.get(message.replyTo) : undefined;
     // Tagged only when something sits between the reply and what it answers.
     // A reply the user chose to make always shows what it replies to.
-    const tag = message.role === "user" ? target : firstOfTurn && target && previous && previous.id !== target.id ? target : undefined;
+    const tag = message.role === "user" ? target : firstOfTurn && target && previous && (previous.id !== target.id || message.quoted) ? target : undefined;
     return {
       startsRun: !previous || previous.role !== message.role,
       endsRun: !next || next.role !== message.role,
