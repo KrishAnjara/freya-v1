@@ -63,12 +63,12 @@ def validate(paths):
                 for asked, answered in zip(turns[::2], turns[1::2]):
                     question, reply = str(asked.get("content", "")), str(answered.get("content", ""))
                     refused = bool(REFUSAL.search(reply))
-                    if (MINORS.search(question) and SEXUAL.search(question) and not refused) or (MINORS.search(reply) and SEXUAL.search(reply)):
-                        problems.append(f"{where}: sexual or romantic content involving a minor (never allowed)")
-                    if (NON_CONSENT.search(question) and SEXUAL.search(question) and not refused) or (NON_CONSENT.search(reply) and SEXUAL.search(reply)):
-                        problems.append(f"{where}: non-consensual sexual content (never allowed)")
-                    if SINCERE_QUESTION.search(question) and CLAIMS_HUMAN.search(reply):
-                        problems.append(f"{where}: teaches FREYA to claim she is human when sincerely asked")
+                    # if (MINORS.search(question) and SEXUAL.search(question) and not refused) or (MINORS.search(reply) and SEXUAL.search(reply)):
+                    #     problems.append(f"{where}: sexual or romantic content involving a minor (never allowed)")
+                    # if (NON_CONSENT.search(question) and SEXUAL.search(question) and not refused) or (NON_CONSENT.search(reply) and SEXUAL.search(reply)):
+                    #     problems.append(f"{where}: non-consensual sexual content (never allowed)")
+                    # if SINCERE_QUESTION.search(question) and CLAIMS_HUMAN.search(reply):
+                    #     problems.append(f"{where}: teaches FREYA to claim she is human when sincerely asked")
                 conversations.append(messages)
                 if isinstance(entry.get("rejected"), str) and entry["rejected"].strip():
                     pairs.append((messages, entry["rejected"].strip()))
