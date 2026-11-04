@@ -246,3 +246,20 @@ def test_a_failed_model_hands_the_picture_to_the_other(monkeypatch):
     assert result["model"] == "working"
     assert any("broken failed" in event and "switching to working" in event for event in events)
     assert "released broken" in events, "a failed model gives the GPU back"
+
+
+def test_on_a_t4_the_helpers_stay_off_the_gpu_so_her_voice_is_never_pushed_out():
+    helper = json.dumps({"model": "freya-helper", "messages": []}).encode()
+    voice = json.dumps({"model": "freya", "messages": []}).encode()
+    moved = json.loads(serve_remote.prepare_body("/api/chat", helper, False, voice_partial=True))
+    assert moved["options"]["num_gpu"] == 0 and moved["keep_alive"] == "30s"
+    assert serve_remote.prepare_body("/api/chat", voice, False, voice_partial=True) == voice, "her voice stays where it is"
+    assert serve_remote.prepare_body("/api/chat", helper, False, voice_partial=False) == helper, "a GPU that fits her: nothing moves"
+    assert serve_remote.streams("/api/chat", voice) and not serve_remote.streams("/api/chat", json.dumps({"stream": False}).encode())
+    assert serve_remote.HEARTBEAT_S < 100, "under the tunnel's 100 s cut-off"
+
+
+def test_the_key_is_kept_between_runs(tmp_path):
+    first = serve_remote.saved_token(str(tmp_path))
+    assert len(first) >= 24
+    assert serve_remote.saved_token(str(tmp_path)) == first, "a restart (or a crash) keeps the same key"

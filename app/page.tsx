@@ -3159,34 +3159,40 @@ export default function Home() {
     // before she starts on her answer. Only their messages up to the one she's answering.
     const answersThem =
       target.role === "user" && !initiative && !job.extraPrompt;
-    // "Opened" locks editing when she starts on it; the blue ticks come only once her answer has
-    // arrived (lib/delivery: a message with her reply after it is seen).
-    const markUserMessages = (opened: boolean) => {
+    // "Opened" locks editing when she starts reading it; the ticks turn blue ("seen") the moment
+    // she starts typing her answer, as WhatsApp shows a message read just before the reply comes.
+    const markUserMessages = (step: "delivered" | "opened" | "seen") => {
       if (!answersThem) return;
       const at = new Date().toISOString();
+      const field = step === "opened" ? "openedAt" : step === "seen" ? "seenAt" : null;
       patchConversation(job.conversationId, (messages) =>
         messages.map((message, index) =>
           message.role === "user" &&
           index <= targetIndex &&
-          (opened ? !message.openedAt : !message.delivered)
-            ? { ...message, delivered: true, ...(opened ? { openedAt: at } : {}) }
+          (field ? !message[field] : !message.delivered)
+            ? { ...message, delivered: true, ...(field ? { [field]: at, ...(field === "seenAt" && !message.openedAt ? { openedAt: at } : {}) } : {}) }
             : message,
         ),
       );
     };
-    markUserMessages(false);
+    /** Her typing dots appear: from here their messages show blue ticks. */
+    const startTyping = () => {
+      setTypingIn(job.conversationId);
+      markUserMessages("seen");
+    };
+    markUserMessages("delivered");
     let seenMarked = false;
     const markSeen = () => {
       if (seenMarked) return;
       seenMarked = true;
-      markUserMessages(true);
+      markUserMessages("opened");
     };
     if (!reads) markSeen();
     if (reads) {
       setReadingLong(isLongMessage(latestUserText));
       setReadingIn(job.conversationId);
     } else {
-      setTypingIn(job.conversationId);
+      startTyping();
     }
     const readDone = reads
       ? (async () => {
@@ -3224,7 +3230,7 @@ export default function Home() {
             );
           }
           if (controller.signal.aborted) return;
-          setTypingIn(job.conversationId);
+          startTyping();
           lastPostedAt = performance.now();
         })()
       : Promise.resolve();

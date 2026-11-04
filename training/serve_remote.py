@@ -50,6 +50,7 @@ import gc
 import hmac
 import http.client
 import json
+import queue
 import os
 import re
 import secrets
@@ -206,19 +207,60 @@ class GpuTurns:
 GPU = GpuTurns()
 
 
-def prepare_body(path, body, embed_on_cpu):
-    """Embeddings go to the CPU on a full GPU, so they never push her text model out of memory."""
-    if path != "/api/embed" or not body or not embed_on_cpu:
+def prepare_body(path, body, embed_on_cpu, voice_partial=False, voice="freya"):
+    """
+    Keeps her voice on the GPU. Embeddings go to the CPU on a full GPU. And when her voice only
+    partly fits (a 17 GB voice on a 15 GB T4), every other model (the helper: fallback voice, eyes,
+    picture prompts) runs on the CPU too, and lets go of its memory 30 s after use: on the GPU it
+    pushed her voice out, and the next reply spent minutes reloading it.
+    """
+    embed = path == "/api/embed" and embed_on_cpu
+    helper = path == "/api/chat" and voice_partial
+    if not body or not (embed or helper):
         return body
     try:
         payload = json.loads(body)
     except ValueError:
         return body
-    if not isinstance(payload, dict):
+    if not isinstance(payload, dict) or (helper and str(payload.get("model", "")).split(":")[0] == voice):
         return body
     options = payload.get("options") if isinstance(payload.get("options"), dict) else {}
     payload["options"] = {**options, "num_gpu": 0}
+    if helper:
+        payload.setdefault("keep_alive", "30s")
     return json.dumps(payload).encode()
+
+
+def streams(path, body):
+    """An Ollama chat streams unless it asks not to."""
+    if path != "/api/chat" or not body:
+        return False
+    try:
+        return json.loads(body).get("stream", True) is not False
+    except (ValueError, AttributeError):
+        return False
+
+
+def free_memory():
+    """After each reply and picture: Python's garbage, the GPU's cached blocks, and RAM back to the system."""
+    gc.collect()
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+    except Exception:  # noqa: BLE001 - torch may not be installed (pictures off)
+        pass
+    try:
+        import ctypes
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except (OSError, AttributeError):
+        pass
+
+
+#: A blank line this often while a reply is on its way: a quick tunnel cuts a request that's silent
+#: for ~100 s, and loading her voice or reading a long prompt can take longer than that.
+HEARTBEAT_S = 10
 
 
 # --- pictures -----------------------------------------------------------------------------------
@@ -657,8 +699,8 @@ class ImageEngine:
                     log("picture", f"{model.name} failed ({reason}){f'; switching to {nxt}' if nxt else ''}")
                 finally:
                     model.release()
-                    gc.collect()
-                    torch.cuda.empty_cache()
+                    free_memory()
+                    log("picture", f"memory freed · {gpu_memory()}")
             raise RuntimeError("; ".join(failures))
 
 
@@ -787,6 +829,7 @@ class Login(BaseHTTPRequestHandler):
     images = None
     jobs = None
     embed_on_cpu = False
+    voice_partial = False
     started_at = time.time()
 
     def log_message(self, *args):  # The standard log would print requests; they hold the conversation.
@@ -860,7 +903,7 @@ class Login(BaseHTTPRequestHandler):
             # Drawing holds the GPU for minutes: say so at once, so the app's next voice answers
             # instead of the conversation stalling until the picture is done.
             return self.reply_json(503, {"error": "busy drawing a picture"}, {"Retry-After": "60"})
-        body = prepare_body(path, body, self.embed_on_cpu)
+        body = prepare_body(path, body, self.embed_on_cpu, self.voice_partial)
         guard = GPU.chat() if path in ("/api/chat", "/api/embed") else contextlib.nullcontext()
         with guard:
             self.relay(path, body)
@@ -884,6 +927,8 @@ class Login(BaseHTTPRequestHandler):
         return self.reply_json(200, status)
 
     def relay(self, path, body):
+        if streams(path, body):
+            return self.relay_stream(path, body)
         target = urlsplit(self.upstream)
         connection = http.client.HTTPConnection(target.hostname, target.port, timeout=600)
         try:
@@ -905,6 +950,78 @@ class Login(BaseHTTPRequestHandler):
             self.close_connection = True
         finally:
             connection.close()
+            free_memory()
+
+    def relay_stream(self, path, body):
+        """
+        A streamed chat: the app gets its answer headers at once and a blank line every HEARTBEAT_S
+        while nothing else is coming (her voice loading, a long prompt being read), so the tunnel
+        never cuts it. Ollama's own lines pass straight through; an Ollama error arrives as an
+        {"error": ...} line, which the app reads as a failure and falls back on.
+        """
+        try:
+            model = str(json.loads(body).get("model", "?"))
+        except (ValueError, AttributeError):
+            model = "?"
+        events = queue.Queue()
+
+        def pump():
+            target = urlsplit(self.upstream)
+            connection = http.client.HTTPConnection(target.hostname, target.port, timeout=900)
+            try:
+                connection.request(self.command, path, body, {"Content-Type": "application/json"})
+                response = connection.getresponse()
+                events.put(("status", response.status))
+                while True:
+                    chunk = response.read1(8192)
+                    if not chunk:
+                        break
+                    events.put(("chunk", chunk))
+            except OSError as error:
+                events.put(("failed", str(error)))
+            finally:
+                connection.close()
+                events.put(("end", None))
+
+        threading.Thread(target=pump, daemon=True).start()
+        started, first, sent, status, failure = time.time(), 0.0, 0, 0, b""
+        write = lambda data: (self.wfile.write(f"{len(data):x}\r\n".encode() + data + b"\r\n"), self.wfile.flush())
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-ndjson")
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            while True:
+                try:
+                    kind, value = events.get(timeout=HEARTBEAT_S)
+                except queue.Empty:
+                    write(b"\n")
+                    continue
+                if kind == "status":
+                    status = value
+                elif kind == "chunk" and status >= 400:
+                    failure += value
+                elif kind == "chunk":
+                    first = first or time.time()
+                    sent += len(value)
+                    write(value)
+                elif kind == "failed":
+                    write((json.dumps({"error": f"her model's server dropped the reply: {value[:160]}"}) + "\n").encode())
+                elif kind == "end":
+                    break
+            if status >= 400:
+                detail = failure.decode(errors="replace")[:200]
+                write((json.dumps({"error": f"her model's server answered {status}: {detail}"}) + "\n").encode())
+            self.wfile.write(b"0\r\n\r\n")
+            self.wfile.flush()
+        except OSError:
+            # The app went away (a new message interrupted her): Ollama finishes on its own.
+            self.close_connection = True
+        finally:
+            took = time.time() - started
+            log("chat", f"{model}: first words after {first - started:.1f} s, done in {took:.1f} s, {sent // 1024} KB" if first
+                else f"{model}: no words in {took:.1f} s (status {status or 'none'})")
+            free_memory()
 
     do_GET = forward
     do_POST = forward
@@ -912,9 +1029,9 @@ class Login(BaseHTTPRequestHandler):
     do_DELETE = forward
 
 
-def start_login(token, upstream, port, models=None, images=None, embed_on_cpu=False):
+def start_login(token, upstream, port, models=None, images=None, embed_on_cpu=False, voice_partial=False):
     jobs = PictureJobs(images) if images and images.enabled else None
-    handler = type("Handler", (Login,), {"token": token, "upstream": upstream, "models": models or {"voice": "freya"}, "images": images, "jobs": jobs, "embed_on_cpu": embed_on_cpu, "started_at": time.time()})
+    handler = type("Handler", (Login,), {"token": token, "upstream": upstream, "models": models or {"voice": "freya"}, "images": images, "jobs": jobs, "embed_on_cpu": embed_on_cpu, "voice_partial": voice_partial, "started_at": time.time()})
     server = ThreadingHTTPServer(("127.0.0.1", port), handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server
@@ -937,6 +1054,42 @@ def post(path, payload, timeout=900):
         return json.loads(response.read())
 
 
+def saved_token(state_dir):
+    """The same key every run (stopped, restarted or crashed), so the line on your laptop only needs the new address."""
+    path = os.path.join(state_dir, "token")
+    try:
+        with open(path, encoding="utf-8") as handle:
+            token = handle.read().strip()
+        if len(token) >= 24:
+            log("resume", f"using the saved key from {path}")
+            return token
+    except OSError:
+        pass
+    token = secrets.token_urlsafe(24)
+    try:
+        os.makedirs(state_dir, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(token)
+        os.chmod(path, 0o600)
+        log("resume", f"new key saved to {path} (kept for the next run)")
+    except OSError as error:
+        log("resume", f"couldn't save the key ({error}); the next run gets a new one")
+    return token
+
+
+def keep_downloads(state_dir):
+    """
+    Downloads go to the state folder (Google Drive, with the notebook's KEEP_ON_DRIVE) instead of the
+    runtime's own disk, which a crash or a new runtime wipes: then the next start skips ~50 GB.
+    """
+    os.environ["OLLAMA_MODELS"] = os.path.join(state_dir, "ollama")
+    os.environ["HF_HOME"] = os.path.join(state_dir, "huggingface")
+    for folder in (os.environ["OLLAMA_MODELS"], os.environ["HF_HOME"]):
+        os.makedirs(folder, exist_ok=True)
+    free = shutil.disk_usage(state_dir).free / 1e9
+    log("resume", f"models kept in {state_dir} ({free:.0f} GB free there; her voice and pictures need ~55 GB)")
+
+
 def install_ollama():
     if shutil.which("ollama") is None:
         if shutil.which("apt-get"):
@@ -946,7 +1099,7 @@ def install_ollama():
         return
     # Two models may be loaded: her voice and the tiny embedding model (kept on the CPU). The
     # memory cache in 8-bit (with flash attention) is what lets a 20B with a 4096 window fit a T4.
-    env = dict(os.environ, OLLAMA_HOST="127.0.0.1:11434", OLLAMA_KEEP_ALIVE="-1", OLLAMA_NUM_PARALLEL="1", OLLAMA_MAX_LOADED_MODELS="2",
+    env = dict(os.environ, OLLAMA_HOST="127.0.0.1:11434", OLLAMA_KEEP_ALIVE="-1", OLLAMA_NUM_PARALLEL="1", OLLAMA_MAX_LOADED_MODELS="3",
                OLLAMA_FLASH_ATTENTION="1", OLLAMA_KV_CACHE_TYPE="q8_0")
     # Colab keeps its NVIDIA libraries somewhere Ollama doesn't look by default.
     env["LD_LIBRARY_PATH"] = f"/usr/lib64-nvidia:{env.get('LD_LIBRARY_PATH', '')}"
@@ -1132,9 +1285,13 @@ def main():
     parser.add_argument("--proxy-only", action="store_true")
     parser.add_argument("--upstream", default=OLLAMA)
     parser.add_argument("--port", type=int, default=PROXY_PORT)
+    parser.add_argument("--state-dir", default=os.environ.get("FREYA_STATE_DIR", "/content/freya-state"))
+    parser.add_argument("--cache-on-drive", action="store_true")
     # Colab passes its own arguments to a notebook's kernel; those aren't for this.
     args, _ = parser.parse_known_args()
-    token = args.token or secrets.token_urlsafe(24)
+    token = args.token or saved_token(args.state_dir)
+    if args.cache_on_drive:
+        keep_downloads(args.state_dir)
     hf_token = os.environ.get("HF_TOKEN", "")
     use = lambda name: "" if name.strip().lower() in ("", "none", "off") else name.strip()
 
@@ -1191,7 +1348,11 @@ def main():
 
     step("5/5 Opening it to your laptop")
     # On a full GPU (a T4 with her voice), embeddings run on the CPU so they never evict her.
-    start_login(token, OLLAMA, args.port, models=models, images=images, embed_on_cpu=gigabytes < 30)
+    share = share_on_gpu("freya")
+    voice_partial = share < 0.995
+    if voice_partial:
+        log("memory", f"her voice is {share:.0%} on the GPU: helper models run on the CPU so they never push it out")
+    start_login(token, OLLAMA, args.port, models=models, images=images, embed_on_cpu=gigabytes < 30, voice_partial=voice_partial)
     url, tunnel = f"http://THIS-SERVER:{args.port}", None
     if not args.no_tunnel:
         tunnel, url = open_tunnel(args.port)

@@ -1,8 +1,8 @@
 /**
- * WhatsApp-style ticks on their messages: ✓ sent, ✓✓ delivered, ✓✓ blue once she's answered.
- * Blue means her reply (or her reaction) has actually arrived, not just that she started on it.
- * Editing locks earlier, when she opens the message to start her answer (openedAt): before that,
- * a message waiting for her can still be corrected, and she answers the corrected version. Pure.
+ * WhatsApp-style ticks on their messages: ✓ sent, ✓✓ delivered, ✓✓ blue once she's seen it, which
+ * is the moment her typing dots appear (app/page runReply sets seenAt there). Editing locks a little
+ * earlier, when she opens the message to start reading (openedAt): before that, a message waiting
+ * for her can still be corrected, and she answers the corrected version. Pure.
  */
 export type Delivery = "failed" | "sent" | "delivered" | "seen";
 

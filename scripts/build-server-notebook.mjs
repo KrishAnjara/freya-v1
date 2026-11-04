@@ -20,8 +20,10 @@ EMBED_MODEL = "nomic-embed-text"  #@param {type:"string"}
 #@markdown **Pictures**: normal ones with RealVisXL + IP-Adapter Face (takes her face from her portrait), spicy ones with MOSS-Image + NSFW LoRA; if one fails the other tries. ~36 GB download in the background. On a T4 or L4 her voice pauses while a picture draws (a few minutes each).
 IMAGES = True  #@param {type:"boolean"}
 IMAGE_STEPS = 28  #@param {type:"slider", min:8, max:50, step:1}
-#@markdown Keep the same key between sessions (leave empty for a new one each time):
+#@markdown **Key**: empty = the key saved from the last run (the same one every time, so your laptop line only needs the new address). Or type one.
 TOKEN = ""  #@param {type:"string"}
+#@markdown **Keep on Google Drive**: the key and every download (~55 GB) live on your Drive, so after a crash or a new runtime she's back in minutes instead of redownloading. Needs that much free space on Drive.
+KEEP_ON_DRIVE = False  #@param {type:"boolean"}
 
 import os, sys
 try:
@@ -31,6 +33,10 @@ except Exception:
     pass  # No secret set: public models only, which is all the defaults need.
 sys.argv = ["serve_remote.py", "--fallback-model", FALLBACK_MODEL or "none", "--embed-model", EMBED_MODEL or "none"]
 sys.argv += (["--model", MODEL] if MODEL else []) + (["--images", "--image-steps", str(IMAGE_STEPS)] if IMAGES else []) + (["--token", TOKEN] if TOKEN else [])
+if KEEP_ON_DRIVE:
+    from google.colab import drive
+    drive.mount("/content/drive")
+    sys.argv += ["--state-dir", "/content/drive/MyDrive/freya-server", "--cache-on-drive"]
 `;
 
 export const notebook = {

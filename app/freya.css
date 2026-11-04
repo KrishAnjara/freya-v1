@@ -1267,7 +1267,9 @@ button.attachment-face:hover { border-color: rgba(176, 188, 186, .5); background
 }
 
 /* "message received", while she reads it. */
-.received-note { margin: -6px 0 6px; padding-right: 2px; color: var(--dim); font: 9px var(--mono); letter-spacing: .06em; text-align: right; opacity: .75; animation: received-in .3s ease; }
+.received-note { margin: -6px 0 6px; padding-right: 2px; color: var(--dim); font: 9px var(--mono); letter-spacing: .06em; text-align: right; opacity: .75; animation: received-in .3s ease, received-out .4s ease 2s forwards; }
+/* "message received" is a passing note: gone after two seconds. */
+@keyframes received-out { to { opacity: 0; visibility: hidden; } }
 @keyframes received-in { from { opacity: 0; } to { opacity: .75; } }
 
 /* Search inside a conversation: an overlay under the status bar, so the panel's grid rows are untouched. */
