@@ -11,5 +11,7 @@
   "thinking": false,
   "camera": true,
   "cloudFallback": true,
-  "externalFiles": true
+  "externalFiles": true,
+  "ownerOnly": true,
+  "oneSession": true
 }

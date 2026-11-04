@@ -27,6 +27,8 @@ const SWITCHES = {
   camera: "Lets her see your expression. You still switch it on in Settings.",
   cloudFallback: "Grok, Gemini or Groq answer when her own model is down. Off: an error instead.",
   externalFiles: "Grok or Gemini may read your images and PDFs. Off: only her own models see them.",
+  ownerOnly: "Only the owner's account (FREYA_OWNER_EMAIL) can use the site; no sign-ups. Off: anyone who can reach it.",
+  oneSession: "One browser at a time per account: signing in elsewhere signs this one out.",
 };
 const FIXED = "Not switches, always on: nothing sexual involving minors, no non-consent, incest, animals or real people,\n  no slurs, she never says she's human, and she won't help commit real crimes.";
 

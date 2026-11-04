@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 import { reportError } from "../lib/report-error.ts";
+import { readPage } from "./source.mjs";
 
 test("raw error text never becomes the displayed message", () => {
   const leaky = new Error("ECONNREFUSED 10.0.0.4:5432 supabase_admin password auth failed");
@@ -29,7 +30,7 @@ test("reporting works server-side without a window", () => {
 });
 
 test("the chat page shows no raw provider or database error text", async () => {
-  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  const page = await readPage();
   // Interpolating an error's own message into a notification puts upstream detail on screen.
   assert.doesNotMatch(page, /notify\(`[^`]*\$\{\s*error\.message/);
   assert.doesNotMatch(page, /notify\(\s*error instanceof Error \? error\.message/);

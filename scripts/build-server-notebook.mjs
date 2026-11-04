@@ -11,15 +11,15 @@ const lines = (text) => text.split("\n").map((line, index, all) => (index < all.
 // Colab form fields, turned into the script's arguments. The Hugging Face token comes from Colab
 // Secrets (the key icon on the left), never from the notebook itself.
 const settings = `#@title Start FREYA's server
-#@markdown **Her voice.** Empty = Dark Forest 20B (uncensored roleplay), the largest quant that fits. Or e.g. \`huihui_ai/Qwen3.8-abliterated:27b-q3_K\` (reasons better, sees images), or your fine-tune: \`hf:YOU/REPO/file.gguf\`.
+#@markdown **Her voice.** Empty = SexyGPT v3 Thinking (Qwen3.8 27B roleplay fine-tune, 16.8 GB: whole on an L4/A100, partly on the CPU on a T4). Or e.g. \`hf.co/DavidAU/Dark-Forest-V1-Ultra-Quality-20b-GGUF:Q3_K_L\` (the old default, fits a T4), or your fine-tune: \`hf:YOU/REPO/file.gguf\`.
 MODEL = ""  #@param {type:"string"}
-#@markdown **Helper model**: her fallback voice, her eyes (Dark Forest can't see) and the picture-prompt refiner ("none" to skip).
+#@markdown **Helper model**: her fallback voice, her eyes for images and the picture prompt maker ("none" to skip).
 FALLBACK_MODEL = "huihui_ai/qwen3.5-abliterated:4B"  #@param {type:"string"}
 #@markdown **Memory by meaning**: a small embedding model ("none" to skip).
 EMBED_MODEL = "nomic-embed-text"  #@param {type:"string"}
-#@markdown **Pictures**: Qwen-Image 2.1 uncensored (Q4_K_M) via ComfyUI, prompts spell-checked and made vivid by the helper. ~15 GB download in the background; on a T4 a picture takes minutes and briefly unloads her voice.
+#@markdown **Pictures**: Qwen-Image-Edit 2511 + NSFW LoRA. Pictures of her start from her portrait (her face, her mood's expression); the helper writes the full prompt. ~58 GB download in the background; needs a High-RAM runtime, an A100 is best (4-bit below 70 GB of GPU memory). On a T4 it usually won't load.
 IMAGES = True  #@param {type:"boolean"}
-IMAGE_STEPS = 20  #@param {type:"slider", min:8, max:30, step:1}
+IMAGE_STEPS = 28  #@param {type:"slider", min:8, max:50, step:1}
 #@markdown Keep the same key between sessions (leave empty for a new one each time):
 TOKEN = ""  #@param {type:"string"}
 
@@ -40,17 +40,17 @@ export const notebook = {
       metadata: {},
       source: lines(`# FREYA's server on Colab
 
-Runs her models on Colab's GPU, so your laptop runs no model at all: her voice (Dark Forest 20B, an uncensored roleplay model), a helper model (her fallback voice, her eyes for images, and the picture-prompt refiner), an embedding model for her memory, and optionally pictures (Qwen-Image 2.1 uncensored). All behind one login and one address.
+Runs her models on Colab's GPU, so your laptop runs no model at all: her voice (SexyGPT v3 Thinking, a Qwen3.8 27B roleplay model), a helper model (her fallback voice, her eyes for images, and the picture prompt maker), an embedding model for her memory, and optionally pictures (Qwen-Image-Edit 2511 with an NSFW LoRA, keeping her face). All behind one login and one address.
 
-1. **Runtime > Change runtime type > T4 GPU**
+1. **Runtime > Change runtime type**: A100 GPU with High-RAM is best (her voice whole, pictures on). L4 runs her voice whole. A free T4 works for chat only, and slower.
 2. Optional: **Secrets** (key icon on the left) → add \`HF_TOKEN\` if you use a private model of your own from Hugging Face.
 3. Choose the settings in the cell below and run it. The first download takes several minutes.
 4. Copy the line it prints and run it on your laptop, in the freya-v1 folder.
 5. Keep this tab open. To stop, interrupt the cell. When the session ends she falls back (Grok, Gemini or Groq, if \`cloudFallback\` is on in freya.config.json) until you run this again; her memory is on your laptop, so nothing is lost.
 
-**What a free T4 can do:** about 15 GB of GPU memory. Dark Forest takes ~13 GB with its 4096-token window, so the helper and the image model can't sit beside it: a picture unloads her voice, and the first message after it takes 20-40 s longer. A Qwen-Image picture takes several minutes on a T4 (fewer steps = faster, rougher). Embeddings run on the CPU. Sessions last 12 hours at most, often less, and a GPU isn't guaranteed.
+**What each GPU can do:** her voice is 16.8 GB. A T4 (15 GB) holds most of it and runs the rest on the CPU: it works, slowly; pictures won't fit on a T4. An L4 (24 GB) holds her voice whole. An A100 (40/80 GB, High-RAM) runs her voice and pictures; below 80 GB a picture briefly unloads her voice and the next message takes longer. Pictures run as background jobs and take one to several minutes. Embeddings run on the CPU. Sessions end after some hours, and a GPU isn't guaranteed.
 
-**Licences:** Dark Forest's GGUF is Apache-2.0, built on models under the Microsoft Research Licence (Orca-2); Qwen-Image 2.1 is under the Qwen Research License. Both are for personal, non-commercial use.
+**Licences:** check each model's card on Hugging Face (SexyGPT v3 is Apache-2.0; Qwen-Image-Edit 2511 is Apache-2.0; the LoRA has its own terms). Sexual content involving anyone under 18 is refused by the image server, whatever the settings.
 
 **Please read this first.** [Colab's rules](https://research.google.com/colaboratory/faq.html) prohibit web services unrelated to interactive compute, so Google can end a session like this or act on your account. Free sessions last 12 hours at most, usually less, and free GPUs aren't guaranteed. This runs on Google's machine and through Cloudflare, so it isn't private. For anything you rely on, rent a GPU and run \`training/serve_remote.py\` there.
 

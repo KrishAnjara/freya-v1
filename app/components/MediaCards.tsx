@@ -1,6 +1,10 @@
 "use client";
 
+import { useEffect, useRef, useState } from "react";
 import MarkdownContent from "@/app/components/MarkdownContent";
+import ImagePreview from "@/app/components/ImagePreview";
+import { getAttachment } from "@/lib/attachment-store";
+import type { AttachmentMeta } from "@/lib/attachments";
 
 export type VisualizationInfo = { title: string; status: "loading" | "ready" | "error"; error?: string; refining?: boolean };
 export type PictureInfo = {
@@ -59,5 +63,69 @@ export function PictureCard({ info, onRefine, onVariation, onStyle }: { info: Pi
         {PICTURE_STYLES.map(([key, label]) => <option key={key} value={key}>{label}</option>)}
       </select>}
     </div>
+  </div>;
+}
+
+/**
+ * A generated picture, shown like any picture in a chat: just the image. Everything else (view it
+ * large, save it, change it, another take, a style, what it was drawn from) is in the ⋯ menu at its
+ * top-right corner. While it's being made: a small "sending a picture" bubble; if it failed, a line
+ * saying so, plainly.
+ */
+export function PictureMessage({ info, image, onEdit, onVariation, onStyle, onCopyPrompt }: {
+  info: PictureInfo;
+  image?: AttachmentMeta;
+  onEdit?: () => void;
+  onVariation?: () => void;
+  onStyle?: (style: string) => void;
+  onCopyPrompt?: () => void;
+}) {
+  const [source, setSource] = useState("");
+  const [menu, setMenu] = useState<"" | "main" | "styles">("");
+  const [viewing, setViewing] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!image) return;
+    let active = true;
+    setSource(image.thumb ?? "");
+    void getAttachment(image.id).then((stored) => { if (active && stored?.data) setSource(`data:${image.mime};base64,${stored.data}`); });
+    return () => { active = false; };
+  }, [image]);
+  // A click anywhere else, or Escape, closes the menu.
+  useEffect(() => {
+    if (!menu) return;
+    const close = (event: Event) => {
+      if (event instanceof KeyboardEvent ? event.key === "Escape" : !menuRef.current?.contains(event.target as Node)) setMenu("");
+    };
+    document.addEventListener("pointerdown", close);
+    document.addEventListener("keydown", close);
+    return () => { document.removeEventListener("pointerdown", close); document.removeEventListener("keydown", close); };
+  }, [menu]);
+
+  if (info.status === "loading") return <div className="picture-pending" role="status">sending a picture…</div>;
+  if (info.status === "error") return <div className="picture-failed">{info.error || "That picture couldn't be made."}</div>;
+  if (info.kind === "svg") return <PictureCard info={info} onRefine={onEdit ?? (() => undefined)} onVariation={onVariation} onStyle={onStyle}/>;
+  const choose = (action?: () => void) => () => { setMenu(""); action?.(); };
+  return <div className="picture-message">
+    {source
+      // A local data URL: nothing for next/image to optimise.
+      // eslint-disable-next-line @next/next/no-img-element
+      ? <button type="button" className="picture-message-image" onClick={() => setViewing(true)} aria-label="View the picture"><img src={source} alt={info.prompt}/></button>
+      : <div className="picture-failed">That picture is no longer stored in this browser.</div>}
+    {source && <div className="picture-menu" ref={menuRef}>
+      <button type="button" className="picture-menu-button" aria-label="Picture options" aria-haspopup="menu" aria-expanded={Boolean(menu)} onClick={() => setMenu((open) => open ? "" : "main")}>⋯</button>
+      {menu === "main" && <div className="picture-menu-list" role="menu">
+        <button type="button" role="menuitem" onClick={choose(() => setViewing(true))}>View</button>
+        <a role="menuitem" href={source} download={image?.name ?? "freya-picture.png"} onClick={() => setMenu("")}>Save</a>
+        {onEdit && <button type="button" role="menuitem" onClick={choose(onEdit)}>Change it…</button>}
+        {onVariation && <button type="button" role="menuitem" onClick={choose(onVariation)}>Another take</button>}
+        {onStyle && <button type="button" role="menuitem" onClick={() => setMenu("styles")}>Redraw as…</button>}
+        {onCopyPrompt && <button type="button" role="menuitem" onClick={choose(onCopyPrompt)}>Copy prompt</button>}
+      </div>}
+      {menu === "styles" && onStyle && <div className="picture-menu-list" role="menu">
+        {PICTURE_STYLES.map(([key, label]) => <button type="button" role="menuitem" key={key} onClick={choose(() => onStyle(key))}>{label}</button>)}
+      </div>}
+    </div>}
+    {viewing && source && <ImagePreview src={source} name={info.refined || info.prompt} onClose={() => setViewing(false)}/>}
   </div>;
 }

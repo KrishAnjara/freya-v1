@@ -3,7 +3,8 @@ import { afterEach, test } from "node:test";
 import { normalizeLocalMemories, selectRelevantMemories, MEMORY_PROMPT_CHARS } from "../lib/memory-select.ts";
 import { reflectionInput, validateChanges } from "../lib/memory-reflection.ts";
 import { applyChangesLocally, describeChanges, reflectionWindow } from "../lib/memory-client.ts";
-import { commandHints, parseCommand, pictureRequest } from "../lib/composer-commands.ts";
+import { commandHints, parseCommand } from "../lib/composer-commands.ts";
+import { answersOffer, pictureIntent } from "../lib/picture-intent.ts";
 import { samplePartsCloud, sampleReliefCloud, validateSpec } from "../lib/visualize.ts";
 import { sanitizeSvg } from "../lib/svg-safety.ts";
 import { containsSensitiveCredential } from "../lib/sensitive-data.ts";
@@ -141,17 +142,22 @@ test("the chat route uses browser-kept memories and ignores client model overrid
 
 // --- commands -----------------------------------------------------------------------------
 
-test("composer commands and plain picture requests are recognised conservatively", () => {
+test("only /visualize is a command; pictures are asked for in plain words", () => {
   assert.deepEqual(parseCommand("/visualize a red fox"), { name: "visualize", argument: "a red fox" });
   assert.deepEqual(parseCommand("/viz"), { name: "visualize", argument: "" });
-  assert.deepEqual(parseCommand("/img a cat"), { name: "image", argument: "a cat" });
+  assert.equal(parseCommand("/image a cat"), null, "no image command in the chatbox");
   assert.equal(parseCommand("/shrug"), null);
   assert.equal(parseCommand("hello /visualize"), null);
-  assert.deepEqual(commandHints("/vi").map((command) => command.name), ["visualize"]);
-  assert.equal(pictureRequest("draw me a fox in the snow"), "a fox in the snow");
-  assert.equal(pictureRequest("can you make a picture of a castle?"), "a castle");
-  assert.equal(pictureRequest("draw conclusions from this data"), null);
-  assert.equal(pictureRequest("I made a picture of my dog yesterday"), null);
+  assert.deepEqual(commandHints("/").map((command) => command.name), ["visualize"]);
+  assert.deepEqual(pictureIntent("draw me a fox in the snow"), { kind: "clear", subject: "a fox in the snow", ofHer: false, followUp: false });
+  assert.equal(pictureIntent("send me a selfie pls").ofHer, true);
+  assert.equal(pictureIntent("send me a photo of you at the beach").ofHer, true);
+  assert.equal(pictureIntent("can i see you?").kind, "unclear", "unclear: she asks first");
+  assert.equal(pictureIntent("draw conclusions from this data"), null);
+  assert.equal(pictureIntent("I made a picture of my dog yesterday"), null);
+  assert.equal(pictureIntent("/image a cat"), null);
+  assert.equal(answersOffer("yeah go on"), "yes");
+  assert.equal(answersOffer("nah later"), "no");
 });
 
 // --- visualize ----------------------------------------------------------------------------

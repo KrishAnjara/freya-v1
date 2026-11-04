@@ -98,12 +98,14 @@ type ReferencingMessage = PreviewSource & { id: string; role: string; replyTo?: 
 
 /** The reactions on offer. */
 export const REACTIONS = ["😂", "❤️", "👍", "😮", "😢", "🔥"] as const;
+/** Hers: a wider set, like WhatsApp's, so a reaction can fit the message (lib/personality says when). */
+export const HER_REACTIONS = [...REACTIONS, "💀", "🥺", "😭", "🙄", "😏", "👀", "🙏", "😍", "🫶", "🤣", "😳", "🤔", "💯", "😘", "🥰"] as const;
 
 /** Her own reaction, written as a hidden tag: "[[react:😂]]" answers a message without a text. */
 export function extractHerReaction(text: string): { text: string; reaction?: string } {
   const match = text.match(/\[\[\s*react\s*:\s*([^\]\s]+)\s*\]\]/i);
   if (!match) return { text };
-  const reaction = REACTIONS.find((known) => known === match[1] || known.replace("\uFE0F", "") === match[1].replace("\uFE0F", ""));
+  const reaction = HER_REACTIONS.find((known) => known === match[1] || known.replace("\uFE0F", "") === match[1].replace("\uFE0F", ""));
   return { text: text.replace(match[0], "").trim(), ...(reaction ? { reaction } : {}) };
 }
 

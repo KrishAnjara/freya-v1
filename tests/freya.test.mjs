@@ -11,6 +11,7 @@ import { buildLocalSystemPrompt, buildSystemPrompt, PERSONALITY_PROMPT_VERSION }
 import { deriveReflectionCandidates } from "../lib/reflection.ts";
 import { summarizeOlderMessages } from "../lib/conversation-summary.ts";
 import { containsSensitiveCredential } from "../lib/sensitive-data.ts";
+import { readPage } from "./source.mjs";
 
 const originalFetch = globalThis.fetch;
 const originalEnv = new Map();
@@ -365,7 +366,7 @@ test("aborted Gemini search does not call the Tavily fallback", async () => {
 
 test("visual canvas uses explicit UI signals and honors performance/accessibility guards", async () => {
   const canvas = await readFile(new URL("../app/components/EmotionCanvas.tsx", import.meta.url), "utf8");
-  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  const page = await readPage();
   assert.match(canvas, /type CanvasSignal = "idle" \| "composing" \| "generating" \| "responding" \| "interrupted"/);
   assert.match(canvas, /prefers-reduced-motion/);
   // Pixel ratio is capped (1.5, or 1 at low quality), and the point count can step down.
@@ -379,7 +380,7 @@ test("visual canvas uses explicit UI signals and honors performance/accessibilit
 
 test("profile renders the supplied portrait as a lit 3D relief, not CSS art", async () => {
   const profileCanvas = await readFile(new URL("../app/components/PortraitParticles.tsx", import.meta.url), "utf8");
-  const profilePage = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  const profilePage = await readPage();
   const stylesheet = await readFile(new URL("../app/freya.css", import.meta.url), "utf8");
   assert.match(profileCanvas, /portraitAsset from "\.\.\/static\/freya\.png"/);
   // Geometry is displaced from the image's own luminance, and textured with it in colour.
@@ -394,7 +395,7 @@ test("profile renders the supplied portrait as a lit 3D relief, not CSS art", as
 });
 
 test("layout has a separate profile/settings tab dialog, top composer, bottom canvas, and zoom left to the user", async () => {
-  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  const page = await readPage();
   const layout = await readFile(new URL("../app/layout.tsx", import.meta.url), "utf8");
   const css = await readFile(new URL("../app/freya.css", import.meta.url), "utf8");
   assert.match(page, /role="tablist"/);
@@ -429,7 +430,7 @@ test("portrait relief animates eyes and lips from measured landmarks", async () 
 });
 
 test("conversation history is persisted, sanitized on read, and bounded", async () => {
-  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  const page = await readPage();
   assert.match(page, /CONVERSATIONS_KEY = "freya\.v1\.conversations"/);
   assert.match(page, /function normalizeConversations/);
   // Stored history is user-editable, so every message is re-validated before render.

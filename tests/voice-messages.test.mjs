@@ -4,6 +4,7 @@ import { afterEach, test } from "node:test";
 import { speakable, spokenSeconds } from "../lib/voice-playback.ts";
 import { POST } from "../app/api/transcribe/route.ts";
 import { resetLocalRateLimitsForTests } from "../lib/rate-limit.ts";
+import { readPage } from "./source.mjs";
 
 const originalFetch = globalThis.fetch;
 const savedKey = process.env.GROQ_API_KEY;
@@ -61,7 +62,7 @@ test("provider failure detail never reaches the browser", async () => {
 });
 
 test("reply actions are gone; resend shows only for failed or unanswered messages", async () => {
-  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  const page = await readPage();
   assert.doesNotMatch(page, /MessageActions/);
   assert.match(page, /message\.failed \|\| \(awaitingReply && index === messages\.length - 1\)/);
 });

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { test, beforeEach } from "node:test";
+import { readPage } from "./source.mjs";
 
 /** Minimal speechSynthesis stand-in that records what it was asked to say. */
 function installSpeechStub() {
@@ -97,7 +98,7 @@ test("an unsupported browser reports instead of throwing", async () => {
 });
 
 test("voice notes play directly, not through a component that may be unmounted", async () => {
-  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  const page = await readPage();
   const note = await readFile(new URL("../app/components/VoiceNote.tsx", import.meta.url), "utf8");
   const playback = await readFile(new URL("../lib/voice-playback.ts", import.meta.url), "utf8");
   // The old regression: Speak set state read only by VoiceControls, which mounts solely inside

@@ -364,7 +364,8 @@ test("the file and drawing instructions only appear when they're relevant", () =
 test("she can answer with just a reaction", () => {
   assert.deepEqual(extractHerReaction("[[react:😂]]"), { text: "", reaction: "😂" });
   assert.deepEqual(extractHerReaction("[[react:🔥]] nice"), { text: "nice", reaction: "🔥" });
-  assert.deepEqual(extractHerReaction("[[react:💀]] nice"), { text: "nice" }, "only the ones on offer");
+  assert.deepEqual(extractHerReaction("[[react:🍕]] nice"), { text: "nice" }, "only the ones on offer");
+  assert.equal(extractHerReaction("[[react:💀]] lmao").reaction, "💀", "WhatsApp-style range");
   assert.equal(extractHerReaction("[[react:❤]]").reaction, "❤️");
   assert.deepEqual(extractHerReaction("no tag"), { text: "no tag" });
   const message = { id: "a", role: "user", content: "lol", herReaction: "😂" };

@@ -144,6 +144,11 @@ function fullSearchContext(text: string, sources: SearchSource[]) {
 }
 
 /** For a reply to a message that arrived while she was still sending the last one. */
+const PICTURE_OFFER_NOTE = (ofHer: boolean) => `
+
+A PICTURE?
+They might be asking for a picture${ofHer ? " of you" : ""}. You can really send one, but only if they want it: ask, your way, in a few words (e.g. whether they want you to send one). Don't describe a picture or pretend you sent one.`;
+
 const INTERRUPTED_NOTE = `
 
 YOU WERE INTERRUPTED: they sent this while you were still in the middle of replying, and you stopped (what you'd already sent is above). Answer what they just said. Either drop what you were going to say or finish that thought in a few words first, whichever a person would; don't apologise for it or mention being interrupted unless it's natural.`;
@@ -766,6 +771,8 @@ ${moodPrompt(sharedMood!)}` : "") +
 ${initiativePrompt(mood)}` : "") +
       (config.unhinged ? `\n\n${UNHINGED_PROMPT}` : "") +
       seenSection(seen, textingFirst) +
+      // "can i see you?": she can really send a picture, so she offers one instead of describing it.
+      (requestData.pictureOffer && typeof requestData.pictureOffer === "object" && !textingFirst ? PICTURE_OFFER_NOTE((requestData.pictureOffer as { ofHer?: unknown }).ofHer === true) : "") +
       // They wrote while she was mid-reply (lib/reply-queue): she stopped, like a person would.
       (requestData.interrupted === true && !textingFirst ? INTERRUPTED_NOTE : "") +
       // Last, because the last thing it reads is what a model follows most closely.

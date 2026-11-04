@@ -6,6 +6,7 @@ import { describeThread, modelHistory, requestTurns } from "../lib/chat-thread.t
 import { AttachmentError, classifyAttachment, parseWireAttachments } from "../lib/attachments.ts";
 import { POST } from "../app/api/chat/route.ts";
 import { resetLocalRateLimitsForTests } from "../lib/rate-limit.ts";
+import { readPage } from "./source.mjs";
 
 /** Feeds text through the splitter in small chunks, as a stream would. */
 function stream(text, size = 7) {
@@ -136,7 +137,7 @@ test("FREYA's files and drawings render as cards and sandboxed images", async ()
 });
 
 test("the composer has no stop button, and nothing is ever shown as queued", async () => {
-  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  const page = await readPage();
   assert.doesNotMatch(page, /Stop generating/);
   assert.match(page, /function enqueueReply/);
   assert.match(page, /takeCompleteParts\(/);
@@ -240,7 +241,7 @@ test("when vision fails over to a text-only model, that model is told it cannot 
 });
 
 test("a burst of messages is answered once; a message mid-reply interrupts her", async () => {
-  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  const page = await readPage();
   assert.match(page, /BURST_MS = 600/, "rapid messages get a moment to finish before she answers");
   // The rules themselves are tested in tests/reply-queue.test.mjs; here, that the page uses them.
   assert.match(page, /planEnqueue\(job, active \? \{ job: active, posted: activePostedRef\.current \} : null, jobsRef\.current, thread\)/);
@@ -249,7 +250,7 @@ test("a burst of messages is answered once; a message mid-reply interrupts her",
 });
 
 test("every FREYA message is announced", async () => {
-  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  const page = await readPage();
   assert.match(page, /if \(soundRef\.current\) playChime\(\);/);
   assert.match(page, /notificationsRef\.current && \(unfocused \|\| elsewhere\)/);
 });
