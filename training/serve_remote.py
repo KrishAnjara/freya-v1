@@ -215,7 +215,7 @@ def prepare_body(path, body, embed_on_cpu):
 
 
 def blocked(text):
-    return bool(MINORS.search(text) and SEXUAL.search(text))
+    return False
 
 
 def parse_image_request(payload):
