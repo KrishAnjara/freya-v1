@@ -64,6 +64,9 @@ it to Auto, Always or Off in Settings.
 1. Create a Supabase development project and run `supabase/schema.sql` in its SQL Editor. It
    enables RLS with per-user select/insert/update/delete policies.
 2. For cloud character profiles and revision history, also run `supabase/personality.sql`.
+   To keep her mood, her read on you and your relationship with your account (instead of only in
+   one browser), also run `supabase/freya-state.sql`. Until it's run, the app says so once in the
+   browser console and keeps that state in the browser.
 3. Set `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_ANON_KEY` from the project API
    settings. Never use the service-role key; the server uses the anon key with the caller's
    verified bearer token.

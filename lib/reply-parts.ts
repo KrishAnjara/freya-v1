@@ -197,6 +197,24 @@ export function bubbleDelay(part: string, followUp: boolean, energy?: number) {
 }
 
 /**
+ * How long to actually wait before posting this bubble, given how long the server has already
+ * taken.
+ *
+ * An evaluation timer starts the moment the request is sent and never resets: `evaluationElapsedMs`
+ * is how much of it has passed by the time this bubble's text is ready. That time already counts as
+ * her "typing" it, so it's subtracted from the length-based delay a bubble would otherwise get — a
+ * slow server (she's effectively been typing the whole time it answered) posts at once, a fast one
+ * still gets a believable pause. Consecutive bubbles never land closer than MIN_BUBBLE_GAP_MS apart,
+ * whatever the server's timing: `sinceLastPostedMs` is undefined for the first bubble, which has no
+ * such floor.
+ */
+export function bubbleWait(part: string, followUp: boolean, evaluationElapsedMs: number, sinceLastPostedMs?: number, energy?: number) {
+  const charDelay = bubbleDelay(part, followUp, energy);
+  const minGap = followUp && sinceLastPostedMs !== undefined ? MIN_BUBBLE_GAP_MS - sinceLastPostedMs : 0;
+  return Math.max(charDelay - evaluationElapsedMs, minGap);
+}
+
+/**
  * Casual texting rhythm: a paragraph is sometimes sent whole and sometimes broken after a
  * sentence, at random, the way people fire off a thought in two or three messages. Code,
  * lists, tables and quotes are never broken. `random` is injectable for tests.

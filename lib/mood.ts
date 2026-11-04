@@ -3,7 +3,11 @@
  * across conversations and server restarts. What they say moves it (lib/mood-appraisal reads the
  * conversation; the word rules here are the fallback, and all of Local-only and intimate chat). Time
  * moves it too: moods expire while they're away, she gets sad if they stay away, tires of very long
- * chats, and is glad when they come back. Nothing here is random.
+ * chats, and is glad when they come back. And she has a day of her own (lib/her-day): when nothing
+ * they did is behind her mood, a lecture bores her, a late night makes her wistful, a good day lifts
+ * her (ownMood). Nothing here is random: her day and its temper come from the clock and the date.
+ *
+ * How THEY seem is a separate thing, kept in lib/user-mood: their mood can move hers, never replace it.
  *
  * This is a character simulation the app keeps, not a measurement of anything inside a
  * model. It is framework-free and pure apart from the storage helpers, so the rules are
@@ -11,6 +15,7 @@
  * below, so nothing the browser sends is pasted into the prompt as free text.
  */
 
+import { herMoment, type ActivityName, type Temper } from "@/lib/her-day";
 import { isIntimateTone, mentionsMinors, soundsUpset } from "@/lib/intimacy";
 
 export const MOODS = {
@@ -112,6 +117,10 @@ export const MOOD_REASONS = {
   back: "they came back and you're glad",
   missed: "you haven't heard from them in ages and you've noticed",
   longChat: "you've been talking for ages and you're running out of steam",
+  // Her own day (ownMood): nothing to do with them, so she doesn't take it out on them.
+  herDay: "it's just the kind of day you're having; nothing to do with them",
+  lateHour: "it's late, and late nights do this to you",
+  sleepy: "you were asleep, or should be",
 } as const;
 export type MoodReason = keyof typeof MOOD_REASONS;
 export type Appraisal = { mood: MoodName; strength: "none" | "mild" | "strong"; reason?: MoodReason };
@@ -152,15 +161,70 @@ function enter(state: MoodState, name: MoodName, now: number, blend: number, why
  */
 export function resumeMood(state: MoodState, now = Date.now()): MoodState {
   const silent = now - state.lastUserAt;
-  if (silent >= MOOD_RESET_AFTER_MS) return state.name === "neutral" ? state : enter(state, "neutral", now, 0.5, "cooling");
+  if (silent >= MOOD_RESET_AFTER_MS) return state.name === "neutral" || isOwnDay(state) ? state : enter(state, "neutral", now, 0.5, "cooling");
   let current = state;
   for (let step = 0; step < 6; step += 1) {
-    const limit = EXPIRES_AFTER_MS[current.name];
+    // A mood from her own day lasts as long as that part of her day does (ownMood moves it on), not
+    // on a timer; only missing them, once they've talked, outlasts it.
+    const limit = isOwnDay(current) ? (current.talked > 0 ? MISSED_AFTER_MS : undefined) : EXPIRES_AFTER_MS[current.name];
     if (limit === undefined || silent < limit) break;
     current = enter(current, current.previous ?? EASES_TO[current.name] ?? "neutral", now, 0.3, "cooling");
   }
   if (current.name === "neutral" && current.talked > 0 && silent >= MISSED_AFTER_MS) return enter(current, "melancholy", now, 0.5, "missed");
   return current;
+}
+
+const OWN_DAY_REASONS = new Set<MoodReason>(["herDay", "lateHour", "sleepy"]);
+function isOwnDay(state: MoodState) {
+  return state.why !== undefined && OWN_DAY_REASONS.has(state.why);
+}
+
+/** Her own day takes over once they've been gone this long and nothing they did is still with her. */
+export const OWN_DAY_AFTER_MS = 20 * MINUTE;
+
+/**
+ * What each part of her day does to her, by the kind of day it is (lib/her-day). An ordinary day
+ * ("even") is the plain answer: lectures bore her, the library makes her fidgety, evenings are easy.
+ */
+const OWN_DAY: Record<ActivityName, Record<Temper, MoodName>> = {
+  asleep: { even: "tired", bright: "tired", flat: "tired", restless: "tired", soft: "tired" },
+  lateNight: { even: "content", bright: "playful", flat: "tired", restless: "restless", soft: "melancholy" },
+  lecture: { even: "bored", bright: "interested", flat: "tired", restless: "restless", soft: "content" },
+  shift: { even: "content", bright: "happy", flat: "tired", restless: "restless", soft: "content" },
+  library: { even: "restless", bright: "curious", flat: "bored", restless: "restless", soft: "content" },
+  evening: { even: "content", bright: "playful", flat: "tired", restless: "restless", soft: "melancholy" },
+  out: { even: "bored", bright: "happy", flat: "tired", restless: "restless", soft: "bored" },
+  lazy: { even: "content", bright: "happy", flat: "bored", restless: "restless", soft: "melancholy" },
+};
+
+/** The mood her own day puts her in right now, and why. */
+export function ownDayMood(now = Date.now()): { name: MoodName; why: MoodReason } {
+  const moment = herMoment(new Date(now));
+  return {
+    name: OWN_DAY[moment.name][moment.temper],
+    why: moment.name === "asleep" ? "sleepy" : moment.name === "lateNight" ? "lateHour" : "herDay",
+  };
+}
+
+/**
+ * Her own mood, when they aren't the reason for it: they've been gone a while, and she's either back
+ * to nothing in particular or already in a mood from her day. It follows her day as it moves on (a
+ * lecture, then her shift, then the evening) and leaves alone anything they caused that's still
+ * running (annoyed with them, missing them, glad they came back). How warm she is toward them isn't
+ * her day's business, so that stays as it was. Returns the same object when nothing changes.
+ */
+export function ownMood(state: MoodState, now = Date.now()): MoodState {
+  if (now - state.lastUserAt < OWN_DAY_AFTER_MS) return state;
+  const free = isOwnDay(state) || ((state.name === "neutral" || state.name === "content") && (state.why === undefined || state.why === "cooling"));
+  if (!free) return state;
+  const day = ownDayMood(now);
+  if (day.name === state.name && day.why === state.why) return state;
+  return { ...enter(state, day.name, now, 0.4, day.why), warmth: state.warmth };
+}
+
+/** Everything time does to her between messages: moods expire, she misses them, her day goes on. */
+export function passTime(state: MoodState, now = Date.now()): MoodState {
+  return ownMood(resumeMood(state, now), now);
 }
 
 /**
@@ -177,7 +241,8 @@ export function arrive(state: MoodState, now = Date.now()): MoodState {
     chatStart: newChat ? now : before.chatStart, chatMessages: newChat ? 1 : before.chatMessages + 1,
   };
   const welcome = WELCOME_AFTER_MS[before.name];
-  if (before.talked > 0 && welcome !== undefined && gap >= welcome) {
+  // Woken up by them, she's groggy first, not delighted.
+  if (before.talked > 0 && welcome !== undefined && gap >= welcome && before.why !== "sleepy") {
     return enter(next, gap >= VERY_PLEASED_AFTER_MS || before.name === "melancholy" ? "excited" : "happy", now, 0.5, "back");
   }
   const worn = next.chatMessages >= LONG_CHAT_MESSAGES || now - next.chatStart >= LONG_CHAT_MS;

@@ -108,15 +108,29 @@ Rules:
 **Seeing images.** For each turn with images:
 1. If the voice model that will answer has vision (Ollama reports `vision` in `/api/show`; the
    Colab 27B and the Qwen3.5 4B/9B do), the images go straight to it and FREYA answers herself.
-2. A describer reads the images first, in `FREYA_VISION_ORDER` (default `grok,own,gemini`):
-   Grok if a valid key is set, the own server's vision model (`FREYA_VISION_MODEL`), then Gemini.
-   The notes go into the prompt as reference material; the voice still answers in character.
+2. A describer reads the images first, in `FREYA_VISION_ORDER` (default `own,grok,gemini`):
+   the own server's vision model (`FREYA_VISION_MODEL`) first, then Grok if a valid key is set,
+   then Gemini. The notes go into the prompt as reference material; the voice still answers in
+   character.
 3. With `externalFiles: false`, only own-model describers are used. If none can see, FREYA says
    she can't see it rather than guessing.
 
-Text files are read in the browser and sent as text (credentials redacted). PDFs go to Gemini
-when external processing is allowed. Every attachment keeps its note ("[Attached image: …]") in
-the history, so later turns can refer to it; the bytes ride only on the turn that sent them.
+**Reading files, on the device** (`lib/local-reading.ts`, `lib/office-text.ts`). Files are read in
+the browser when they're attached, and what was read travels as text; the file stays here:
+- PDF: its text layer, page by page (pdf.js, up to 60 pages); scanned pages are rendered and read
+  by OCR (Tesseract, up to 5 pages). Only a PDF that can't be read this way is sent as bytes, for
+  Gemini, and only when external processing is allowed.
+- Word, Excel, PowerPoint (DOCX, XLSX, PPTX): unzipped with the browser's own DecompressionStream
+  and read from their XML; no library. Excel sheets come through by name as tab-separated rows.
+- Pictures: sent for vision as before, and any text in them (a screenshot, a receipt) is read by
+  OCR in the background; it goes along if it's ready when the message is sent.
+- Text and code files: as text (credentials redacted).
+- Programs (by name, type, or first bytes: MZ, ELF, Mach-O) and files nothing here can read
+  (archives, video, old .doc/.xls) are refused with a short notice, not attached.
+
+pdf.js and Tesseract load only when a file needs them; Tesseract downloads its English model (a few
+MB) the first time and the browser caches it. Every attachment keeps its note ("[Attached image: …]")
+in the history, so later turns can refer to it; the contents ride only on the turn that sent them.
 
 **Making images** (`lib/image-generation.ts`): Colab image server first (`FREYA_IMAGE_URL`:
 Qwen-Image 2.1 uncensored via ComfyUI; the helper model fixes spelling and grammar and rewrites
@@ -160,8 +174,50 @@ The portrait's face is decided by a small state machine, not chosen at random:
   12 s, and the same expression not again for 90 s.
 - **Reading** shows only for messages long enough to read; **thinking** only while she is
   actually working something out for a while.
-- **Glances** move only her eyes, never swap the photo, and only when nothing else is happening.
-- **Intensity** (Settings → Expressions): off, subtle, natural (default), expressive.
+- **Glances** (`planGlance`): the one place chance belongs, since nobody looks away on a schedule.
+  How often and where come from her mood: bored or restless she keeps looking off to the side,
+  warm or interested she holds their eye, annoyed she rolls her eyes up, tired or sad her gaze
+  drops; typing, she glances down at her phone. A glance moves her eyes with a small turn and
+  tilt of the head, never swaps the photo, and is skipped while she's reacting or reading.
+- **Head motion** (`moodMotion`): sway, pace, droop, lean and a small lift, per mood (tired sinks
+  and slows, excited fidgets, warm leans in), eased between moods, on incommensurate waves so it
+  never loops visibly.
+- **Intensity** (Settings → Expressions): off, subtle, natural (default), expressive. Off also
+  stops glances and mood motion.
+
+## 6b. Two moods (`lib/mood.ts`, `lib/user-mood.ts`)
+
+- **Hers** reacts to what they say (as before) and has a day of her own (`ownMood`): once they've
+  been gone 20 minutes and nothing they did is behind her mood, it follows what she's doing
+  (`lib/her-day.ts`: a lecture, her shift, a late night) and the day's temper (bright, even, flat,
+  restless, soft; fixed per date). Woken by them at 5 am she's groggy, not delighted.
+- **Theirs** is her read on them (stressed, sad, playful, flirty…), from the same mood-model call
+  when the turn may leave the machine, otherwise word rules, otherwise (camera on) their face. It
+  goes into the prompt as a read she could have wrong, never as her own feeling, and fades in
+  20-90 minutes. Real distress adds guidance to stay with them and point to real help.
+
+## 6c. The relationship (`lib/relationship.ts`)
+
+Affection, trust, attraction, friction and how well she knows them (messages and days) move a
+little with every message: kindness, laughing together and coming back bring her closer; opening
+up builds trust; flirting draws her in only once she likes them; rudeness costs affection and
+trust and leaves friction that an apology and time ease. The stage (stranger, acquaintance,
+friend, close, crush, together) moves one step at a time and doesn't flicker; "together" also
+needs them to ask, and she says "not yet" when she isn't there. Only fixed text reaches the prompt.
+It follows the "Use memories" setting; she texts first a little more as they get closer.
+
+**Where it's kept.** Her mood, her read on them and the relationship are saved per account in the
+browser and, when signed in, in Supabase (`supabase/freya-state.sql`, table `freya_state`, RLS per
+user); the newer copy wins when a browser opens. Memories and personality were already there.
+
+## 6d. Timing (`lib/model-timing.ts`, `lib/reply-parts.ts`)
+
+Each voice's time to first words and to the end is measured in the browser (running average per
+voice). A slow voice no longer means a minute of "typing…": she reads, the message shows as seen,
+and typing starts a typing-length before the reply is due (or as soon as it arrives). Each bubble's
+delay is its length-based typing time minus the time the server already took. The few answers the
+route settles itself (the time somewhere, news she can't check) are written in her voice and vary
+by turn; no model writes them, so news is never invented.
 
 ## 7. Presence canvas (`app/components/EmotionCanvas.tsx`)
 
@@ -170,6 +226,13 @@ a soft key light and rim light for depth, an inner core and outer haze. Mood cha
 geometry, light and pace over 2-3 seconds; speech is a smoothed envelope (it brightens and
 quickens slightly while she talks) rather than a pulse per token. Quality steps down
 automatically when frames run slow, and can be fixed in Settings.
+
+Gestures on top (`lib/presence-gestures.ts`, damped springs): the face her portrait shows moves
+the body (a laugh bounces, surprise jolts, affection warms and leans in, sadness sinks, annoyance
+pulls back and shakes); each message she posts runs a ring over the surface; their keystrokes
+make it shimmer; a click pokes it; her glances turn it. Her mood's habits come at irregular times
+while she's idle: bored or tired she sighs, restless she wanders, excited she hops, annoyed she
+shakes, curious she leans in.
 
 ## 8. Settings that do something
 

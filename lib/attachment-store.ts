@@ -10,8 +10,10 @@
 export type StoredAttachment = {
   /** Base64 without a data: prefix, for images, PDFs and other binary files. */
   data?: string;
-  /** Text and code files, as text. */
+  /** Text and code files, as text; or the text read from a PDF, document or picture on this device. */
   text?: string;
+  /** Where `text` came from when the file isn't plain text: its own text layer, or OCR. */
+  read?: "device" | "ocr";
 };
 
 const DB_NAME = "freya-attachments";

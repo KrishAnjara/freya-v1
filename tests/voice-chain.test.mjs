@@ -55,6 +55,18 @@ test("Local-only uses only this machine: the laptop stands in for a remote voice
   assert.equal(localVoiceAvailable({ AI_PROVIDER: "hybrid" }), true);
 });
 
+test("\"ollama\" in the fallback list puts this laptop's model before every cloud one", () => {
+  // The user's own setting: AI_FALLBACK_PROVIDER=ollama,groq,gemini with the voice on Colab.
+  const tiers = planVoiceChain({}, { ...COLAB, AI_FALLBACK_PROVIDER: "ollama,groq,gemini" });
+  assert.deepEqual(labels(tiers), ["ollama", "laptop", "groq", "gemini"]);
+  assert.equal(tiers[1].baseUrl, "http://127.0.0.1:11434");
+  assert.equal(tiers[1].model, "freya");
+  // With her voice already on this machine, it's simply first.
+  assert.deepEqual(labels(planVoiceChain({}, { AI_PROVIDER: "hybrid", AI_FALLBACK_PROVIDER: "ollama,groq,gemini" })), ["ollama", "groq", "gemini"]);
+  // And Local-only can use it.
+  assert.deepEqual(labels(planVoiceChain({ provider: "ollama", privacy: true }, { ...COLAB, AI_FALLBACK_PROVIDER: "ollama,groq" })), ["laptop"]);
+});
+
 test("a laptop address that isn't this machine is ignored", () => {
   assert.deepEqual(labels(planVoiceChain({}, { ...COLAB, LOCAL_OLLAMA_URL: "https://elsewhere.example.com" })), ["ollama", "groq"]);
 });

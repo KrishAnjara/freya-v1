@@ -27,11 +27,13 @@
     "@upstash/redis": "^1.39.0",
     "highlight.js": "^11.12.0",
     "next": "^15.5.0",
+    "pdfjs-dist": "^6.5.438",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "react-markdown": "^10.1.0",
     "rehype-highlight": "^7.0.2",
     "remark-gfm": "^4.0.1",
+    "tesseract.js": "^7.0.0",
     "three": "^0.186.1"
   },
   "devDependencies": {

@@ -107,6 +107,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .conversation { position: relative; width: 100%; max-width: 1000px; min-width: 0; min-height: 0; flex: 1; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; margin: 0 auto; padding: 40px clamp(22px, 5vw, 72px) 18px; scrollbar-color: #34303d transparent; scrollbar-width: thin; }
 .conversation.welcome { display: flex; align-items: center; justify-content: center; padding-top: 0; }
 .welcome-content { position: relative; width: 100%; max-width: 540px; padding: 20px 0; text-align: center; }
+.welcome-hint { margin: 0; color: #6f7a79; font: 9px var(--mono); letter-spacing: .08em; }
 .welcome h1 { margin: 0; color: #f2eff7; font: 500 clamp(40px, 5vw, 62px)/1.04 Georgia, "Times New Roman", serif; letter-spacing: -.045em; }
 .welcome h1 em { color: var(--violet); font-weight: 400; }
 .suggestions { display: grid; max-width: 390px; gap: 8px; margin: 0 auto; }
@@ -346,6 +347,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .profile-edit-button:hover { border-color: var(--cyan); }
 .profile-sigil { display: grid; min-height: 52px; margin-top: auto; place-items: center; color: rgba(194, 202, 195, .62); font-size: 39px; }
 .profile-footnote { margin: 0; color: var(--dim); font: 7px/1.55 var(--mono); }
+.profile-read { margin: -6px 0 0; color: #8c9896; font: 7px var(--mono); letter-spacing: .12em; }
 .center-privacy-note { grid-row: 5; align-self: center; color: rgba(144, 161, 161, .62); font: 7px var(--mono); letter-spacing: .03em; text-align: center; }
 .drawer-backdrop { display: none; }
 .settings-dialog-layer { position: fixed; z-index: 60; inset: 0; display: grid; place-items: center; padding: 24px; }
@@ -1027,7 +1029,6 @@ input, textarea, select, [contenteditable="true"] {
 
 .message-meta { display: flex; gap: 8px; margin-top: 4px; color: #6c7675; font: 7.5px var(--mono); letter-spacing: .12em; }
 .message.user .message-meta { justify-content: flex-end; }
-.message-meta .queued { color: #a7b0ae; animation: activity-blink 1.6s steps(1) infinite; }
 
 .reply-tag {
   display: flex; max-width: 100%; align-items: baseline; gap: 7px; margin: 0 0 5px; padding: 3px 8px 3px 7px;
@@ -1065,6 +1066,22 @@ button.attachment-face:hover { border-color: rgba(176, 188, 186, .5); background
   position: absolute; top: -6px; right: -6px; display: grid; width: 17px; height: 17px; place-items: center;
   border: 1px solid var(--line); border-radius: 50%; background: #111516; color: #cfd6d4; font-size: 11px; line-height: 1;
 }
+/* A picture opened over the chat: small, centred, closes on Escape or a click outside it. */
+.image-preview {
+  max-width: min(720px, calc(100vw - 32px)); max-height: calc(100dvh - 48px); padding: 0; overflow: hidden;
+  border: 1px solid rgba(150, 162, 162, .28); border-radius: 4px; background: #0b0e0f; color: #c4ccca;
+  box-shadow: 0 28px 100px rgba(0, 0, 0, .72);
+}
+.image-preview::backdrop { background: rgba(3, 5, 6, .72); backdrop-filter: blur(3px); }
+.image-preview[open] { animation: image-preview-in .16s ease-out; }
+.image-preview figure { display: grid; margin: 0; }
+.image-preview img { display: block; max-width: 100%; max-height: calc(100dvh - 110px); margin: 0 auto; object-fit: contain; }
+.image-preview figcaption { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-top: 1px solid var(--line); font: 8px var(--mono); letter-spacing: .06em; }
+.image-preview figcaption span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #8c9896; }
+.image-preview figcaption a, .image-preview figcaption button { padding: 4px 8px; border: 1px solid rgba(150, 162, 162, .3); border-radius: 2px; background: transparent; color: #cfd6d4; font: inherit; text-decoration: none; cursor: pointer; }
+.image-preview figcaption a:hover, .image-preview figcaption button:hover { border-color: rgba(176, 188, 186, .6); }
+@keyframes image-preview-in { from { opacity: 0; transform: scale(.97); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) { .image-preview[open] { animation: none; } }
 .composer-attachments { display: flex; align-items: center; gap: 10px; margin: 0 0 7px; }
 .attachment-preparing { color: #7d8786; font: 8px var(--mono); letter-spacing: .1em; }
 .attach-button {
@@ -1099,7 +1116,7 @@ button.attachment-face:hover { border-color: rgba(176, 188, 186, .5); background
 .menu-unread { margin-left: -4px; }
 .conversation-status.typing { background: #c9d1cf; animation: activity-blink 1s steps(1) infinite; }
 @media (prefers-reduced-motion: reduce) {
-  .message-meta .queued, .conversation-status.typing { animation: none; }
+  .conversation-status.typing { animation: none; }
 }
 
 /* Voice messages ---------------------------------------------------- */

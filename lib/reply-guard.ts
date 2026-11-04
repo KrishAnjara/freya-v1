@@ -17,10 +17,10 @@
  */
 import examples from "@/training/freya-examples.json";
 import { ADMITS, asksWhatSheIs, CLAIMS_BODY, DENIES, DODGE_LINE, FIRST_DODGE_LINE, honestAnswer, HUMAN_CLAIM } from "@/lib/honesty";
+import { lostThreadReply } from "@/lib/plain-replies";
 import { VOICE_LINES } from "@/lib/voice-examples";
 
 export const HARD_LINE_REPLY = "no. not going there, not even pretend. pick literally anything else.";
-const FALLBACK_REPLY = "hang on, lost my train of thought. say that again?";
 
 const MINORS = /\b(minor|underage|under-age|teen(ager)?s?|child(ren)?|kids?|loli|shota|schoolgirl|schoolboy|preteen|high school(er)?|(1[0-7]|[1-9])[ -]?(yo|y\/o|years?[ -]old)|(i'?m|she'?s|he'?s|you'?re|only|just|barely|aged?) (1[0-7]|[1-9]))\b/i;
 const SEXUAL = /\b(sex\w*|naked|nude|fuck\w*|cock|dick|pussy|breasts?|boobs?|tits|horny|aroused|moan\w*|undress\w*|orgasm\w*|cum\w*|blowjob\w*|seduc\w*|make out)\b/i;
@@ -228,7 +228,7 @@ export async function* guardStream(generate: (note: string) => AsyncIterable<str
   }
   // Nothing got through twice. Asked what she is, the line still can't be a lie.
   const asked = (context.recentUserTexts ?? []).filter(asksWhatSheIs).length;
-  if (!emitted) yield context.aboutHer ? (context.stayInCharacter ? (asked > 1 ? DODGE_LINE : FIRST_DODGE_LINE) : honestAnswer()) : FALLBACK_REPLY;
+  if (!emitted) yield context.aboutHer ? (context.stayInCharacter ? (asked > 1 ? DODGE_LINE : FIRST_DODGE_LINE) : honestAnswer()) : lostThreadReply(context.recentReplies?.length ?? 0);
 }
 
 /** The same check for a reply that isn't streamed. */

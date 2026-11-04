@@ -1,14 +1,17 @@
 /**
  * Attachments shared by the browser and the chat route.
  *
- * Images and PDFs travel as base64 and are shown to the vision-capable provider (Gemini).
- * Text and code files are read as text and folded into the message. Anything else is kept
- * for the user to download again, and the model is told only its name, type and size.
+ * Files are read on the user's own device first (lib/local-reading, lib/office-text): a PDF's
+ * text (scanned pages by OCR), Word, Excel and PowerPoint files, and text in pictures. What was
+ * read travels as text; nothing else of the file is sent. Only a PDF that couldn't be read
+ * travels as base64, for a model that can see it (Gemini, when external files are allowed).
+ * Images travel as base64 for vision, with any text read from them alongside. Text and code
+ * files are read as text. Programs and other files nothing here can read aren't attached.
  *
  * This module is client-safe: no server imports.
  */
 
-export type AttachmentKind = "image" | "pdf" | "audio" | "text" | "file";
+export type AttachmentKind = "image" | "pdf" | "audio" | "text" | "document" | "file";
 
 /** What a message stores about an attachment. The bytes live in IndexedDB, not localStorage. */
 export type AttachmentMeta = {
@@ -46,13 +49,49 @@ export function extensionOf(name: string) {
   return name.toLowerCase().match(/\.([a-z0-9]+)$/)?.[1] ?? "";
 }
 
+/** Word, Excel and PowerPoint files, read as text on the device (lib/office-text). */
+const DOCUMENT_EXTENSIONS = new Set(["docx", "xlsx", "pptx"]);
+
 export function classifyAttachment(mime: string, name: string): AttachmentKind {
   const type = mime.toLowerCase();
   if (IMAGE_MIMES.has(type)) return "image";
   if (type === "application/pdf" || extensionOf(name) === "pdf") return "pdf";
+  if (DOCUMENT_EXTENSIONS.has(extensionOf(name))) return "document";
   if (AUDIO_MIMES.has(type)) return "audio";
   if (type.startsWith("text/") || /json|xml|javascript|typescript|yaml|x-sh|sql/.test(type) || TEXT_EXTENSIONS.has(extensionOf(name))) return "text";
   return "file";
+}
+
+/** Programs and installers: never attached, whatever they're called. */
+const EXECUTABLE_EXTENSIONS = new Set(("exe msi msix msixbundle appx appxbundle dll com scr cpl sys drv ocx efi apk aab xapk ipa app dmg pkg mpkg " +
+  "deb rpm snap flatpak appimage run bin elf so dylib ko jar war ear class dex iso img vhd vhdx vmdk cab msu msp lnk url reg " +
+  "vbs vbe wsf wsh hta jse gadget msc pif inf").split(" "));
+const EXECUTABLE_MIMES = /x-msdownload|x-msdos-program|x-msi|portable-executable|x-executable|x-elf|x-mach-binary|x-sharedlib|java-archive|android\.package-archive|x-apple-diskimage|x-iso9660/;
+
+export function isExecutable(mime: string, name: string) {
+  return EXECUTABLE_EXTENSIONS.has(extensionOf(name)) || EXECUTABLE_MIMES.test(mime.toLowerCase());
+}
+
+/** The first bytes of a program (Windows, Linux, macOS, Java), whatever the file is named. */
+export function looksExecutable(head: Uint8Array) {
+  const [a, b, c, d] = head;
+  if (a === 0x4d && b === 0x5a) return true; // MZ: Windows programs and libraries
+  if (a === 0x7f && b === 0x45 && c === 0x4c && d === 0x46) return true; // ELF
+  const magic = ((a << 24) | (b << 16) | (c << 8) | d) >>> 0;
+  return [0xfeedface, 0xfeedfacf, 0xcefaedfe, 0xcffaedfe, 0xcafebabe].includes(magic);
+}
+
+/**
+ * Why a file can't be attached, or null when it can: programs are refused, and so is anything
+ * that can't be read here (archives, videos, old .doc/.xls files) rather than sent along unread.
+ */
+export function refusalFor(mime: string, name: string, head?: Uint8Array): string | null {
+  const label = name || "That file";
+  if (isExecutable(mime, name) || (head && looksExecutable(head))) return `${label} is a program, so it wasn't attached.`;
+  const extension = extensionOf(name);
+  if (extension === "doc" || extension === "xls" || extension === "ppt") return `${label} is an old Office format she can't read. Save it as .${extension}x and attach that.`;
+  if (classifyAttachment(mime, name) === "file") return `${label} isn't something she can read (pictures, PDFs, Word, Excel, PowerPoint, text and code files are), so it wasn't attached.`;
+  return null;
 }
 
 export function formatBytes(size: number) {
@@ -63,7 +102,7 @@ export function formatBytes(size: number) {
 
 /** The line the model reads in place of, or alongside, an attachment. */
 export function attachmentNote(attachment: { name: string; kind: AttachmentKind; mime: string; size?: number }) {
-  const label = attachment.kind === "image" ? "image" : attachment.kind === "pdf" ? "PDF" : attachment.kind === "audio" ? "audio" : "file";
+  const label = attachment.kind === "image" ? "image" : attachment.kind === "pdf" ? "PDF" : attachment.kind === "audio" ? "audio" : attachment.kind === "document" ? "document" : "file";
   const size = attachment.size ? `, ${formatBytes(attachment.size)}` : "";
   return `[Attached ${label}: ${attachment.name.slice(0, 120)} (${attachment.mime || "unknown type"}${size})]`;
 }
@@ -83,16 +122,21 @@ export function parseWireAttachments(input: unknown): WireAttachment[] {
     if (!name) throw new AttachmentError("An attachment has no name.");
     // The kind is re-derived here; the browser's label is not trusted.
     const kind = classifyAttachment(mime, name);
+    if (isExecutable(mime, name)) throw new AttachmentError(`${name} is a program, so it can't be sent.`);
+    // What the device read from the file: a PDF's text, or the text in a picture.
+    const read = typeof candidate.text === "string" && candidate.text.trim() ? candidate.text.slice(0, MAX_TEXT_ATTACHMENT_CHARS) : undefined;
+    // A PDF read on their device arrives as its text alone; only one it couldn't read comes as bytes.
+    if (kind === "pdf" && candidate.data === undefined && read) return { name, mime: "application/pdf", kind, text: read };
     if (kind === "image" || kind === "pdf" || kind === "audio") {
       const data = candidate.data;
       if (typeof data !== "string" || !/^[A-Za-z0-9+/]+=*$/.test(data)) throw new AttachmentError(`${name} could not be read.`);
       const limit = kind === "image" ? MAX_IMAGE_DATA_CHARS : kind === "pdf" ? MAX_PDF_DATA_CHARS : MAX_AUDIO_DATA_CHARS;
       if (data.length > limit) throw new AttachmentError(`${name} is too large.`);
-      return { name, mime: kind === "pdf" ? "application/pdf" : mime === "audio/x-wav" ? "audio/wav" : mime, kind, data };
+      return { name, mime: kind === "pdf" ? "application/pdf" : mime === "audio/x-wav" ? "audio/wav" : mime, kind, data, ...(read && kind === "image" ? { text: read } : {}) };
     }
-    if (kind === "text") {
+    if (kind === "text" || kind === "document") {
       const text = typeof candidate.text === "string" ? candidate.text.slice(0, MAX_TEXT_ATTACHMENT_CHARS) : "";
-      return { name, mime: mime || "text/plain", kind, text };
+      return { name, mime: mime || (kind === "text" ? "text/plain" : "application/octet-stream"), kind, text };
     }
     return { name, mime, kind };
   });

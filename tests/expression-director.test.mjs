@@ -94,3 +94,29 @@ test("intensity: off is always neutral, subtle is fainter, expressive stronger",
   const expressive = directFace(state, situation({ intensity: "expressive" })).face.level;
   assert.ok(subtle < 0.5 && subtle < natural && natural < expressive && expressive <= 1, `${subtle} ${natural} ${expressive}`);
 });
+
+test("her glances come from her mood: bored looks away often, warm holds their eye, tired looks down", async () => {
+  const { planGlance, moodMotion, STILL_MOTION } = await import("../lib/expression-director.ts");
+  // A fixed sequence of "dice" so the plan is exact.
+  const dice = (...values) => { let index = 0; return () => values[index++ % values.length]; };
+  const average = (mood) => {
+    let total = 0;
+    for (let index = 0; index < 50; index += 1) total += planGlance(mood, 0.5, { random: dice(index / 50, 0.5, 0.5, 0.5) }).wait;
+    return total / 50;
+  };
+  assert.ok(average("bored") < average("warm") / 2, "bored glances away far more often than warm");
+  assert.ok(average("restless") < average("content"));
+  const looks = (mood, options = {}) => new Set(Array.from({ length: 40 }, (_, index) => planGlance(mood, 0.5, { ...options, random: dice(0.3, index / 40, 0.5, 0.5) }).glance.look));
+  assert.deepEqual([...looks("tired")].sort(), ["down", "left", "right"]);
+  assert.ok(looks("annoyed").has("up"), "an eye-roll");
+  assert.ok(looks("neutral").has("left") && looks("neutral").has("right"), "left and right both");
+  const glance = planGlance("tired", 0.2, { random: dice(0.5, 0, 0.5, 0.5) }).glance;
+  assert.equal(glance.look, "down");
+  assert.ok(glance.y < 0 && glance.ms > 1000, "down, and held");
+  assert.ok([...looks("excited", { typing: true })].includes("down"), "typing, she looks at her phone");
+  // How she moves: nothing extra with expressions off, more with them on.
+  assert.deepEqual(moodMotion("excited", "off"), STILL_MOTION);
+  assert.ok(moodMotion("tired", "natural").droop > 0.4);
+  assert.ok(moodMotion("excited", "natural").pace > moodMotion("tired", "natural").pace);
+  assert.ok(moodMotion("warm", "natural").lean > 0 && moodMotion("bored", "natural").lean < 0);
+});

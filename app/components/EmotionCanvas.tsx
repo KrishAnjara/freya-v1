@@ -7,6 +7,9 @@ import { initialFormPose, moveForm, rotateForm, stepFormPose, zoomForm } from "@
 import { FORM_POINTS, type PointCloud } from "@/lib/visualize";
 import { state as telemetry, subscribeTelemetry, telemetryRevision } from "@/lib/stream-telemetry";
 import { PRESENCE_FRAGMENT, PRESENCE_VERTEX } from "@/app/components/presence-shader";
+import type { Expression } from "@/lib/expression";
+import type { Glance } from "@/lib/expression-director";
+import { gestureOffsets, initialGestures, kickBeat, kickKey, kickPoke, kickReaction, moodHabit, stepGestures } from "@/lib/presence-gestures";
 
 export type CanvasSignal = "idle" | "composing" | "generating" | "responding" | "interrupted";
 /** How much the canvas draws: auto steps down on its own when frames run slow. */
@@ -23,7 +26,12 @@ const FORM_COUNT = FORM_POINTS;
 /**
  * FREYA's presence: a particle body that shows her simulated inner state.
  *
- * Every behaviour is driven by a real signal, never by chance:
+ * Every behaviour is driven by a real signal (only the timing of her mood's idle habits is left
+ * to chance, in lib/presence-gestures):
+ *   GESTURES   the face her portrait shows (a laugh bounces, surprise jolts, sadness sinks), a ring
+ *              for each message she sends, a shimmer for their keystrokes, a poke, her mood's habits
+ *              (bored sighs, restless wandering, annoyed shakes) and her glances, shared with the
+ *              portrait.
  *   MOOD       the app's mood state (lib/mood): its name sets the body's shape, flow and light,
  *              energy sets breathing and size, warmth the colour temperature. Changes blend over
  *              two to three seconds; nothing jumps.
@@ -177,18 +185,36 @@ function startingLevel(quality: CanvasQuality): keyof typeof COUNTS {
   return cores <= 4 || memory <= 4 ? "medium" : "high";
 }
 
-export default function EmotionCanvas({ signal, mood, form = null, onClearForm, quality = "auto" }: { signal: CanvasSignal; mood: MoodState; form?: CanvasForm | null; onClearForm?: () => void; quality?: CanvasQuality }) {
+export default function EmotionCanvas({ signal, mood, form = null, onClearForm, quality = "auto", reaction = null, glance = null, beat = 0, typed = 0 }: {
+  signal: CanvasSignal; mood: MoodState; form?: CanvasForm | null; onClearForm?: () => void; quality?: CanvasQuality;
+  /** The latest face her portrait showed (lib/expression-director); each new one moves the body. */
+  reaction?: { expression: Expression; level: number; startedAt: number } | null;
+  /** Where she's glancing: the body turns that way with her eyes. */
+  glance?: Glance | null;
+  /** Counts her messages as they post: each one runs a ring over the surface. */
+  beat?: number;
+  /** How much they've typed: each keystroke makes her shimmer. */
+  typed?: number;
+}) {
   const hostRef = useRef<HTMLDivElement>(null);
   const [fallback, setFallback] = useState(false);
   const signalRef = useRef(signal);
   const moodRef = useRef(mood);
   const formRef = useRef<CanvasForm | null>(form);
+  const reactionRef = useRef(reaction);
+  const glanceRef = useRef(glance);
+  const beatRef = useRef(beat);
+  const typedRef = useRef(typed);
 
   // Re-render on stream events so the activity label stays true.
   useSyncExternalStore(subscribeTelemetry, telemetryRevision, () => 0);
   useEffect(() => { signalRef.current = signal; }, [signal]);
   useEffect(() => { moodRef.current = mood; }, [mood]);
   useEffect(() => { formRef.current = form; }, [form]);
+  useEffect(() => { reactionRef.current = reaction; }, [reaction]);
+  useEffect(() => { glanceRef.current = glance; }, [glance]);
+  useEffect(() => { beatRef.current = beat; }, [beat]);
+  useEffect(() => { typedRef.current = typed; }, [typed]);
 
   useEffect(() => {
     const host = hostRef.current;
@@ -224,6 +250,7 @@ export default function EmotionCanvas({ signal, mood, form = null, onClearForm, 
       squash: { value: 1 }, sink: { value: 0 }, lift: { value: 0 }, spin: { value: 0 }, speak: { value: 0 }, shiver: { value: 0 },
       brightness: { value: 1 }, tint: { value: new THREE.Vector3(0.76, 0.76, 0.74) }, lightDir: { value: new THREE.Vector3(-0.45, 0.6, 0.7) },
       pixelRatio: { value: pixelRatio }, focus: { value: 4.5 },
+      pulse: { value: 0 }, pulseAge: { value: 9 }, gaze: { value: new THREE.Vector3() },
     };
     const presenceMaterial = new THREE.ShaderMaterial({ uniforms, vertexShader: PRESENCE_VERTEX, fragmentShader: PRESENCE_FRAGMENT, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending });
     const presence = new THREE.Points(presenceGeometry, presenceMaterial);
@@ -270,6 +297,14 @@ export default function EmotionCanvas({ signal, mood, form = null, onClearForm, 
     let think = 0;
     let shiver = 0;
     let spin = 0;
+    // Gestures (lib/presence-gestures): reactions, her messages, their typing, a poke, mood habits.
+    // Whatever was already true when the canvas opened isn't news, so it doesn't fire.
+    const gestures = initialGestures();
+    let seenReaction = reactionRef.current?.startedAt ?? 0;
+    let seenBeat = beatRef.current;
+    let seenTyped = typedRef.current;
+    let lookX = 0;
+    let lookY = 0;
 
     const resize = () => {
       const bounds = host.getBoundingClientRect();
@@ -325,7 +360,8 @@ export default function EmotionCanvas({ signal, mood, form = null, onClearForm, 
     };
     const onLeave = () => { pointerX = 0; pointerY = 0; };
     const onDown = (event: PointerEvent) => {
-      if (!formInHand()) return;
+      // Her own presence can't be dragged about, but it notices being poked.
+      if (!formInHand()) { if (!formRef.current) kickPoke(gestures); return; }
       host.setPointerCapture(event.pointerId);
       pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
       pinchDistance = 0;
@@ -421,16 +457,46 @@ export default function EmotionCanvas({ signal, mood, form = null, onClearForm, 
       const formActive = Boolean(shownForm && shownForm.status !== "error");
       formLevel += ((formActive ? 1 : 0) - formLevel) * (1 - Math.exp(-dt * 2.4));
 
+      // What just happened moves her: a new face, a message she sent, a key they pressed.
+      const reaction = reactionRef.current;
+      if (reaction && reaction.startedAt !== seenReaction) {
+        seenReaction = reaction.startedAt;
+        kickReaction(gestures, reaction.expression, reaction.level, t);
+      }
+      if (beatRef.current !== seenBeat) { seenBeat = beatRef.current; kickBeat(gestures); }
+      if (typedRef.current !== seenTyped) { if (typedRef.current > seenTyped) kickKey(gestures); seenTyped = typedRef.current; }
+      moodHabit(gestures, currentMood.name, t, (activity === "idle" || activity === "listening") && !formActive);
+      stepGestures(gestures, dt);
+      const move = gestureOffsets(gestures, t);
+      // Her glance (shared with the portrait): the body turns and swells a little that way.
+      const glancing = glanceRef.current;
+      lookX += ((glancing?.x ?? 0) - lookX) * (1 - Math.exp(-dt * 4));
+      lookY += ((glancing?.y ?? 0) - lookY) * (1 - Math.exp(-dt * 4));
+      (uniforms.gaze.value as THREE.Vector3).set(lookX, lookY, 0.25 * Math.hypot(lookX, lookY));
+      uniforms.pulse.value = move.pulse;
+      uniforms.pulseAge.value = move.pulseAge;
+      // Her mood's own drift: restless wanders, excited fidgets, calm moods barely move.
+      const drift = style.drift * 2.2 * (1 - formLevel);
+      presence.position.set(
+        move.x + (Math.sin(t * 0.83 + 1.1) * 0.6 + Math.sin(t * 0.31 + 4.2) * 0.4) * drift,
+        move.y + (Math.sin(t * 0.67 + 2.3) * 0.6 + Math.sin(t * 0.23) * 0.4) * drift * 0.6,
+        move.z,
+      );
+      presence.rotation.z = move.roll;
+
       const breathRate = 0.45 + energy * 1.1;
       const breath = 1 + (0.022 + energy * 0.03) * Math.sin(t * breathRate);
       const warmTint: [number, number, number] = [0.98, 0.72, 0.52];
       const coolTint: [number, number, number] = [0.55, 0.64, 0.76];
-      const temperature = style.tint.map((value, channel) => value * 0.6 + (coolTint[channel] + (warmTint[channel] - coolTint[channel]) * warmth) * 0.4);
+      const temperature = style.tint.map((value, channel) => {
+        const mood = value * 0.6 + (coolTint[channel] + (warmTint[channel] - coolTint[channel]) * warmth) * 0.4;
+        return mood + (warmTint[channel] - mood) * move.warm * 0.5;
+      });
       uniforms.time.value = t;
       // Calm moods flow slowly; lively ones a little faster. Speech quickens it slightly.
-      uniforms.flow.value = 0.05 + style.waveSpeed * 0.055 + speak * 0.05;
-      uniforms.radius.value = RADIUS * style.scale * (0.62 + 0.38 * energy) * breath * (1 - 0.16 * think) * (1 - 0.35 * formLevel);
-      uniforms.amplitude.value = 0.035 + style.wave * 0.9 + style.drift * 0.6 + speak * 0.02;
+      uniforms.flow.value = 0.05 + style.waveSpeed * 0.055 + speak * 0.05 + move.shimmer * 0.04;
+      uniforms.radius.value = RADIUS * style.scale * (0.62 + 0.38 * energy) * breath * (1 - 0.16 * think) * (1 - 0.35 * formLevel) * move.scale;
+      uniforms.amplitude.value = 0.035 + style.wave * 0.9 + style.drift * 0.6 + speak * 0.02 + move.shimmer * 0.025;
       uniforms.detail.value = 0.6 + style.jag * 8;
       uniforms.squash.value = style.squash;
       uniforms.sink.value = style.sink;
@@ -439,7 +505,7 @@ export default function EmotionCanvas({ signal, mood, form = null, onClearForm, 
       uniforms.speak.value = speak;
       uniforms.shiver.value = shiver;
       // Restrained: brighter while listening or talking, never glaring.
-      uniforms.brightness.value = (0.62 + 0.42 * style.glow + 0.18 * listen + 0.12 * think + 0.12 * speak) * (1 - 0.96 * formLevel);
+      uniforms.brightness.value = (0.62 + 0.42 * style.glow + 0.18 * listen + 0.12 * think + 0.12 * speak + 0.3 * move.glow) * (1 - 0.96 * formLevel);
       (uniforms.tint.value as THREE.Vector3).set(temperature[0], temperature[1], temperature[2]);
       presence.visible = formLevel < 0.995;
 
@@ -492,8 +558,9 @@ export default function EmotionCanvas({ signal, mood, form = null, onClearForm, 
       const reach = 0.3 + style.lean;
       const noticeX = formInHand() ? 0 : pointerX;
       const noticeY = formInHand() ? 0 : pointerY;
-      rig.rotation.y += (noticeX * reach + Math.sin(t * 0.07) * 0.1 * (1 - formLevel) - rig.rotation.y) * (1 - Math.exp(-dt * 1.2));
-      rig.rotation.x += (noticeY * -0.18 - listen * 0.15 + Math.sin(t * 0.05) * 0.04 * (1 - formLevel) - rig.rotation.x) * (1 - Math.exp(-dt * 1.2));
+      const look = 1 - formLevel;
+      rig.rotation.y += (noticeX * reach + Math.sin(t * 0.07) * 0.1 * look + lookX * 0.45 * look - rig.rotation.y) * (1 - Math.exp(-dt * 1.2));
+      rig.rotation.x += (noticeY * -0.18 - listen * 0.15 - move.shimmer * 0.05 + Math.sin(t * 0.05) * 0.04 * look - lookY * 0.22 * look - rig.rotation.x) * (1 - Math.exp(-dt * 1.2));
       renderer.render(scene, camera);
     };
 

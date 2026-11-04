@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { formatBytes, type AttachmentMeta } from "@/lib/attachments";
 import { getAttachment } from "@/lib/attachment-store";
+import ImagePreview from "@/app/components/ImagePreview";
 
 function base64ToBlob(data: string, mime: string) {
   const binary = atob(data);
@@ -11,7 +12,7 @@ function base64ToBlob(data: string, mime: string) {
   return new Blob([bytes], { type: mime });
 }
 
-/** Opens (images, PDFs) or downloads (everything else) an attachment from local storage. */
+/** Opens (PDFs, audio) or downloads (everything else) an attachment from local storage. Pictures open in ImagePreview. */
 async function openAttachment(item: AttachmentMeta) {
   const stored = await getAttachment(item.id);
   const blob = stored?.data
@@ -35,11 +36,11 @@ async function openAttachment(item: AttachmentMeta) {
 }
 
 function FileGlyph({ kind }: { kind: AttachmentMeta["kind"] }) {
-  return <span className="attachment-glyph" aria-hidden="true">{kind === "pdf" ? "PDF" : kind === "audio" ? "AUDIO" : kind === "text" ? "TXT" : "FILE"}</span>;
+  return <span className="attachment-glyph" aria-hidden="true">{kind === "pdf" ? "PDF" : kind === "audio" ? "AUDIO" : kind === "text" ? "TXT" : kind === "document" ? "DOC" : "FILE"}</span>;
 }
 
 /** The full image, loaded from IndexedDB; the stored thumbnail shows until it arrives. */
-function AttachmentImage({ item }: { item: AttachmentMeta }) {
+function AttachmentImage({ item, onSource }: { item: AttachmentMeta; onSource?: (source: string) => void }) {
   const [source, setSource] = useState(item.thumb ?? "");
   useEffect(() => {
     let active = true;
@@ -48,6 +49,7 @@ function AttachmentImage({ item }: { item: AttachmentMeta }) {
     });
     return () => { active = false; };
   }, [item.id, item.mime]);
+  useEffect(() => { if (source) onSource?.(source); }, [source, onSource]);
   // Local data URLs: next/image has nothing to optimise here.
   return source
     // eslint-disable-next-line @next/next/no-img-element
@@ -63,8 +65,16 @@ type AttachmentListProps = {
 };
 
 export default function AttachmentList({ items, onRemove, onUnavailable }: AttachmentListProps) {
+  // The full picture of each image, once loaded, and the one open in the preview.
+  const [sources, setSources] = useState<Record<string, string>>({});
+  const [previewing, setPreviewing] = useState<AttachmentMeta | null>(null);
+  const closePreview = useCallback(() => setPreviewing(null), []);
+  const remember = useCallback((id: string, source: string) => setSources((known) => known[id] === source ? known : { ...known, [id]: source }), []);
   if (!items.length) return null;
-  const open = (item: AttachmentMeta) => void openAttachment(item).then((opened) => { if (!opened) onUnavailable?.(); });
+  const open = (item: AttachmentMeta) => {
+    if (item.kind === "image" && (sources[item.id] || item.thumb)) { setPreviewing(item); return; }
+    void openAttachment(item).then((opened) => { if (!opened) onUnavailable?.(); });
+  };
   return (
     <div className={`attachment-list ${onRemove ? "pending" : ""}`}>
       {items.map((item) => <div key={item.id} className={`attachment ${item.kind}`}>
@@ -74,11 +84,12 @@ export default function AttachmentList({ items, onRemove, onUnavailable }: Attac
             {item.kind === "image" && item.thumb ? <img src={item.thumb} alt=""/> : <FileGlyph kind={item.kind}/>}
             <span className="attachment-name">{item.name}</span>
           </span>
-          : <button type="button" className="attachment-face" onClick={() => open(item)} title={item.kind === "image" || item.kind === "pdf" ? `Open ${item.name}` : `Download ${item.name}`}>
-            {item.kind === "image" ? <AttachmentImage item={item}/> : <><FileGlyph kind={item.kind}/><span className="attachment-name">{item.name}</span><span className="attachment-size">{formatBytes(item.size)}</span></>}
+          : <button type="button" className="attachment-face" onClick={() => open(item)} title={item.kind === "image" ? `View ${item.name}` : item.kind === "pdf" ? `Open ${item.name}` : `Download ${item.name}`}>
+            {item.kind === "image" ? <AttachmentImage item={item} onSource={(source) => remember(item.id, source)}/> : <><FileGlyph kind={item.kind}/><span className="attachment-name">{item.name}</span><span className="attachment-size">{formatBytes(item.size)}</span></>}
           </button>}
         {onRemove && <button type="button" className="attachment-remove" onClick={() => onRemove(item.id)} aria-label={`Remove ${item.name}`}>×</button>}
       </div>)}
+      {previewing && <ImagePreview src={sources[previewing.id] || previewing.thumb || ""} name={previewing.name} onClose={closePreview}/>}
     </div>
   );
 }

@@ -6,7 +6,7 @@
  *      a vision projector lists "vision" in /api/show (the Colab Qwen3.8 27B and Qwen3.5 do; a
  *      text-only fine-tune does not). Checked per model, cached, never assumed.
  *   2. A describer writes notes first, for the voice to answer from: in FREYA_VISION_ORDER
- *      (default grok, own, gemini). "own" is a vision model on her own server
+ *      (default own, grok, gemini). "own" is a vision model on her own server
  *      (FREYA_VISION_MODEL). Grok and Gemini only when external file processing is allowed
  *      (externalFiles in freya.config.json, and never in Local-only mode).
  *
@@ -162,7 +162,8 @@ async function geminiDescribe(messages: ChatMessage[], signal: AbortSignal): Pro
 export type Description = { text: string; describer: Describer; partial: boolean };
 
 export function visionOrder(): Describer[] {
-  const names = (process.env.FREYA_VISION_ORDER || "grok,own,gemini").toLowerCase().split(",").map((name) => name.trim());
+  // Her own vision model first; the cloud only when it can't (FREYA_VISION_ORDER can change this).
+  const names = (process.env.FREYA_VISION_ORDER || "own,grok,gemini").toLowerCase().split(",").map((name) => name.trim());
   return [...new Set(names.filter((name): name is Describer => name === "grok" || name === "own" || name === "gemini"))];
 }
 

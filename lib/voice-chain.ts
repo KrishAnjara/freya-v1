@@ -79,14 +79,19 @@ function primaryOllama(env: Env, model?: string): OllamaTier {
   };
 }
 
-/** The extra own-model tiers behind a remote primary: the server's smaller model, then the laptop. */
-function ownFallbacks(env: Env, primary: Tier): OllamaTier[] {
+/**
+ * The extra own-model tiers behind a remote primary: the server's smaller model, then the laptop.
+ * The laptop's Ollama is in the chain when LOCAL_OLLAMA_URL is set, or when "ollama" is listed in
+ * AI_FALLBACK_PROVIDER ("ollama,groq,gemini": this machine's model before any cloud one).
+ */
+function ownFallbacks(env: Env, primary: Tier, options: ChainOptions = {}): OllamaTier[] {
   const tiers: OllamaTier[] = [];
   const fallbackModel = env.FREYA_FALLBACK_MODEL?.trim();
   if (primary.kind === "ollama" && !primary.local && fallbackModel && fallbackModel !== primary.model) {
     tiers.push({ ...primary, label: "server-fallback", model: fallbackModel, health: `${VOICE_SERVER_HEALTH}:${fallbackModel}` });
   }
-  const laptopUrl = env.LOCAL_OLLAMA_URL?.trim();
+  const listed = parseFallbacks(options.fallbackProvider || env.AI_FALLBACK_PROVIDER, new Set(["ollama"])).length > 0;
+  const laptopUrl = env.LOCAL_OLLAMA_URL?.trim() || (listed ? "http://127.0.0.1:11434" : "");
   if (laptopUrl && isLoopback(laptopUrl) && !(primary.kind === "ollama" && primary.local)) {
     tiers.push({ kind: "ollama", label: "laptop", baseUrl: trimUrl(laptopUrl), model: env.LOCAL_OLLAMA_MODEL?.trim() || "freya", local: true, own: true, health: "laptop-ollama" });
   }
@@ -124,14 +129,14 @@ export function planVoiceChain(options: ChainOptions = {}, env: Env = process.en
   if (options.privacy) {
     // Only this machine. A remote voice is replaced by the laptop's model when there is one.
     if (primary.local) return [primary];
-    const laptop = ownFallbacks(env, primary).find((tier) => tier.label === "laptop");
+    const laptop = ownFallbacks(env, primary, options).find((tier) => tier.label === "laptop");
     return laptop ? [laptop] : [primary];
   }
 
   const fallbackEnabled = options.fallbackEnabled ?? (env.AI_FALLBACK_ENABLED || "true").toLowerCase() !== "false";
   if (!fallbackEnabled) return [primary];
 
-  const tiers: Tier[] = [primary, ...(primary.own ? ownFallbacks(env, primary) : [])];
+  const tiers: Tier[] = [primary, ...(primary.own ? ownFallbacks(env, primary, options) : [])];
   if (options.cloud === false) return tiers;
 
   const requested = parseFallbacks(options.fallbackProvider || env.AI_FALLBACK_PROVIDER, new Set(["groq", "gemini", "grok", "ollama", "server"]));

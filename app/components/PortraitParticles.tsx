@@ -6,6 +6,7 @@ import Image from "next/image";
 import * as THREE from "three";
 import { captionRevision, getCaption, mouthOpening, speechEmphasis, subscribeCaption, tickCaption } from "@/lib/mouth-drive";
 import { imagesFor, isGlance, pickVariation, POSES, type Expression } from "@/lib/expression";
+import { STILL_MOTION, type Glance, type MoodMotion } from "@/lib/expression-director";
 import { faceGaze } from "@/lib/face-tracking";
 
 /** Square crop used for both the texture and the height map, so they always line up. */
@@ -117,6 +118,11 @@ function meshSegments() {
   return cores <= 4 ? 128 : SEGMENTS;
 }
 
+/** From this strength a face shows its own photo (mood faces are 0.2-0.4; Subtle scales them below). */
+const PHOTO_FROM_LEVEL = 0.18;
+/** Holding one face, she swaps to another photo of the same expression now and then, so she never freezes. */
+const HOLD_VARIATION_S: [number, number] = [35, 80];
+
 /** Smooth falloff, 1 at the centre of the region and 0 at its edge. */
 function falloff(distance: number) {
   if (distance >= 1) return 0;
@@ -126,15 +132,26 @@ function falloff(distance: number) {
 
 /**
  * `intensity` (0..1) is how strongly the expression shows (lib/expression-director): the pose is
- * scaled by it, and the expression's photo is used only from half strength up; below that the
+ * scaled by it, and the expression's photo is used from PHOTO_FROM_LEVEL up; below that the
  * face moves a little and the photo stays her resting one.
  */
-export default function PortraitParticles({ expression = "neutral", intensity = 1 }: { expression?: Expression; intensity?: number }) {
+export default function PortraitParticles({ expression = "neutral", intensity = 1, glance = null, motion = STILL_MOTION }: {
+  expression?: Expression;
+  intensity?: number;
+  /** A glance away from her mood (lib/expression-director): eyes, a little tilt and turn, held a moment. */
+  glance?: Glance | null;
+  /** How her head moves at rest in her mood: sway, pace, droop, lean, bounce. */
+  motion?: MoodMotion;
+}) {
   const hostRef = useRef<HTMLDivElement>(null);
   const expressionRef = useRef<Expression>(expression);
   const intensityRef = useRef(intensity);
+  const glanceRef = useRef<Glance | null>(glance);
+  const motionRef = useRef<MoodMotion>(motion);
   useEffect(() => { expressionRef.current = expression; }, [expression]);
   useEffect(() => { intensityRef.current = Math.max(0, Math.min(1, intensity)); }, [intensity]);
+  useEffect(() => { glanceRef.current = glance; }, [glance]);
+  useEffect(() => { motionRef.current = motion; }, [motion]);
   const [fallback, setFallback] = useState(false);
   const [failed, setFailed] = useState(false);
   const [disturbed, setDisturbed] = useState(false);
@@ -234,6 +251,7 @@ export default function PortraitParticles({ expression = "neutral", intensity = 
     let fadeTo: { image: HTMLImageElement; heights: Float32Array; url: string } | null = null;
     let fadeMix = 0;
     let lastExpression: Expression | null = null;
+    let nextVariationAt = Infinity;
     let wantedUrl = "base";
     let baseHeightCache: Float32Array | undefined;
     const baseHeights = () => (baseHeightCache ??= vertexHeights(reliefHeights(image, HEIGHT_SAMPLES)));
@@ -379,6 +397,15 @@ export default function PortraitParticles({ expression = "neutral", intensity = 
     let jaw = 0;              // smoothed mouth opening, so the jaw lags the lips slightly
     let headTilt = 0;
     let headTiltTarget = 0;
+    /*
+     * Her mood's motion, eased so a change of mood changes how she moves gradually. The sway runs on
+     * its own clock (so a faster pace doesn't jump the phase) and mixes slow waves with offsets
+     * picked per visit, so the movement never settles into a loop you can spot.
+     */
+    const moving: MoodMotion = { ...motionRef.current };
+    let swayClock = 0;
+    const phase = Array.from({ length: 6 }, () => Math.random() * Math.PI * 2);
+    const wave = (speed: number, a: number, b: number) => Math.sin(swayClock * speed + phase[a]) * 0.65 + Math.sin(swayClock * speed * 0.381 + phase[b]) * 0.35;
 
     const render = (timestamp: number) => {
       if (disposed) return;
@@ -430,7 +457,9 @@ export default function PortraitParticles({ expression = "neutral", intensity = 
         const requested = expressionRef.current;
         const level = intensityRef.current;
         // A faint expression moves the face but keeps her resting photo.
-        const current: Expression = level >= 0.5 || requested === "neutral" ? requested : "neutral";
+        // Her photo changes for any face the director chose; only a trace of one (Subtle) keeps the
+        // resting photo. At 0.5 every mood face (0.2-0.4) was below it and she never changed.
+        const current: Expression = level >= PHOTO_FROM_LEVEL || requested === "neutral" ? requested : "neutral";
         const posed = requested;
         // She keeps one image for an expression, and only now and then changes it for another of the
         // same. A glance with no image of its own moves her eyes and leaves her face alone.
@@ -444,6 +473,13 @@ export default function PortraitParticles({ expression = "neutral", intensity = 
           if (next) chosen.set(current, next);
           if (next || !isGlance(current)) wantedUrl = next ?? "base";
           loadExpressionImage(wantedUrl);
+          nextVariationAt = time + HOLD_VARIATION_S[0] + Math.random() * (HOLD_VARIATION_S[1] - HOLD_VARIATION_S[0]);
+        } else if (time > nextVariationAt && !fadeTo && !isGlance(current)) {
+          // The same face for a long time: another photo of it, faded in like any change.
+          const options = imagesFor(current, expressionImages);
+          const next = options.length > 1 ? pickVariation(options, shownUrl) : null;
+          if (next) { chosen.set(current, next); wantedUrl = next; loadExpressionImage(next); }
+          nextVariationAt = time + HOLD_VARIATION_S[0] + Math.random() * (HOLD_VARIATION_S[1] - HOLD_VARIATION_S[0]);
         }
         if (wantedUrl !== shownUrl && !fadeTo && shownImage && shownHeights) {
           const target = wantedUrl === "base" ? { image, heights: baseHeights() } : loaded.get(wantedUrl);
@@ -471,10 +507,14 @@ export default function PortraitParticles({ expression = "neutral", intensity = 
         const strength = posed === "neutral" ? 0 : Math.max(0.15, level);
         const pose = Object.fromEntries(Object.entries(fullPose).map(([key, value]) => [key, neutralPose[key as keyof typeof neutralPose] + (value - neutralPose[key as keyof typeof neutralPose]) * strength])) as typeof fullPose;
         const poseWeight = shownUrl === "base" || shownUrl === expressionImages.neutral?.[0] ? 1 : 0.3;
+        const wanted = motionRef.current;
+        for (const key of ["sway", "pace", "droop", "lean", "bounce"] as const) moving[key] += (wanted[key] - moving[key]) * 0.02 * step;
+        swayClock += (delta / 1000) * moving.pace;
+        const glancing = glanceRef.current;
         // A slow, small sway keeps a held expression alive without repeating a gesture.
-        browTarget = pose.brow * poseWeight + Math.sin(time * 0.37) * 0.05;
-        smileTarget = pose.smile * poseWeight + Math.sin(time * 0.23 + 1) * 0.03;
-        headTiltTarget = pose.tilt + Math.sin(time * 0.19) * 0.08;
+        browTarget = pose.brow * poseWeight + wave(0.37, 0, 1) * 0.05 * moving.sway;
+        smileTarget = pose.smile * poseWeight + wave(0.23, 2, 3) * 0.03 * moving.sway;
+        headTiltTarget = pose.tilt + wave(0.19, 4, 5) * 0.08 * moving.sway + (glancing?.tilt ?? 0);
         const poseLips = pose.lips * poseWeight * (posed === "laugh" ? 0.65 + 0.35 * Math.abs(Math.sin(time * 7)) : 1);
         // Hovering reads as attention: brows lift a little, the hint of a smile arrives.
         const attention = pointerActive ? 1 : 0;
@@ -490,14 +530,19 @@ export default function PortraitParticles({ expression = "neutral", intensity = 
         jaw += (lip - jaw) * 0.22 * step;
         headTilt += (headTiltTarget - headTilt) * 0.03 * step;
 
-        if (time > nextGlance) {
+        if (glancing) {
+          // A glance away (her mood's): held where it went, with the faintest drift.
+          glanceTargetX = Math.max(-1, Math.min(1, glancing.x + Math.sin(time * 1.3) * 0.03));
+          glanceTargetY = Math.max(-1, Math.min(1, glancing.y));
+          nextGlance = time + 0.4;
+        } else if (time > nextGlance) {
           // Saccades favour small movements; wide sweeps are rarer, as in a real gaze.
           // Around where the expression looks (up and aside when thinking, down when sad).
           const magnitude = Math.pow(Math.random(), 1.7) * 0.5;
           const angle = Math.random() * Math.PI * 2;
           glanceTargetX = Math.max(-1, Math.min(1, pose.gazeX + Math.cos(angle) * magnitude));
           glanceTargetY = Math.max(-1, Math.min(1, pose.gazeY + Math.sin(angle) * magnitude * 0.6));
-          nextGlance = time + 0.9 + Math.random() * 2.6;
+          nextGlance = time + (0.9 + Math.random() * 2.6) / Math.max(0.5, moving.pace);
         }
         // When the pointer is over her, she follows it instead of glancing idly.
         if (pointerActive) {
@@ -505,7 +550,7 @@ export default function PortraitParticles({ expression = "neutral", intensity = 
           glanceTargetY = Math.max(-1, Math.min(1, pointerWorldY / Math.max(halfHeight, 0.001)));
         }
         // With the camera on, she looks at them, except while she's deliberately glancing away.
-        const seen = pointerActive || posed.startsWith("look-") || posed === "reading" ? null : faceGaze();
+        const seen = pointerActive || glancing || posed.startsWith("look-") || posed === "reading" ? null : faceGaze();
         if (seen) {
           glanceTargetX = seen.x;
           glanceTargetY = seen.y;
@@ -622,12 +667,18 @@ export default function PortraitParticles({ expression = "neutral", intensity = 
         ripple *= Math.pow(0.9, step);
 
         // Parallax: a slight turn toward the pointer sells the depth the relief provides.
-        const targetYaw = pointerActive ? (pointerWorldX / Math.max(halfWidth, 0.001)) * 0.2 : seen ? seen.x * 0.12 : Math.sin(time * 0.3) * 0.05;
-        const targetPitch = pointerActive ? (-pointerWorldY / Math.max(halfHeight, 0.001)) * 0.13 : Math.sin(time * 0.23) * 0.03;
-        field.rotation.y += (targetYaw - field.rotation.y) * 0.05 * step;
+        // A glance turns her head a little after her eyes; a low mood bows it, a warm one leans in.
+        const targetYaw = pointerActive ? (pointerWorldX / Math.max(halfWidth, 0.001)) * 0.2 : seen ? seen.x * 0.12 : glancing ? glancing.x * 0.1 : wave(0.3, 1, 4) * 0.05 * moving.sway;
+        const targetPitch = (pointerActive ? (-pointerWorldY / Math.max(halfHeight, 0.001)) * 0.13 : glancing ? -glancing.y * 0.06 : wave(0.23, 3, 0) * 0.03 * moving.sway) + moving.droop * 0.08;
+        field.rotation.y += (targetYaw - field.rotation.y) * (glancing ? 0.035 : 0.05) * step;
         field.rotation.x += (targetPitch - field.rotation.x) * 0.05 * step;
         // A slow tilt keeps the head alive between gestures.
         field.rotation.z += (headTilt * 0.05 - field.rotation.z) * 0.03 * step;
+        // Excited, a small lift now and then; tired or sad, she sinks a little; warm or interested,
+        // she leans toward them, bored or put off she sits back.
+        const lift = moving.bounce > 0.01 ? Math.max(0, Math.sin(swayClock * 2.1 + phase[2])) ** 3 * moving.bounce * 0.035 : 0;
+        field.position.y += ((lift - moving.droop * 0.05) - field.position.y) * 0.08 * step;
+        field.position.z += (moving.lean * 0.18 - field.position.z) * 0.04 * step;
 
         // Drift the coloured lights so the palette keeps shifting across her face.
         key.position.x = -2.2 + Math.sin(time * 0.21) * 1.1;

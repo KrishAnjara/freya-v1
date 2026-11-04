@@ -135,12 +135,13 @@ test("FREYA's files and drawings render as cards and sandboxed images", async ()
   assert.doesNotMatch(markdown, /dangerouslySetInnerHTML/);
 });
 
-test("the composer has no stop button; messages sent mid-reply are queued", async () => {
+test("the composer has no stop button, and nothing is ever shown as queued", async () => {
   const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
   assert.doesNotMatch(page, /Stop generating/);
   assert.match(page, /function enqueueReply/);
   assert.match(page, /takeCompleteParts\(/);
   assert.doesNotMatch(page, /useTypewriter|AssistantMessage/);
+  assert.doesNotMatch(page, /queued/i, "a message sent mid-reply interrupts her instead of waiting");
 });
 
 const originalFetch = globalThis.fetch;
@@ -238,11 +239,13 @@ test("when vision fails over to a text-only model, that model is told it cannot 
   assert.match(groqBody.messages.at(-1).content, /could not be passed to you\. You cannot see or hear it/);
 });
 
-test("a burst of messages is answered once; a reply with nothing on screen yet is restarted", async () => {
+test("a burst of messages is answered once; a message mid-reply interrupts her", async () => {
   const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
   assert.match(page, /BURST_MS = 600/, "rapid messages get a moment to finish before she answers");
-  assert.match(page, /activePostedRef\.current === 0\) \{\n\s*activeChatRequest\.current\?\.abort\(\);/, "an unstarted reply is called off and restarted for the whole burst");
-  assert.match(page, /if \(waiting && !interrupted\) waiting\.targetId = job\.targetId;/, "messages split by a FREYA reply are not merged");
+  // The rules themselves are tested in tests/reply-queue.test.mjs; here, that the page uses them.
+  assert.match(page, /planEnqueue\(job, active \? \{ job: active, posted: activePostedRef\.current \} : null, jobsRef\.current, thread\)/);
+  assert.match(page, /if \(plan\.abortActive\) activeChatRequest\.current\?\.abort\(\);/);
+  assert.match(page, /interrupted: true/, "the reply after an interruption tells the server she was cut off");
 });
 
 test("every FREYA message is announced", async () => {

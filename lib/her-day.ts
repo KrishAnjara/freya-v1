@@ -41,21 +41,54 @@ function istParts(now: Date) {
   return { weekday: parts.find((part) => part.type === "weekday")?.value ?? "Mon", hour: Number(parts.find((part) => part.type === "hour")?.value ?? 12) };
 }
 
-function activityAt(weekday: string, hour: number): Activity {
-  if (hour >= 3 && hour < 9) return ACTIVITY.asleep;
-  if (hour >= 23 || hour < 3) return ACTIVITY.lateNight;
-  if (weekday === "Sun") return ACTIVITY.lazy;
-  if (weekday === "Sat") return hour >= 11 && hour < 17 ? ACTIVITY.shift : hour >= 19 ? ACTIVITY.out : ACTIVITY.lazy;
-  if (hour >= 9 && hour < 13) return ACTIVITY.lecture;
-  if (hour >= 14 && hour < 19) return ["Mon", "Wed", "Fri"].includes(weekday) ? ACTIVITY.shift : ACTIVITY.library;
-  return ACTIVITY.evening;
+export type ActivityName = keyof typeof ACTIVITY;
+
+function activityAt(weekday: string, hour: number): ActivityName {
+  if (hour >= 3 && hour < 9) return "asleep";
+  if (hour >= 23 || hour < 3) return "lateNight";
+  if (weekday === "Sun") return "lazy";
+  if (weekday === "Sat") return hour >= 11 && hour < 17 ? "shift" : hour >= 19 ? "out" : "lazy";
+  if (hour >= 9 && hour < 13) return "lecture";
+  if (hour >= 14 && hour < 19) return ["Mon", "Wed", "Fri"].includes(weekday) ? "shift" : "library";
+  return "evening";
+}
+
+/** The kind of day she's having: fixed for the whole day (by the date in India), different from day to day. */
+export const TEMPERS = ["bright", "even", "flat", "restless", "soft"] as const;
+export type Temper = (typeof TEMPERS)[number];
+/** "even" twice: most days are ordinary ones. */
+const TEMPER_DAYS: Temper[] = ["even", "bright", "flat", "even", "restless", "soft", "bright"];
+
+export function dayTemper(now = new Date()): Temper {
+  const day = Math.floor((now.getTime() + 19_800_000) / 86_400_000);
+  // Mixed, so the days don't come round in a cycle you'd notice.
+  let hash = Math.imul(day ^ 0x9e3779b9, 0x85ebca6b);
+  hash = Math.imul(hash ^ (hash >>> 13), 0xc2b2ae35);
+  hash ^= hash >>> 16;
+  return TEMPER_DAYS[(hash >>> 0) % TEMPER_DAYS.length];
 }
 
 export function herMoment(now = new Date()) {
   const { weekday, hour } = istParts(now);
-  const activity = activityAt(weekday, hour);
+  const name = activityAt(weekday, hour);
+  const activity: Activity = ACTIVITY[name];
   const week = Math.floor((now.getTime() + 19_800_000) / (7 * 86_400_000));
-  return { activity, busy: Boolean(activity.busy), asleep: Boolean(activity.asleep), thisWeek: WEEKS[week % WEEKS.length] };
+  return { name, activity, busy: Boolean(activity.busy), asleep: Boolean(activity.asleep), thisWeek: WEEKS[week % WEEKS.length], temper: dayTemper(now) };
+}
+
+/** One quiet line for an empty chat, about where she is now: no suggested messages to click. */
+const STATUS_LINE: Record<ActivityName, string> = {
+  asleep: "Freya's probably asleep. Text her anyway.",
+  lecture: "Freya's in a lecture, half listening.",
+  shift: "Freya's at work. She checks her phone when nobody's looking.",
+  library: "Freya's meant to be working.",
+  evening: "Freya's home for the evening.",
+  out: "Freya's out, checking her phone.",
+  lazy: "Slow day for Freya.",
+  lateNight: "Freya's up late, reading.",
+};
+export function herStatusLine(now = new Date()) {
+  return STATUS_LINE[herMoment(now).name];
 }
 
 /** The prompt section. Strangers get the vague version, for the same reason as lib/canon. */

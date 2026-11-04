@@ -22,8 +22,18 @@ import AttachmentList from "@/app/components/Attachments";
 import { AUDIO_MIMES, AttachmentError, MAX_ATTACHMENTS, type AttachmentKind, type AttachmentMeta, type WireAttachment } from "@/lib/attachments";
 import { deleteAttachments, getAttachment, putAttachment } from "@/lib/attachment-store";
 import { prepareAttachment } from "@/lib/prepare-attachment";
-import { becomesLongForm, bubbleDelay, chopCasually, isAside, paceFactor, takeCompleteParts, wantsLongForm, busyDelay, readingDelay } from "@/lib/reply-parts";
-import { addCuriosity, arrive, extractMoodTag, initialMood, loadMood, mergeVerdict, normalizeMood, reactToMessage, resumeMood, saveMood, type MoodState } from "@/lib/mood";
+import { becomesLongForm, bubbleWait, chopCasually, isAside, paceFactor, takeCompleteParts, wantsLongForm, busyDelay, readingDelay } from "@/lib/reply-parts";
+import { addCuriosity, arrive, extractMoodTag, initialMood, loadMood, mergeVerdict, normalizeMood, passTime, reactToMessage, resumeMood, saveMood, type MoodState } from "@/lib/mood";
+import { loadUserMood, nextUserMood, normalizeUserMood, saveUserMood, type UserMood } from "@/lib/user-mood";
+import { expectedTiming, loadTimings, recordTiming, saveTimings, typingStartsAt, type Timings } from "@/lib/model-timing";
+import { herStatusLine } from "@/lib/her-day";
+import { initialBond, initiativeFactor, loadBond, normalizeBond, saveBond, type Bond, type Stage } from "@/lib/relationship";
+import { newerState, pullState, pushState } from "@/lib/freya-state-sync";
+
+/** The relationship, as the profile panel shows it. */
+const STAGE_LABEL: Record<Stage, string> = {
+  stranger: "JUST MET", acquaintance: "GETTING TO KNOW EACH OTHER", friend: "FRIENDS", close: "CLOSE", crush: "SOMETHING'S THERE", together: "TOGETHER",
+};
 import { contentWords } from "@/lib/stream-telemetry";
 import { isReasoningMode, needsReasoning, type ReasoningMode } from "@/lib/reasoning-signal";
 import LongformMessage from "@/app/components/LongformMessage";
@@ -37,6 +47,7 @@ import dynamic from "next/dynamic";
 import type { CanvasForm, CanvasQuality, CanvasSignal } from "@/app/components/EmotionCanvas";
 import { PICTURE_STYLES, PictureCard, VisualizationCard, type PictureInfo, type VisualizationInfo } from "@/app/components/MediaCards";
 import { commandHints, parseCommand, pictureRequest } from "@/lib/composer-commands";
+import { planEnqueue, type QueueJob } from "@/lib/reply-queue";
 import { FORM_POINTS, validateSpec, type VisualSpec } from "@/lib/visualize";
 import { cloudForSpec } from "@/lib/visualize-client";
 import { requestedExpression } from "@/lib/expression";
@@ -76,8 +87,6 @@ type Message = {
   attachments?: AttachmentMeta[];
   /** ISO time the message was posted. */
   at?: string;
-  /** Sent while FREYA was still answering something else; answered after that finishes. */
-  queued?: boolean;
   /** A user voice note: the recording (in IndexedDB); `content` holds its transcript. */
   voice?: RecordedAudio;
   /** A FREYA message delivered as a voice note, spoken by the browser. */
@@ -116,7 +125,8 @@ type Conversation = {
   recap?: string;
 };
 /** One reply FREYA owes: to `targetId`, or a continuation of `turn` when `extraPrompt` is set. */
-type ReplyJob = { conversationId: string; targetId: string; turn?: string; extraPrompt?: string; initiative?: boolean };
+/** One reply FREYA owes: to `targetId`, a continuation of `turn` (`extraPrompt`), or a text she starts. */
+type ReplyJob = QueueJob;
 type Style = "adaptive" | "friendly" | "direct" | "professional" | "playful";
 type PersonalityRevision = { revision: number; profile: CharacterProfile; summary: string; rollback_from: number | null; created_at: string };
 type PersonalityProposal = { id: string; category: string; description: string; confidence: number; evidence: string[]; origin: string; status: string; created_at: string };
@@ -201,7 +211,7 @@ function sanitizeAttachments(value: unknown): AttachmentMeta[] | undefined {
   return items.length ? items : undefined;
 }
 
-/** Keeps only known fields. A queue does not survive a reload, so `queued` is dropped. */
+/** Keeps only known fields. */
 function sanitizeMessage(message: Message): Message {
   const optional = (value: unknown) => typeof value === "string" && value ? value : undefined;
   const attachments = sanitizeAttachments(message.attachments);
@@ -351,7 +361,8 @@ function formatRelative(iso: string) {
 }
 
 type ReplyStreamHandlers = {
-  onMeta: (sources: Source[], searchStatus: string, reasoned: string[], herBusy: boolean, mood: MoodState | null) => void;
+  /** `them` is undefined when the server didn't read their mood this time, null when it has faded. */
+  onMeta: (sources: Source[], searchStatus: string, reasoned: string[], herBusy: boolean, mood: MoodState | null, them: UserMood | null | undefined, bond: Bond | null) => void;
   onProvider: (provider: string) => void;
   onDelta: (delta: string) => void;
   onDone: (data: { truncated?: boolean } | null) => void;
@@ -387,6 +398,8 @@ async function readReplyStream(body: ReadableStream<Uint8Array>, signal: AbortSi
               Array.isArray(reasoned) ? reasoned.filter((name): name is string => typeof name === "string") : [],
               (data as { herBusy?: unknown })?.herBusy === true,
               normalizeMood((data as { mood?: unknown })?.mood),
+              data && typeof data === "object" && "userMood" in data ? normalizeUserMood((data as { userMood?: unknown }).userMood) : undefined,
+              normalizeBond((data as { bond?: unknown })?.bond),
             );
           } else if (event === "provider" && typeof (data as { provider?: unknown })?.provider === "string") {
             handlers.onProvider((data as { provider: string }).provider);
@@ -504,6 +517,10 @@ export default function Home() {
   const [notificationsOn, setNotificationsOn] = useState(false);
   /** FREYA's mood. Starts neutral for the server render, then loads from this browser. */
   const [mood, setMood] = useState<MoodState>(() => initialMood(0));
+  /** How THEY seem to her (lib/user-mood): a read on them, never her own feeling. */
+  const [userMood, setUserMood] = useState<UserMood | null>(null);
+  /** Where the two of them are (lib/relationship). */
+  const [bond, setBond] = useState<Bond>(() => initialBond(0));
   const [initiativeOn, setInitiativeOn] = useState(true);
   const [soundOn, setSoundOn] = useState(true);
   /** Adult roleplay, opt-in after an 18+ confirmation. */
@@ -533,6 +550,8 @@ export default function Home() {
     intensity: expressionIntensity,
   });
   const offerFace = portrait.offer;
+  /** Counts the messages she posts here, so the canvas can answer each one. */
+  const [bubbleBeat, setBubbleBeat] = useState(0);
   /** Set when a reply used up its continuation budget and still had more to say. */
   const [truncatedReplyId, setTruncatedReplyId] = useState("");
   const [user, setUser] = useState<User | null>(null);
@@ -542,7 +561,11 @@ export default function Home() {
   useEffect(() => {
     if (moodAccountRef.current === moodAccount) return;
     moodAccountRef.current = moodAccount;
-    if (moodLoadedRef.current) setMood(resumeMood(loadMood(moodAccount)));
+    if (moodLoadedRef.current) {
+      setMood(passTime(loadMood(moodAccount)));
+      setUserMood(loadUserMood(moodAccount));
+      setBond(loadBond(moodAccount));
+    }
   }, [moodAccount]);
   const [authEmail, setAuthEmail] = useState("");
   const [authPassword, setAuthPassword] = useState("");
@@ -570,6 +593,13 @@ export default function Home() {
   /** Messages the running reply has put on screen; 0 means it can still be called off. */
   const activePostedRef = useRef(0);
   const moodRef = useRef<MoodState>(mood);
+  const userMoodRef = useRef<UserMood | null>(null);
+  const bondRef = useRef<Bond>(bond);
+  /** Whether this account's state can sync with Supabase (lib/freya-state-sync). */
+  const cloudStateRef = useRef<"unknown" | "ready" | "missing">("unknown");
+  /** Each voice's measured speed (lib/model-timing), and which one answered last. */
+  const timingsRef = useRef<Timings>({});
+  const lastProviderRef = useRef("");
   const moodLoadedRef = useRef(false);
   /** Whose mood this is: each account on this browser has its own. */
   const moodAccountRef = useRef("");
@@ -583,6 +613,31 @@ export default function Home() {
   // Saved only once the stored mood has been read: saving first overwrote it with the blank
   // starting state, so her mood was lost on every reload.
   useEffect(() => { moodRef.current = mood; if (moodLoadedRef.current) saveMood(mood, moodAccountRef.current); }, [mood]);
+  useEffect(() => { userMoodRef.current = userMood; if (moodLoadedRef.current) saveUserMood(userMood, moodAccountRef.current); }, [userMood]);
+  useEffect(() => { bondRef.current = bond; if (moodLoadedRef.current) saveBond(bond, moodAccountRef.current); }, [bond]);
+  // Signed in: her state follows the account (Supabase freya_state). The newer copy wins on
+  // arrival; changes are written back a few seconds after they settle.
+  useEffect(() => {
+    if (!hydrated || !supabase || !user) { cloudStateRef.current = "unknown"; return; }
+    let cancelled = false;
+    void pullState(supabase, user.id).then((remote) => {
+      if (cancelled) return;
+      cloudStateRef.current = remote === "missing" ? "missing" : "ready";
+      if (!remote || remote === "missing") return;
+      const newer = newerState({ mood: moodRef.current, userMood: userMoodRef.current, bond: bondRef.current }, remote);
+      if (newer.bond) setBond(newer.bond);
+      if (newer.mood) setMood(passTime(newer.mood));
+      if (newer.userMood) setUserMood(nextUserMood(newer.userMood, null, Date.now(), newer.userMood.source));
+    }).catch(() => { if (!cancelled) cloudStateRef.current = "unknown"; });
+    return () => { cancelled = true; };
+  }, [hydrated, user]);
+  useEffect(() => {
+    if (!supabase || !user || cloudStateRef.current !== "ready") return;
+    const timer = window.setTimeout(() => {
+      void pushState(supabase, user.id, { mood, userMood, bond }).then((result) => { if (result === "missing") cloudStateRef.current = "missing"; }).catch(() => undefined);
+    }, 5000);
+    return () => window.clearTimeout(timer);
+  }, [mood, userMood, bond, user]);
   useEffect(() => { initiativeRef.current = { on: switches.textsFirst ?? initiativeOn, autonomy: autonomyLevel }; }, [switches.textsFirst, initiativeOn, autonomyLevel]);
 
   // Chrome fills the voice list asynchronously, so prime it before the first Speak press.
@@ -613,7 +668,11 @@ export default function Home() {
       setCloudFallbackOn(localStorage.getItem(CLOUD_FALLBACK_KEY) !== "false");
       setFeedbackCount(loadFeedback().length);
       moodLoadedRef.current = true;
-      setMood(resumeMood(loadMood()));
+      setMood(passTime(loadMood()));
+      setUserMood(loadUserMood());
+      setBond(loadBond());
+      timingsRef.current = loadTimings();
+      lastProviderRef.current = expectedTiming(timingsRef.current) ? Object.entries(timingsRef.current).sort(([, a], [, b]) => b.at - a.at)[0][0] : "";
     } catch { /* Defaults remain safe when local settings storage is unavailable. */ }
   }, [hydrated]);
 
@@ -1118,9 +1177,11 @@ export default function Home() {
   useEffect(() => {
     if (!hydrated) return;
     const tick = () => {
-      // Her mood only changes with the conversation; the clock only checks for a long gap or a restart.
+      // Time moves her mood too: moods wear off, she misses them, and her own day goes on (lib/mood).
       checkServerRun();
-      setMood((current) => resumeMood(current));
+      setMood((current) => passTime(current));
+      // Their mood fades on its own when nothing new has shown how they are.
+      setUserMood((current) => nextUserMood(current, null, Date.now(), current?.source ?? "words"));
       const state = moodRef.current;
       const now = Date.now();
       const { on, autonomy } = initiativeRef.current;
@@ -1130,7 +1191,8 @@ export default function Home() {
       const last = conversation?.messages.at(-1);
       // Only into a conversation that exists and isn't waiting on her to answer.
       if (!conversation || !last || last.role !== "assistant") return;
-      const gap = ((8 + Math.random() * 37) * 60_000) / Math.max(0.3, state.energy);
+      // Closer, she texts first more often (lib/relationship).
+      const gap = (((8 + Math.random() * 37) * 60_000) / Math.max(0.3, state.energy)) * initiativeFactor(bondRef.current);
       setMood((current) => ({ ...current, nextInitiativeAt: now + gap }));
       enqueueReply({ conversationId: conversation.id, targetId: last.id, initiative: true });
     };
@@ -1471,28 +1533,16 @@ export default function Home() {
   }
 
   /**
-   * Queues a reply. Messages sent while FREYA is busy wait their turn; several sent to the same
-   * conversation meanwhile are answered together, in one reply to the latest of them.
+   * A reply is owed (lib/reply-queue decides how it fits with what she's doing). A new message in
+   * the conversation she's replying in interrupts her: the rest of that reply is dropped, what she
+   * already sent stays, and she answers what they've said since, knowing she was cut off.
    */
   function enqueueReply(job: ReplyJob) {
-    // A reply still being thought about (nothing on screen yet) is called off and restarted
-    // so it answers the whole burst. Once she has said something, the new message waits.
     const active = activeJobRef.current;
-    if (!job.extraPrompt && !job.initiative && active && active.conversationId === job.conversationId
-      && !active.extraPrompt && activePostedRef.current === 0) {
-      activeChatRequest.current?.abort();
-      jobsRef.current.unshift(job);
-      syncReplying();
-      return;
-    }
-    const waiting = job.extraPrompt || job.initiative ? undefined : jobsRef.current.find((queued) => queued.conversationId === job.conversationId && !queued.extraPrompt && !queued.initiative);
-    // Combined only while it's a run of their messages: once FREYA has spoken after the waiting
-    // one, the new message gets its own reply.
     const thread = conversationsRef.current.find((item) => item.id === job.conversationId)?.messages ?? [];
-    const waitingAt = waiting ? thread.findIndex((message) => message.id === waiting.targetId) : -1;
-    const interrupted = waitingAt >= 0 && thread.slice(waitingAt + 1).some((message) => message.role === "assistant");
-    if (waiting && !interrupted) waiting.targetId = job.targetId;
-    else jobsRef.current.push(job);
+    const plan = planEnqueue(job, active ? { job: active, posted: activePostedRef.current } : null, jobsRef.current, thread);
+    jobsRef.current = plan.waiting;
+    if (plan.abortActive) activeChatRequest.current?.abort();
     syncReplying();
     void pumpReplies();
   }
@@ -1524,7 +1574,7 @@ export default function Home() {
     }
   }
 
-  /** Drops a conversation's queued replies and stops the one running for it, if any. */
+  /** Drops the replies a conversation is owed and stops the one running for it, if any. */
   function cancelRepliesFor(conversationId: string) {
     jobsRef.current = jobsRef.current.filter((job) => job.conversationId !== conversationId);
     if (activeJobRef.current?.conversationId === conversationId) activeChatRequest.current?.abort();
@@ -1564,15 +1614,19 @@ export default function Home() {
     return loaded.filter((item): item is WireAttachment => Boolean(item));
   }
 
-  /** Attachment bytes for the current turn, read back from IndexedDB. */
+  /**
+   * The current turn's attachments, read back from IndexedDB. What was read on this device goes
+   * as text and the file stays here; only a PDF that couldn't be read goes as bytes (lib/attachments).
+   */
   async function wireAttachments(items: AttachmentMeta[]): Promise<WireAttachment[]> {
     const wire = await Promise.all(items.map(async (item): Promise<WireAttachment> => {
       const stored = await getAttachment(item.id);
+      const readHere = item.kind === "pdf" && Boolean(stored?.text?.trim());
       return {
         name: item.name,
         mime: item.mime,
         kind: item.kind,
-        ...(stored?.data && (item.kind === "image" || item.kind === "pdf" || item.kind === "audio") ? { data: stored.data } : {}),
+        ...(stored?.data && !readHere && (item.kind === "image" || item.kind === "pdf" || item.kind === "audio") ? { data: stored.data } : {}),
         ...(stored?.text !== undefined ? { text: stored.text } : {}),
       };
     }));
@@ -1583,8 +1637,8 @@ export default function Home() {
    * Gets one reply and posts it as a series of chat messages.
    *
    * The stream is cut into finished blocks (lib/reply-parts) and each is posted as its own
-   * message once complete, paced like typing. The next queued reply starts only after every
-   * part of this one has been posted.
+   * message once complete, paced like typing. The next reply starts only after every part of this
+   * one has been posted, or once this one is interrupted by a new message from them.
    */
   async function runReply(job: ReplyJob) {
     // Let the render that added the user's message commit, so the snapshot includes it.
@@ -1623,7 +1677,7 @@ export default function Home() {
 
     // FREYA has now read everything up to the message she is answering.
     patchConversation(job.conversationId, (messages) => messages.map((message, index) =>
-      (message.queued || message.failed) && index <= targetIndex ? { ...message, queued: false, failed: false } : message));
+      message.failed && index <= targetIndex ? { ...message, failed: false } : message));
     // Same rule the route uses, so the label only shows when the panel really runs.
     if (!initiative && !privacyMode && needsReasoning(latestUserText, serverSetup.reasoning)) setDeliberatingIn(job.conversationId);
     const controller = new AbortController();
@@ -1634,6 +1688,17 @@ export default function Home() {
     const posted: string[] = [];
     let provider = "";
     let lastPostedAt = performance.now();
+    /**
+     * The evaluation timer: starts now, when the request is sent, and never resets. Every bubble's
+     * typing delay is the length-based delay minus however much of it the server's own time already
+     * covers, so a slow server (she's already "been typing" while it answered) posts at once, and a
+     * fast one still gets a believable typing pause. Reading time (above) counts as typing too.
+     */
+    const evalStartedAt = performance.now();
+    /** When the first words of the reply arrived (0 until they do), for pacing and lib/model-timing. */
+    let firstTextAt = 0;
+    // How fast the voice that answered last time has been (lib/model-timing).
+    const expected = expectedTiming(timingsRef.current, lastProviderRef.current);
     // She reads their message before she starts typing, while the reply is already being written
     // (the request below goes out now). A fast server still waits; a slow one shows her typing.
     const reads = (switches.realisticTiming ?? realisticTiming) && !initiative && !job.extraPrompt && !job.turn && target.role === "user";
@@ -1658,6 +1723,13 @@ export default function Home() {
       setHerAway(false);
       if (controller.signal.aborted) return;
       setReadingIn("");
+      // Read, and seen. A slow voice: she starts typing when a reply would plausibly be on its way,
+      // or as soon as it is, rather than "typing…" for a minute before a one-line answer.
+      const typingAt = typingStartsAt(performance.now(), evalStartedAt, expected);
+      while (!controller.signal.aborted && !firstTextAt && performance.now() < typingAt) {
+        await delay(Math.min(250, Math.max(1, typingAt - performance.now())));
+      }
+      if (controller.signal.aborted) return;
       setTypingIn(job.conversationId);
       lastPostedAt = performance.now();
     })() : Promise.resolve();
@@ -1665,7 +1737,12 @@ export default function Home() {
     const postBubble = (text: string) => {
       const first = posted.length === 0 && !job.turn;
       delivery = delivery.then(async () => {
-        const wait = bubbleDelay(text, posted.length > 0, moodRef.current.energy) - (performance.now() - lastPostedAt);
+        // How much of this bubble's believable typing time the server's own time already paid for,
+        // counted from when the request was sent, not from the last bubble: a reply that took 8s to
+        // generate has already "been typing" for 8s, whatever shape the bubbles end up taking.
+        const evaluationElapsed = performance.now() - evalStartedAt;
+        const sinceLastPosted = posted.length > 0 ? performance.now() - lastPostedAt : undefined;
+        const wait = bubbleWait(text, posted.length > 0, evaluationElapsed, sinceLastPosted, moodRef.current.energy);
         if (wait > 0) await delay(wait);
         if (controller.signal.aborted) return;
         // A reply that turns out long switches to text for the rest: nobody wants five minutes of voice notes.
@@ -1683,7 +1760,11 @@ export default function Home() {
         patchConversation(job.conversationId, (messages) => [...messages, message]);
         lastPostedAt = performance.now();
         announceReply(job.conversationId, message, first);
-        if (job.conversationId === activeIdRef.current) offerFace(appraiseReply(text, latestUserText));
+        if (job.conversationId === activeIdRef.current) {
+          offerFace(appraiseReply(text, latestUserText));
+          // Each message she sends moves through her presence on the canvas.
+          setBubbleBeat((count) => count + 1);
+        }
       });
     };
 
@@ -1774,8 +1855,13 @@ export default function Home() {
           autonomyLevel,
           candidLanguage,
           mood: moodRef.current,
+          ...(userMoodRef.current ? { userMood: userMoodRef.current } : {}),
+          // Where they are with each other is remembered history: only with memory on.
+          ...(memoryEnabled ? { bond: bondRef.current } : {}),
           appraise: !initiative && !job.extraPrompt,
           initiative,
+          // They wrote while she was mid-reply: she knows she was cut off (lib/reply-queue).
+          ...(job.interrupted ? { interrupted: true } : {}),
           intimateMode,
           stayInCharacter,
           ...(cameraLive && getFace().present ? { seen: getFace().expression } : {}),
@@ -1797,14 +1883,17 @@ export default function Home() {
         if (Array.isArray(payload.sources)) sources = payload.sources;
       } else if (response.body && type.includes("text/event-stream")) {
         await readReplyStream(response.body, controller.signal, {
-          onMeta: (found, searchStatus, panel, herBusy, verdict) => {
+          onMeta: (found, searchStatus, panel, herBusy, verdict, them, between) => {
             if (verdict) setMood((current) => mergeVerdict(current, verdict));
+            if (them !== undefined) setUserMood(them);
+            if (between) setBond(between);
             recordMeta(found.length, searchStatus); sources = found; reasoned = panel; setDeliberatingIn("");
             if (herBusy && reads) { pickUpAt = performance.now() + busyDelay(); readUntil = pickUpAt + readFor; setHerAway(true); }
           },
           onProvider: (name) => { recordProvider(name); provider = name; },
           onDelta: (delta) => {
             recordChunk(delta);
+            if (!firstTextAt && delta.trim()) firstTextAt = performance.now();
             received += delta;
             const { parts, rest } = takeCompleteParts(buffer + delta);
             buffer = rest;
@@ -1819,6 +1908,13 @@ export default function Home() {
       takeCompleteParts(buffer, true).parts.forEach(post);
       buffer = "";
       if (!received.trim()) throw new Error("The server returned an empty reply. Try again.");
+      // How long this voice took, for pacing the next reply (lib/model-timing).
+      if (provider) {
+        const finishedAt = performance.now();
+        timingsRef.current = recordTiming(timingsRef.current, provider, { firstMs: (firstTextAt || finishedAt) - evalStartedAt, totalMs: finishedAt - evalStartedAt, chars: received.length });
+        lastProviderRef.current = provider;
+        saveTimings(timingsRef.current);
+      }
       finishStream(truncated);
       await finishPiece();
       // Her own feelings: a mood she reported, and one more unanswered text if she went first.
@@ -1834,7 +1930,15 @@ export default function Home() {
       scheduleReflection(job.conversationId);
     } catch (error) {
       failStream(controller.signal.aborted);
-      if (controller.signal.aborted) return;
+      if (controller.signal.aborted) {
+        // Interrupted by a new message: what she'd already sent stays as it is. A piece she was
+        // writing stops being "typed", and can be picked up again with Continue.
+        if (bodyId) {
+          patchConversation(job.conversationId, (messages) => messages.map((message) => message.id === bodyId ? { ...message, streaming: false } : message));
+          setTruncatedReplyId(bodyId);
+        }
+        return;
+      }
       // What already arrived is real and stays; a reply cut off mid-way can be retried.
       takeCompleteParts(buffer, true).parts.forEach(post);
       await finishPiece();
@@ -1909,8 +2013,6 @@ export default function Home() {
       id: id(), role: "user", content: text, at: new Date().toISOString(),
       ...(pendingFiles.length ? { attachments: pendingFiles } : {}),
       ...(replyingToId ? { replyTo: replyingToId } : {}),
-      // Shown as "queued" until FREYA finishes what she is sending now.
-      ...(workerRef.current ? { queued: true } : {}),
     };
     updateActiveMessages((previous) => [...previous, message]);
     feel(text);
@@ -2128,6 +2230,10 @@ export default function Home() {
         const prepared = await prepareAttachment(file, attachmentId);
         await putAttachment(attachmentId, prepared.stored);
         setPendingFiles((current) => [...current, prepared.meta].slice(0, MAX_ATTACHMENTS));
+        // Text in a picture is read in the background; sent if it's ready in time, never waited for.
+        if (prepared.later) void prepared.later().then(async (updated) => {
+          if (updated && await getAttachment(attachmentId)) await putAttachment(attachmentId, updated);
+        }).catch(() => undefined);
       } catch (error) {
         notify(error instanceof AttachmentError ? error.message : reportError("attachment", error, `${file.name || "That file"} could not be attached.`), "error");
       } finally {
@@ -2232,7 +2338,6 @@ export default function Home() {
       const message: Message = {
         id: id(), role: "user", content: transcript,
         at: new Date().toISOString(), voice: { id: audioId, mime, seconds: length, ...(silent ? { silent: true } : {}) },
-        ...(workerRef.current ? { queued: true } : {}),
       };
       patchConversation(conversationId, (current) => [...current, message]);
       feel(transcript);
@@ -2568,8 +2673,8 @@ export default function Home() {
           <div className="conversation-shell">
             <div ref={conversationRef} onScroll={handleConversationScroll} className={`conversation ${messages.length === 0 ? "welcome" : ""}`}>
               {messages.length === 0 ? <div className="welcome-content">
-
-                <div className="suggestions">{["Let's have a real conversation.", "Explain something people often misunderstand.", "Help me think through a difficult decision."].map((suggestion) => <button key={suggestion} onClick={() => { setInput(suggestion); composerRef.current?.focus(); }}>{suggestion}</button>)}</div>
+                {/* No suggested messages to click: a chat with a person starts with whatever you say. */}
+                {hydrated && <p className="welcome-hint">{herStatusLine()}</p>}
               </div> : <div className="message-list">
                 {messages.map((message, index) => {
                   const info = thread[index];
@@ -2632,8 +2737,7 @@ export default function Home() {
                       </div>}
                       </div>
                       {message.sources && message.sources.length > 0 && <div className="source-list"><div className="source-heading">RETRIEVED SOURCES</div>{message.sources.filter((source) => { try { return ["http:", "https:"].includes(new URL(source.url).protocol); } catch { return false; } }).map((source) => <a key={source.url} href={source.url} target="_blank" rel="noopener noreferrer">{source.title} ↗</a>)}</div>}
-                      {(message.queued || clock || (info.endsTurn && message.provider)) && <div className="message-meta">
-                        {message.queued && <span className="queued">QUEUED</span>}
+                      {(clock || (info.endsTurn && message.provider)) && <div className="message-meta">
                         {message.edited && <span>EDITED</span>}
                         {message.reasoned && <span title={`Worked through first by ${message.reasoned.length} independent analyst${message.reasoned.length === 1 ? "" : "s"} (${message.reasoned.join(" + ")})`}>REASONED</span>}
                         {info.endsTurn && message.provider && <span title={`Response generated by ${message.provider}`}>{message.provider === "ollama" ? "LOCAL" : message.provider.toUpperCase()}</span>}
@@ -2660,14 +2764,18 @@ export default function Home() {
             </div>
             {!atBottom && messages.length > 0 && <button type="button" className="jump-latest" onClick={() => { atBottomRef.current = true; setAtBottom(true); scrollToBottom(); }}>↓ Latest</button>}
           </div>
-          <EmotionCanvas signal={canvasSignal} mood={mood} form={canvasForm} onClearForm={() => setCanvasForm(null)} quality={canvasQuality}/>
+          <EmotionCanvas signal={canvasSignal} mood={mood} form={canvasForm} onClearForm={() => setCanvasForm(null)} quality={canvasQuality}
+            reaction={portrait.reaction} glance={portrait.glance} beat={bubbleBeat} typed={input.length}/>
           <div className="center-privacy-note">FREYA is a fictional character played by an AI · replies can be wrong · type /visualize or /image for pictures</div>
         </section>
 
         <aside className="profile-panel" aria-label="FREYA profile">
-          <PortraitParticles expression={portrait.face.expression} intensity={portrait.face.level} />
+          <PortraitParticles expression={portrait.face.expression} intensity={portrait.face.level} glance={portrait.glance} motion={portrait.motion} />
           <div className="profile-name-row"><h2>FREYA, 20</h2><span className="profile-state">ONLINE · {mood.name.toUpperCase()}</span></div>
           <p className="profile-description">Hey, I&apos;m Freya. I read too much, stay up too late, and have opinions about most things.</p>
+          {/* Two separate things: her own mood (above) and her read on them, which she could have wrong. */}
+          {userMood && <p className="profile-read">TO HER, YOU SEEM {userMood.feeling.toUpperCase()}{userMood.strength === "strong" ? " (VERY)" : ""}</p>}
+          {memoryEnabled && <p className="profile-read">YOU TWO · {STAGE_LABEL[bond.stage]}</p>}
           <div className="profile-sigil" aria-hidden="true">✦</div>
           <p className="profile-footnote">{cameraAllowed && !cameraLive ? "Camera starting…" : cameraLive ? `Camera on${theirFace ? `: you look ${theirFace}` : ", looking for you"}. It reads your expression in this browser and only that word is sent. It doesn't identify you.` : "Your portrait, lit as a 3D relief. Her expression follows her simulated mood and the conversation."}</p>
         </aside>

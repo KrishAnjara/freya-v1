@@ -2,18 +2,27 @@
  * Turns a picked, pasted or dropped file into something a message can carry.
  *
  * Photos are downscaled in the browser before upload: a phone photo is 3-8 MB, and the model
- * gains nothing from more than ~1280px. Browser-only (canvas, FileReader).
+ * gains nothing from more than ~1280px. Files are read here, on the device (lib/local-reading,
+ * lib/office-text): a PDF's text, Word, Excel and PowerPoint files, and (in the background, so
+ * attaching stays quick) any text in a picture. Programs and files nothing here can read are
+ * refused. Browser-only (canvas, FileReader).
  */
 
 import {
-  AttachmentError, classifyAttachment, MAX_AUDIO_DATA_CHARS, MAX_FILE_BYTES, MAX_IMAGE_DATA_CHARS, MAX_PDF_DATA_CHARS, formatBytes,
+  AttachmentError, classifyAttachment, MAX_AUDIO_DATA_CHARS, MAX_FILE_BYTES, MAX_IMAGE_DATA_CHARS, MAX_PDF_DATA_CHARS, formatBytes, refusalFor,
   type AttachmentMeta,
 } from "@/lib/attachments";
 import type { StoredAttachment } from "@/lib/attachment-store";
+import { officeKind, officeText } from "@/lib/office-text";
 
-export type PreparedAttachment = { meta: AttachmentMeta; stored: StoredAttachment };
+export type PreparedAttachment = {
+  meta: AttachmentMeta;
+  stored: StoredAttachment;
+  /** More reading that finishes after the file is attached (text in a picture), if any. */
+  later?: () => Promise<StoredAttachment | null>;
+};
 
-/** Other binary files are kept for re-download up to this size; larger ones keep only their name. */
+/** Files kept for opening again from the chat. */
 const MAX_KEPT_FILE_BYTES = 5 * 1024 * 1024;
 const MAX_TEXT_FILE_CHARS = 200_000;
 
@@ -46,18 +55,28 @@ async function drawScaled(file: File, maxSide: number, quality: number) {
 }
 
 export async function prepareAttachment(file: File, id: string): Promise<PreparedAttachment> {
-  if (file.size > MAX_FILE_BYTES) throw new AttachmentError(`${file.name} is over ${formatBytes(MAX_FILE_BYTES)}.`);
-  const kind = classifyAttachment(file.type, file.name);
   const name = file.name || "attachment";
+  // Programs are refused by name and by their first bytes, whatever they're called.
+  const refused = refusalFor(file.type, name, new Uint8Array(await file.slice(0, 4).arrayBuffer()));
+  if (refused) throw new AttachmentError(refused);
+  if (file.size > MAX_FILE_BYTES) throw new AttachmentError(`${name} is over ${formatBytes(MAX_FILE_BYTES)}.`);
+  const kind = classifyAttachment(file.type, name);
 
   if (kind === "image") {
     let data = (await drawScaled(file, 1280, 0.85)).replace(/^data:[^,]*,/, "");
     if (data.length > MAX_IMAGE_DATA_CHARS) data = (await drawScaled(file, 960, 0.72)).replace(/^data:[^,]*,/, "");
     if (data.length > MAX_IMAGE_DATA_CHARS) throw new AttachmentError(`${name} is too detailed to send.`);
     const thumb = await drawScaled(file, 180, 0.62);
+    const stored: StoredAttachment = { data };
     return {
       meta: { id, name, mime: "image/jpeg", size: Math.round((data.length * 3) / 4), kind, thumb },
-      stored: { data },
+      stored,
+      // Text in the picture, read from the original (sharper than the downscaled copy).
+      later: async () => {
+        const { ocrText } = await import("@/lib/local-reading");
+        const text = await ocrText(file);
+        return text ? { ...stored, text, read: "ocr" } : null;
+      },
     };
   }
   if (kind === "audio") {
@@ -67,13 +86,28 @@ export async function prepareAttachment(file: File, id: string): Promise<Prepare
   }
   if (kind === "pdf") {
     const data = await readAsBase64(file);
-    if (data.length > MAX_PDF_DATA_CHARS) throw new AttachmentError(`${name} is too large; PDFs up to about 3 MB can be read.`);
-    return { meta: { id, name, mime: "application/pdf", size: file.size, kind }, stored: { data } };
+    // Read here first. Only if that fails do the bytes go anywhere (see lib/attachments).
+    let text = "";
+    try {
+      const { pdfText } = await import("@/lib/local-reading");
+      text = (await pdfText(new Uint8Array(await file.arrayBuffer()))).text;
+    } catch { /* unreadable here: the fallback below */ }
+    if (!text && data.length > MAX_PDF_DATA_CHARS) throw new AttachmentError(`${name} couldn't be read here, and it's too large to send on; PDFs up to about 3 MB can be.`);
+    return { meta: { id, name, mime: "application/pdf", size: file.size, kind }, stored: { data, ...(text ? { text, read: "device" as const } : {}) } };
   }
-  if (kind === "text") {
-    const text = (await file.text()).slice(0, MAX_TEXT_FILE_CHARS);
-    return { meta: { id, name, mime: file.type || "text/plain", size: file.size, kind }, stored: { text } };
+  if (kind === "document") {
+    const office = officeKind(name);
+    let text = "";
+    try {
+      text = office ? await officeText(new Uint8Array(await file.arrayBuffer()), office) : "";
+    } catch (error) {
+      throw new AttachmentError(`${name} couldn't be read${error instanceof Error && error.message ? `: ${error.message}` : ""}.`);
+    }
+    if (!text.trim()) throw new AttachmentError(`${name} has no text in it to read.`);
+    const kept = file.size <= MAX_KEPT_FILE_BYTES ? { data: await readAsBase64(file) } : {};
+    return { meta: { id, name, mime: file.type || "application/octet-stream", size: file.size, kind }, stored: { ...kept, text: text.slice(0, MAX_TEXT_FILE_CHARS), read: "device" } };
   }
-  const stored = file.size <= MAX_KEPT_FILE_BYTES ? { data: await readAsBase64(file) } : {};
-  return { meta: { id, name, mime: file.type || "application/octet-stream", size: file.size, kind }, stored };
+  // Text and code (refusalFor has already turned away everything else).
+  const text = (await file.text()).slice(0, MAX_TEXT_FILE_CHARS);
+  return { meta: { id, name, mime: file.type || "text/plain", size: file.size, kind: "text" }, stored: { text } };
 }

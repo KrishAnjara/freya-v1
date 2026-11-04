@@ -25,6 +25,9 @@ import { normalizeCharacterProfile } from "@/lib/character-profile";
 import { containsSensitiveCredential, redactSensitiveCredentials } from "@/lib/sensitive-data";
 import { applyAppraisal, initiativePrompt, moodPrompt, normalizeMood, reactToMessage } from "@/lib/mood";
 import { appraiseMood } from "@/lib/mood-appraisal";
+import { faceReading, nextUserMood, normalizeUserMood, readUserMood, userMoodSection } from "@/lib/user-mood";
+import { homeTimeReply, noSearchReply, timeReply, unknownZoneReply } from "@/lib/plain-replies";
+import { asksOut, bondSection, nextBond, normalizeBond } from "@/lib/relationship";
 import { INTIMACY_PROMPT, PLAYFUL_HEAT_PROMPT, PRIVATE_VOICE_DOWN, isIntimateTone, mentionsMinors, romanticMinorRequest, soundsUpset } from "@/lib/intimacy";
 import { canonSection, closenessOf, normalizeTotals } from "@/lib/canon";
 import { herMoment } from "@/lib/her-day";
@@ -102,7 +105,10 @@ function withAttachments(messages: ChatMessage[], attachments: Map<number, WireA
         const text = redactSensitiveCredentials(file.text.slice(0, Math.max(0, textBudget)));
         textBudget -= text.length;
         const clipped = text.length < file.text.length ? "\n[file truncated]" : "";
-        notes.push(text ? `Contents of ${file.name}:\n~~~~\n${text}${clipped}\n~~~~` : "[No room left to include this file's contents.]");
+        // Read on their device (lib/local-reading): a picture's text is OCR, so it can have slips.
+        const heading = file.kind === "image" ? `Text in ${file.name} (read from the picture on their device; may have small mistakes)`
+          : file.kind === "pdf" || file.kind === "document" ? `Contents of ${file.name} (read on their device)` : `Contents of ${file.name}`;
+        notes.push(text ? `${heading}:\n~~~~\n${text}${clipped}\n~~~~` : "[No room left to include this file's contents.]");
       }
     }
     return { ...message, content: `${message.content}\n\n${notes.join("\n")}`, ...(inline.length ? { inline } : {}) };
@@ -136,6 +142,11 @@ function fullSearchContext(text: string, sources: SearchSource[]) {
     - Distinguish reported claims from confirmed facts.
     `;
 }
+
+/** For a reply to a message that arrived while she was still sending the last one. */
+const INTERRUPTED_NOTE = `
+
+YOU WERE INTERRUPTED: they sent this while you were still in the middle of replying, and you stopped (what you'd already sent is above). Answer what they just said. Either drop what you were going to say or finish that thought in a few words first, whichever a person would; don't apologise for it or mention being interrupted unless it's natural.`;
 
 function trimSearchText(text: string) {
   return text.length > SEARCH_TEXT_MAX_CHARS ? `${text.slice(0, SEARCH_TEXT_MAX_CHARS)}\n[further results omitted]` : text;
@@ -463,38 +474,17 @@ export async function POST(request: Request) {
     if (!turnAttachments.size && isTimeQuestion(lastText)) {
       const timeZone = findTimeZone(lastText);
 
+      // Settled here, not by a model (a model gets the time wrong), but said the way she'd say it.
       if (timeZone) {
         try {
           const result = getTimeInZone(timeZone);
-
-          return NextResponse.json({
-            reply:
-              `It's ${result.time} in ${result.timeZone} right now.\n` +
-              `Today is ${result.date}.\n` +
-              `UTC offset: ${result.offset}.`,
-            sources: [],
-            searchStatus: "not-needed",
-            memoryCount: memories.length,
-          });
+          return NextResponse.json({ reply: timeReply(result.timeZone, userTexts.length), sources: [], searchStatus: "not-needed", memoryCount: memories.length });
         } catch {
-          return NextResponse.json({
-            reply:
-              `I couldn't recognize the timezone "${timeZone}". ` +
-              `Try a city such as Tokyo, London, or New York, ` +
-              `or an IANA timezone such as Europe/Paris.`,
-            sources: [],
-            searchStatus: "not-needed",
-            memoryCount: memories.length,
-          });
+          return NextResponse.json({ reply: unknownZoneReply(timeZone, userTexts.length), sources: [], searchStatus: "not-needed", memoryCount: memories.length });
         }
       }
 
-      return NextResponse.json({
-        reply: "Which city or IANA timezone should I use? For example: Tokyo, London, New York, or Europe/Paris.",
-        sources: [],
-        searchStatus: "not-needed",
-        memoryCount: memories.length,
-      });
+      return NextResponse.json({ reply: homeTimeReply(userTexts.length), sources: [], searchStatus: "not-needed", memoryCount: memories.length });
     }
 
     
@@ -520,7 +510,7 @@ export async function POST(request: Request) {
 
     if (searchDisabled && requiresCurrentInfo) {
       return NextResponse.json({
-        reply: "I won't search, and I can't verify breaking or current information without current sources, so I won't guess or invent a news update.",
+        reply: noSearchReply("asked", userTexts.length),
         sources: [],
         searchStatus: "disabled-by-user",
         memoryCount: memories.length,
@@ -547,7 +537,7 @@ export async function POST(request: Request) {
     if (shouldRunSearch && (searchAvailable || mustVerify)) {
       if (privacyMode) {
         return NextResponse.json({
-          reply: "Local-only mode keeps this request on the local model, so I can't fetch or verify live web sources. Turn it off to allow the configured search provider.",
+          reply: noSearchReply("private", userTexts.length),
           sources: [],
           searchStatus: "disabled-by-privacy",
           memoryCount: memories.length,
@@ -555,9 +545,7 @@ export async function POST(request: Request) {
       }
       if ((process.env.WEB_SEARCH_ENABLED || "false").toLowerCase() !== "true") {
         return NextResponse.json({
-          reply:
-            "I can't verify current information because web search is disabled. " +
-            "Enable web search to get a reliable, up-to-date answer.",
+          reply: noSearchReply("off", userTexts.length),
           sources: [],
           searchStatus: "disabled",
           memoryCount: memories.length,
@@ -587,10 +575,7 @@ export async function POST(request: Request) {
         // A question that doesn't depend on live facts is still answered, from knowledge.
         if (!mustVerify) searchStatus = "error";
         else return NextResponse.json({
-          reply:
-            "I couldn't retrieve reliable web results just now, so I won't " +
-            "guess at current events. Please try again shortly or check your " +
-            "search provider's API quota and configuration.",
+          reply: noSearchReply("failed", userTexts.length),
           sources: [],
           searchStatus: "error",
           memoryCount: memories.length,
@@ -665,8 +650,21 @@ export async function POST(request: Request) {
     // Their latest message moves her mood here, so this reply already feels it. A model reads the
     // conversation; anything intimate or local stays off the cloud and uses the rules in lib/mood.
     const judges = requestData.appraise === true && Boolean(moodBefore);
-    const appraisal = judges && !privacyMode && !intimateTurn && moodBefore!.name !== "horny" ? await appraiseMood(moodBefore!, messages, request.signal) : null;
+    const reading = judges && !privacyMode && !intimateTurn && moodBefore!.name !== "horny" ? await appraiseMood(moodBefore!, messages, request.signal) : null;
+    const appraisal = reading?.her ?? null;
     const mood = !judges ? moodBefore : appraisal ? applyAppraisal(moodBefore!, appraisal, now.getTime()) : reactToMessage(moodBefore!, lastText, now.getTime(), { intimate: intimateMode });
+    // How THEY seem, kept apart from her mood (lib/user-mood): the same model's read when there was
+    // one, else their words, else (camera on) their face. It guides how she meets them; it isn't hers.
+    const seen = config.camera === false ? null : normalizeSeen(requestData.seen);
+    const userMoodBefore = normalizeUserMood(requestData.userMood);
+    const theirReading = reading?.them ?? readUserMood(lastText) ?? faceReading(seen);
+    const userMood = judges ? nextUserMood(userMoodBefore, theirReading, now.getTime(), reading?.them ? "model" : "words") : userMoodBefore;
+    // Where the two of them are (lib/relationship): moved by this message, from the same reads as
+    // her mood. It's remembered history, so it follows the "Use memories" setting.
+    const bondBefore = useMemories ? normalizeBond(requestData.bond) : null;
+    const askedOut = judges && Boolean(bondBefore) && asksOut(lastText) && bondBefore!.stage !== "together";
+    const moodReason = appraisal?.reason ?? (mood && moodBefore && (mood.name !== moodBefore.name || mood.why !== moodBefore.why) ? mood.why : undefined);
+    const bond = judges && bondBefore ? nextBond(bondBefore, { text: lastText, now: now.getTime(), reason: moodReason, feeling: theirReading?.feeling }) : bondBefore;
     const summaryInput = requestData.historySummary;
     const historySummary = typeof summaryInput === "string" ? redactSensitiveCredentials(summaryInput.trim().slice(0, 1800)) : "";
     const summaryContext = historySummary ? `
@@ -760,12 +758,16 @@ ${historySummary}
       (mood ? `
 
 ${moodPrompt(sharedMood!)}` : "") +
+      userMoodSection(userMood) +
+      bondSection(bond, now.getTime(), askedOut) +
       // Texting first is an autonomy feature: level 0 means reply-only.
       (mood && requestData.initiative === true && autonomyLevel > 0 ? `
 
 ${initiativePrompt(mood)}` : "") +
       (config.unhinged ? `\n\n${UNHINGED_PROMPT}` : "") +
-      (config.camera === false ? "" : seenSection(normalizeSeen(requestData.seen), textingFirst)) +
+      seenSection(seen, textingFirst) +
+      // They wrote while she was mid-reply (lib/reply-queue): she stopped, like a person would.
+      (requestData.interrupted === true && !textingFirst ? INTERRUPTED_NOTE : "") +
       // Last, because the last thing it reads is what a model follows most closely.
       (textingFirst ? "" : lastWord(lastText)) +
       honestySection(lastText, stayInCharacter);
@@ -811,7 +813,7 @@ ${initiativePrompt(mood)}` : "") +
     const stream = new ReadableStream<Uint8Array>({
       async start(controller) {
         // Metadata first so the client can render sources before any text arrives.
-        controller.enqueue(send("meta", { sources, searchStatus, memoryCount: recalledCount, reasoned: panel?.analyses.map((analysis) => analysis.analyst) ?? [], herBusy: herMoment(now).busy, ...(judges ? { mood } : {}) }));
+        controller.enqueue(send("meta", { sources, searchStatus, memoryCount: recalledCount, reasoned: panel?.analyses.map((analysis) => analysis.analyst) ?? [], herBusy: herMoment(now).busy, ...(judges ? { mood, userMood, ...(bond ? { bond } : {}) } : {}) }));
         const outcome: { truncated: boolean; parts: number; provider?: ProviderName } = { truncated: false, parts: 1 };
         try {
           for await (const delta of guardStream((note) => streamReply(fullSystem + note, promptMessages, request.signal, outcome, optionsFor(note)), guardContext)) {

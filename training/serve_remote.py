@@ -54,17 +54,22 @@ import time
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import urlsplit
 
 OLLAMA = "http://127.0.0.1:11434"
 PROXY_PORT = 11435
+#: Her voice: SexyGPT v3 Thinking (a Qwen3.8 27B roleplay fine-tune, uncensored, with hidden
+#: thinking). It comes in one size only, Q4_K_M at 16.8 GB: whole on a 20 GB+ GPU (L4, A100); on a
+#: free T4 (15 GB) part of it runs on the CPU, which works but makes replies slower.
+SEXYGPT = "hf.co/ross-dev/SexyGPT-v3-Thinking-Female-gguf:Q4_K_M"
+DEFAULT_VOICE = SEXYGPT
+#: The previous default, still available with --model.
 DARK_FOREST = "hf.co/DavidAU/Dark-Forest-V1-Ultra-Quality-20b-GGUF"
-#: Largest first. Dark Forest has a 4096-token window and a large memory cache per token, so the
-#: quant is chosen to leave room for it (with the cache in 8-bit); the fit is checked, not assumed.
 MODELS_BY_VRAM = [
-    (20, [f"{DARK_FOREST}:Q5_K_M", f"{DARK_FOREST}:Q4_K_M"]),
-    (0, [f"{DARK_FOREST}:Q3_K_L", f"{DARK_FOREST}:Q3_K_M"]),
+    (0, [SEXYGPT]),
 ]
+#: Qwen3.8 has a long window; 8192 is plenty for the app's prompt and history, and smaller if memory is short.
+VOICE_CONTEXTS = [8192, 6144, 4096]
 #: The uncensored Qwen 27B: what writes training conversations (colab_run --make-corpus), and a
 #: --model choice for a voice that reasons better and sees images, at the cost of Dark Forest's roleplay.
 QWEN_BY_VRAM = [
@@ -72,20 +77,23 @@ QWEN_BY_VRAM = [
     (0, ["huihui_ai/Qwen3.8-abliterated:27b-q3_K", "huihui_ai/Qwen3.8-abliterated:27b-q2_K"]),
 ]
 QWEN_CONTEXTS = [8192, 6144, 4096]
-#: Dark Forest is a Llama-2 merge trained for 4096 tokens; longer windows only make it ramble.
+#: Dark Forest (with --model) is a Llama-2 merge trained for 4096 tokens; longer windows only make it ramble.
 CONTEXTS = [4096]
+
+
+def contexts_for(base):
+    return CONTEXTS if "dark-forest" in base.lower() else VOICE_CONTEXTS
 DEFAULT_FALLBACK = "huihui_ai/qwen3.5-abliterated:4B"
 DEFAULT_EMBED = "nomic-embed-text"
-#: Qwen-Image 2.1, uncensored quantisation, and its companions (all in one repository).
-IMAGE_REPO = "abenzerps/Qwen-Image-2.1-Uncensored-Quantized"
-IMAGE_FILES = {
-    "diffusion_models": "qwen-image-2.1-UC-Q4_K_M.gguf",
-    "text_encoders": "text_encoders/qwen3vl_8b_int8_convrot.safetensors",
-    "vae": "vae/qwen_image_2.1_vae_bf16.safetensors",
-}
-IMAGE_MODEL_NAME = "Qwen-Image 2.1 uncensored (Q4_K_M)"
-COMFY_DIR = os.environ.get("FREYA_COMFY_DIR", "/content/ComfyUI")
-COMFY = "http://127.0.0.1:8188"
+#: Pictures: Qwen-Image-Edit 2511 (diffusers) with an NSFW LoRA. It edits from reference images,
+#: which is how her pictures keep her face: the app sends one of her portrait photos.
+IMAGE_MODEL = "Qwen/Qwen-Image-Edit-2511"
+IMAGE_LORA = "ScottzillaSystems/qwen-image-edit-plus-nsfw-lora"
+IMAGE_MODEL_NAME = "Qwen-Image-Edit 2511 + NSFW LoRA"
+#: Below this much GPU memory the model is loaded in 4-bit and moved on and off the GPU per part.
+IMAGE_FULL_VRAM_GB = 70
+#: Expressions the app may name for her reference photo (lib/expression).
+IMAGE_EXPRESSION = re.compile(r"[a-z-]{2,30}")
 #: The login only lets these through: chatting, embeddings, reading what's loaded, and FREYA's own
 #: endpoints. Not deleting, pulling or creating models.
 ALLOWED = {
@@ -127,12 +135,21 @@ def run(command, **options):
 
 
 class GpuTurns:
-    """One GPU, two kinds of work: any number of chats at once, or one picture on its own."""
+    """One GPU, two kinds of work: any number of chats at once, or one picture on its own.
+
+    While a picture is drawing, or waiting for the chats in progress to finish so it can start, the
+    GPU is `busy()`: new chats are turned away at once (the app's next voice answers them) rather
+    than left hanging for the minutes a picture takes."""
 
     def __init__(self):
         self._condition = threading.Condition()
         self._chats = 0
         self._picture = False
+        self._waiting = 0
+
+    def busy(self):
+        with self._condition:
+            return self._picture or self._waiting > 0
 
     @contextlib.contextmanager
     def chat(self):
@@ -150,8 +167,12 @@ class GpuTurns:
     @contextlib.contextmanager
     def picture(self):
         with self._condition:
-            while self._picture or self._chats:
-                self._condition.wait()
+            self._waiting += 1
+            try:
+                while self._picture or self._chats:
+                    self._condition.wait()
+            finally:
+                self._waiting -= 1
             self._picture = True
         try:
             yield
@@ -194,18 +215,25 @@ def parse_image_request(payload):
     if not isinstance(prompt, str) or not 2 <= len(prompt.strip()) <= 1200:
         raise ValueError("prompt must be 2-1200 characters")
     instruction = payload.get("instruction") if isinstance(payload.get("instruction"), str) else ""
-    # if blocked(prompt) or blocked(instruction):
-    #     raise ValueError("not something I'll draw")
+    # The hard limit: on in this image path, whatever else is configured.
+    if blocked(prompt) or blocked(instruction):
+        raise ValueError("not something I'll draw")
     negative = payload.get("negative_prompt") if isinstance(payload.get("negative_prompt"), str) else ""
     image = payload.get("image")
     if image is not None and (not isinstance(image, str) or len(image) > 8_000_000 or not re.fullmatch(r"[A-Za-z0-9+/]+=*", image)):
         raise ValueError("image must be base64")
+    # Her face: one of her portrait photos, for a picture of her.
+    reference = payload.get("reference")
+    if reference is not None and (not isinstance(reference, str) or len(reference) > 6_000_000 or not re.fullmatch(r"[A-Za-z0-9+/]+=*", reference)):
+        raise ValueError("reference must be base64")
+    expression = payload.get("expression") if isinstance(payload.get("expression"), str) and IMAGE_EXPRESSION.fullmatch(payload.get("expression")) else ""
     strength = payload.get("strength", 0.6)
     strength = min(0.9, max(0.2, float(strength))) if isinstance(strength, (int, float)) else 0.6
     size = lambda value: min(1216, max(512, int(value) // 64 * 64)) if isinstance(value, (int, float)) else 1024
     seed = payload.get("seed")
     return {
         "prompt": prompt.strip(), "instruction": instruction.strip()[:1200], "negative_prompt": negative.strip()[:600], "image": image,
+        "reference": reference, "expression": expression,
         "strength": strength, "width": size(payload.get("width", 1024)), "height": size(payload.get("height", 1024)),
         "refine": payload.get("refine", True) is not False,
         "seed": int(seed) if isinstance(seed, int) else secrets.randbelow(2**31),
@@ -223,154 +251,254 @@ EDIT_REFINER_PROMPT = """You rewrite picture-edit instructions for an image edit
 Reply with the instruction only."""
 
 
-def refine_prompt(text, model, edit=False, timeout=120):
-    """Spell-, grammar- and detail-pass by the local helper model. Falls back to the text as given."""
+FACE_REFINER_PROMPT = """You turn a picture request into a complete prompt for an image model that is given a reference photo of Freya (image 1), a 20-year-old adult woman. The picture shows her: the same person.
+1. Fix spelling and grammar, and work out what they actually meant.
+2. Write one vivid English paragraph (60-140 words) describing the finished picture: the shot (close-up, half-body, full-body, selfie, from across a room...), her pose and what she's doing, her expression, clothing, setting, light, camera and lens, colours, mood. A full-body or wider shot when the request implies it. If they named an expression or a mood, use it; otherwise her expression is: {expression}. Photorealistic unless they asked for a style. Don't describe her face, eyes, hair or skin: the reference photo supplies those. Keep every detail they gave.
+
+Adult content between adults is allowed and you don't soften or censor it. Never make her look or act under 18, never add nudity or sexual content they didn't ask for. If the request does either, reply only: REFUSE.
+Reply with the prompt only: no preamble, no quotes, no notes."""
+
+#: Her photos' expression names, as the prompt maker says them.
+EXPRESSION_WORDS = {
+    "neutral": "relaxed and natural", "smile": "a soft smile", "laugh": "laughing", "playful": "a playful smirk", "affectionate": "warm and affectionate",
+    "sultry": "sultry, a slow confident look", "sad": "a little sad", "curious": "curious", "interested": "interested, leaning in", "excited": "excited",
+    "confident": "confident", "surprised": "surprised", "tired": "sleepy", "bored": "bored", "annoyed": "unimpressed", "thinking": "thoughtful",
+}
+
+
+def refine_prompt(text, model, edit=False, timeout=120, face=False, expression=""):
+    """
+    The prompt maker: the local helper model fixes spelling and grammar and writes the full picture
+    prompt (for a picture of her, around her reference photo and its expression). Falls back to the
+    text as given. A refusal, or anything that crosses the hard limit, stops the picture.
+    """
     if not model:
         return text, False
+    if edit:
+        system = EDIT_REFINER_PROMPT
+    elif face:
+        system = FACE_REFINER_PROMPT.replace("{expression}", EXPRESSION_WORDS.get(expression, "whatever suits the picture"))
+    else:
+        system = REFINER_PROMPT
     try:
         reply = post("/api/chat", {
             "model": model, "stream": False, "think": False, "keep_alive": 0,
-            "messages": [{"role": "system", "content": EDIT_REFINER_PROMPT if edit else REFINER_PROMPT}, {"role": "user", "content": text}],
+            "messages": [{"role": "system", "content": system}, {"role": "user", "content": text}],
             "options": {"temperature": 0.7, "num_predict": 320},
         }, timeout=timeout)
     except (OSError, ValueError):
         return text, False
     refined = re.sub(r"<think>[\s\S]*?</think>", "", reply.get("message", {}).get("content", "")).strip().strip('"').strip()
-    # if refined.upper().startswith("REFUSE") or blocked(refined):
-    #     raise ValueError("not something I'll draw")
+    if refined.upper().startswith("REFUSE") or blocked(refined):
+        raise ValueError("not something I'll draw")
     if len(refined) < 10:
         return text, False
     return refined[:1500], True
 
 
-def comfy_workflow(request, prompt, steps, source_name=None):
-    """ComfyUI's API graph for Qwen-Image 2.1, as in Comfy-Org's official templates (t2i and edit)."""
-    graph = {
-        "1": {"class_type": "UnetLoaderGGUF", "inputs": {"unet_name": os.path.basename(IMAGE_FILES["diffusion_models"])}},
-        "2": {"class_type": "QwenImage21Cache", "inputs": {"model": ["1", 0], "device": "auto", "dtype": "default"}},
-        "3": {"class_type": "CLIPLoader", "inputs": {"clip_name": os.path.basename(IMAGE_FILES["text_encoders"]), "type": "qwen_image", "device": "default"}},
-        "4": {"class_type": "VAELoader", "inputs": {"vae_name": os.path.basename(IMAGE_FILES["vae"])}},
-        "5": {"class_type": "TextEncodeQwenImage21", "inputs": {"clip": ["3", 0], "prompt": prompt, "negative_prompt": request["negative_prompt"], "resolution": 1024}},
-        "7": {"class_type": "KSampler", "inputs": {
-            "model": ["2", 0], "positive": ["5", 0], "negative": ["5", 1], "seed": request["seed"], "steps": steps,
-            "cfg": 1, "sampler_name": "euler", "scheduler": "simple", "denoise": 1,
-        }},
-        "8": {"class_type": "VAEDecode", "inputs": {"samples": ["7", 0], "vae": ["4", 0]}},
-        "9": {"class_type": "SaveImage", "inputs": {"images": ["8", 0], "filename_prefix": "freya"}},
-    }
-    if source_name:
-        # An edit: the picture goes into the encoder, which also gives the latent at its own size.
-        graph["10"] = {"class_type": "LoadImage", "inputs": {"image": source_name}}
-        graph["5"]["inputs"].update({"vae": ["4", 0], "images.image_1": ["10", 0]})
-        graph["7"]["inputs"]["latent_image"] = ["5", 2]
-    else:
-        graph["6"] = {"class_type": "EmptyLatentImage", "inputs": {"width": request["width"], "height": request["height"], "batch_size": 1}}
-        graph["7"]["inputs"]["latent_image"] = ["6", 0]
-    return graph
+def picture_prompt(prompt, kind):
+    """What the edit model reads: keep her face (a picture of her), the change (an edit), or a new picture."""
+    if kind == "face":
+        return ("Image 1 is a photo of Freya. Keep her identity exactly: the same face, facial features, eyes, skin tone and hair as in image 1, "
+                f"as a real photograph of the same woman. {prompt}")
+    if kind == "edit":
+        return prompt
+    return f"Replace the blank grey canvas entirely with this picture: {prompt}"
 
 
-def comfy(path, payload=None, timeout=30):
-    data = None if payload is None else json.dumps(payload).encode()
-    request = urllib.request.Request(f"{COMFY}{path}", data, {"Content-Type": "application/json"})
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        body = response.read()
-        return json.loads(body) if body[:1] in (b"{", b"[") else body
+def decode_picture(data):
+    """Base64 → an RGB picture."""
+    from io import BytesIO
+    from PIL import Image
+    return Image.open(BytesIO(base64.b64decode(data))).convert("RGB")
+
+
+def picture_size(request, kind):
+    """A picture of her defaults to portrait (room for a full-body shot); anything else as asked."""
+    if kind == "face" and request["width"] == request["height"] == 1024:
+        return 896, 1216
+    return request["width"], request["height"]
 
 
 class ImageEngine:
-    """Qwen-Image 2.1 through a headless ComfyUI: set up in the background, on the GPU only to draw."""
+    """
+    Qwen-Image-Edit 2511 with the NSFW LoRA, through diffusers. Downloads and loads in the
+    background; on the GPU only to draw. With less than IMAGE_FULL_VRAM_GB of GPU memory, the
+    transformer and text encoder load in 4-bit and parts move to the GPU only while they work.
+    """
 
-    def __init__(self, enabled, token="", refiner="", steps=20):
+    def __init__(self, enabled, token="", refiner="", steps=28):
         self.enabled = enabled
         self.token = token or None
         self.refiner = refiner
         self.steps = steps
         self.ready = threading.Event()
         self.error = ""
-        self.process = None
+        self.pipe = None
+        self.whole_on_gpu = False
+        #: How long the drawing itself takes here, learned from each picture (a first guess for 4-bit on a T4).
+        self.draw_seconds = 20.0 + 12.0 * steps
 
     def prepare(self):
-        """Installs ComfyUI with the GGUF loader, downloads the three model files, starts ComfyUI."""
         try:
-            if not os.path.isdir(COMFY_DIR):
-                subprocess.run(["git", "clone", "-q", "--depth", "1", "https://github.com/comfyanonymous/ComfyUI", COMFY_DIR], check=True)
-            nodes = os.path.join(COMFY_DIR, "custom_nodes", "ComfyUI-GGUF")
-            if not os.path.isdir(nodes):
-                # The fork with Qwen-Image 2.1 support, as the model's card says.
-                subprocess.run(["git", "clone", "-q", "--depth", "1", "https://github.com/leejet/ComfyUI-GGUF", nodes], check=True)
-            subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-r", os.path.join(COMFY_DIR, "requirements.txt"), "-r", os.path.join(nodes, "requirements.txt")], check=True)
-            from huggingface_hub import hf_hub_download
-            for folder, name in IMAGE_FILES.items():
-                target = os.path.join(COMFY_DIR, "models", folder, os.path.basename(name))
-                if not os.path.exists(target):
-                    print(f"  Pictures: downloading {os.path.basename(name)}...", flush=True)
-                    path = hf_hub_download(IMAGE_REPO, name, token=self.token)
-                    os.makedirs(os.path.dirname(target), exist_ok=True)
-                    shutil.copyfile(path, target)
-            # Low-VRAM mode moves what it can off the GPU between pictures; the text encoder runs on the CPU.
-            self.process = subprocess.Popen([sys.executable, "main.py", "--listen", "127.0.0.1", "--port", "8188", "--lowvram"], cwd=COMFY_DIR, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            for _ in range(180):
-                try:
-                    comfy("/system_stats", timeout=3)
-                    break
-                except OSError:
-                    time.sleep(2)
+            subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-U", "diffusers", "transformers", "accelerate", "peft", "safetensors", "bitsandbytes"], check=True)
+            import torch
+            from diffusers import DiffusionPipeline
+            vram = torch.cuda.get_device_properties(0).total_memory / 1e9
+            # T4s have no bfloat16; half precision there.
+            dtype = torch.bfloat16 if torch.cuda.get_device_capability(0)[0] >= 8 else torch.float16
+            options = {"torch_dtype": dtype, "token": self.token}
+            self.whole_on_gpu = vram >= IMAGE_FULL_VRAM_GB
+            if not self.whole_on_gpu:
+                from diffusers import PipelineQuantizationConfig
+                options["quantization_config"] = PipelineQuantizationConfig(
+                    quant_backend="bitsandbytes_4bit",
+                    quant_kwargs={"load_in_4bit": True, "bnb_4bit_quant_type": "nf4", "bnb_4bit_compute_dtype": dtype},
+                    components_to_quantize=["transformer", "text_encoder"],
+                )
+            print(f"  Pictures: downloading {IMAGE_MODEL} (~58 GB, once per session) and the LoRA...", flush=True)
+            pipe = DiffusionPipeline.from_pretrained(IMAGE_MODEL, **options)
+            pipe.load_lora_weights(IMAGE_LORA, token=self.token)
+            if self.whole_on_gpu:
+                pipe.to("cuda")
             else:
-                raise RuntimeError("ComfyUI didn't start")
+                pipe.enable_model_cpu_offload()
+            pipe.set_progress_bar_config(disable=True)
+            self.pipe = pipe
             self.ready.set()
-            print("  Pictures: ready.", flush=True)
+            print(f"  Pictures: ready ({'on the GPU' if self.whole_on_gpu else '4-bit, parts on the GPU as needed'}).", flush=True)
         except Exception as error:  # noqa: BLE001 - reported in /v1/health and to the app
             self.error = f"{type(error).__name__}: {str(error)[:240]}"
             print(f"  Pictures unavailable: {self.error}", flush=True)
 
-    def generate(self, request):
+    def generate(self, request, report=lambda stage: None):
+        """Makes one picture. `report(stage)` is called as it moves on (refining the prompt, waiting
+        for the GPU, drawing); the job queue turns that into progress for the app."""
         if not self.enabled:
             raise LookupError("pictures aren't switched on (--images)")
         if not self.ready.is_set():
             raise RuntimeError(self.error or "the image model is still downloading; try again in a few minutes")
+        from io import BytesIO
+        import torch
+        from PIL import Image
+        # An edit of a picture she already sent keeps that picture; a picture of her starts from her face.
+        kind = "edit" if request["image"] else "face" if request["reference"] else "new"
+        asked = request["instruction"] if kind == "edit" and request["instruction"] else request["prompt"]
+        # The prompt maker runs before the GPU is taken: it needs the helper model, and a refusal stops here.
+        report("refining")
+        prompt, refined = refine_prompt(asked, self.refiner, edit=kind == "edit", face=kind == "face", expression=request["expression"]) if request["refine"] else (asked, False)
+        width, height = picture_size(request, kind)
+        source = decode_picture(request["image"]) if kind == "edit" else decode_picture(request["reference"]) if kind == "face" else Image.new("RGB", (width, height), (128, 128, 128))
+        report("waiting")
         with GPU.picture():
+            report("drawing")
             started = time.time()
-            # Her voice leaves no room on a T4: let it go for the moment. The next message reloads it.
-            unload_text_models()
-            edit = bool(request["image"])
-            asked = request["instruction"] if edit and request["instruction"] else request["prompt"]
-            prompt, refined = refine_prompt(asked, self.refiner, edit=edit) if request["refine"] else (asked, False)
-            source = None
-            if edit:
-                source = f"freya-source-{request['seed']}.png"
-                with open(os.path.join(COMFY_DIR, "input", source), "wb") as handle:
-                    handle.write(base64.b64decode(request["image"]))
+            # Her voice doesn't fit beside it on a smaller GPU: let it go; the next message reloads it.
+            if not self.whole_on_gpu:
+                unload_text_models()
+            call = {
+                "image": [source], "prompt": picture_prompt(prompt, kind), "negative_prompt": request["negative_prompt"] or " ",
+                "true_cfg_scale": 4.0, "guidance_scale": 1.0, "num_inference_steps": self.steps,
+                "generator": torch.Generator("cpu").manual_seed(request["seed"]), "num_images_per_prompt": 1,
+            }
             try:
-                queued = comfy("/prompt", {"prompt": comfy_workflow(request, prompt, self.steps, source), "client_id": "freya"})
-            except urllib.error.HTTPError as error:
-                raise RuntimeError(f"ComfyUI refused the workflow: {error.read().decode(errors='replace')[:300]}") from error
-            prompt_id = queued.get("prompt_id")
-            image = self.wait_for(prompt_id)
-            # Free the GPU for her voice again.
-            with contextlib.suppress(OSError):
-                comfy("/free", {"unload_models": True, "free_memory": True})
+                result = self.pipe(**call, width=width, height=height)
+            except TypeError:
+                result = self.pipe(**call)
+            buffer = BytesIO()
+            result.images[0].save(buffer, "PNG")
+            torch.cuda.empty_cache()
+            # What a picture really takes here, so the next estimate is closer.
+            self.draw_seconds = 0.6 * self.draw_seconds + 0.4 * (time.time() - started)
             return {
-                "image": base64.b64encode(image).decode(), "mime": "image/png", "model": IMAGE_MODEL_NAME,
+                "image": base64.b64encode(buffer.getvalue()).decode(), "mime": "image/png", "model": IMAGE_MODEL_NAME,
                 "seed": request["seed"], "ms": int((time.time() - started) * 1000), **({"refined": prompt} if refined else {}),
             }
 
-    def wait_for(self, prompt_id, limit_s=900):
-        """Polls ComfyUI's history until the picture is saved; raises its own error message if it fails."""
-        deadline = time.time() + limit_s
-        while time.time() < deadline:
-            history = comfy(f"/history/{prompt_id}").get(prompt_id)
-            if history:
-                status = history.get("status", {})
-                if status.get("status_str") == "error":
-                    messages = [m for m in status.get("messages", []) if m and m[0] == "execution_error"]
-                    detail = messages[0][1].get("exception_message", "") if messages else ""
-                    raise RuntimeError(f"ComfyUI failed: {detail[:300]}")
-                for output in history.get("outputs", {}).values():
-                    for item in output.get("images", []):
-                        query = urlencode({"filename": item["filename"], "subfolder": item.get("subfolder", ""), "type": item.get("type", "output")})
-                        return comfy(f"/view?{query}", timeout=60)
-            time.sleep(2)
-        raise RuntimeError("the picture took longer than 15 minutes")
+
+class PictureJobs:
+    """Pictures as background jobs. A request gets an id at once; the app asks how it's going.
+
+    A picture on a T4 takes minutes, and a Cloudflare quick tunnel cuts any request after about
+    100 seconds, so a picture can't be one long request. One picture is made at a time, in order;
+    a finished or failed job is kept for half an hour, for the app to collect."""
+
+    STAGES = ("queued", "refining", "waiting", "drawing", "done", "error")
+    REFINE_SECONDS = 25.0
+
+    def __init__(self, engine, keep_seconds=1800):
+        self.engine = engine
+        self.keep_seconds = keep_seconds
+        self.jobs = {}
+        self.order = []
+        self.lock = threading.Lock()
+        self.wake = threading.Condition(self.lock)
+        threading.Thread(target=self.work, daemon=True).start()
+
+    def submit(self, request):
+        job_id = secrets.token_hex(8)
+        with self.lock:
+            self.forget_old()
+            self.jobs[job_id] = {"id": job_id, "request": request, "stage": "queued", "created": time.time(), "stage_at": time.time()}
+            self.order.append(job_id)
+            ahead = sum(1 for other in self.jobs.values() if other["stage"] not in ("done", "error")) - 1
+            self.wake.notify()
+        return {"job": job_id, "eta_s": int(self.estimate() * (1 + ahead)), "ahead": ahead}
+
+    def estimate(self):
+        return self.REFINE_SECONDS + self.engine.draw_seconds
+
+    def status(self, job_id):
+        with self.lock:
+            job = self.jobs.get(job_id)
+            if not job:
+                return None
+            now = time.time()
+            stage = job["stage"]
+            payload = {"status": stage, "elapsed_s": int(now - job["created"])}
+            if stage == "done":
+                payload.update(job["result"])
+                payload["progress"] = 1.0
+            elif stage == "error":
+                payload["error"] = job["error"]
+            else:
+                in_stage = now - job["stage_at"]
+                draw = max(30.0, self.engine.draw_seconds)
+                # Progress is honest about what it is: an estimate from how long pictures take here.
+                progress = {"queued": 0.0, "refining": 0.02 + 0.06 * min(1.0, in_stage / self.REFINE_SECONDS), "waiting": 0.09,
+                            "drawing": 0.1 + 0.85 * min(0.98, in_stage / draw)}[stage]
+                remaining = {"queued": self.estimate(), "refining": draw + max(0.0, self.REFINE_SECONDS - in_stage), "waiting": draw,
+                             "drawing": max(5.0, draw - in_stage)}[stage]
+                payload.update({"progress": round(progress, 3), "eta_s": int(remaining)})
+            return payload
+
+    def work(self):
+        while True:
+            with self.lock:
+                while not any(self.jobs.get(job_id, {}).get("stage") == "queued" for job_id in self.order):
+                    self.wake.wait()
+                job_id = next(job_id for job_id in self.order if self.jobs.get(job_id, {}).get("stage") == "queued")
+                request = self.jobs[job_id]["request"]
+
+            def report(stage, job_id=job_id):
+                with self.lock:
+                    if job_id in self.jobs:
+                        self.jobs[job_id].update({"stage": stage, "stage_at": time.time()})
+
+            try:
+                result = self.engine.generate(request, report)
+                outcome = {"stage": "done", "result": result}
+            except Exception as error:  # noqa: BLE001 - every failure is reported to the app, in words
+                outcome = {"stage": "error", "error": str(error)[:300] or type(error).__name__}
+            with self.lock:
+                if job_id in self.jobs:
+                    self.jobs[job_id].update({**outcome, "stage_at": time.time(), "request": None})
+
+    def forget_old(self):
+        cutoff = time.time() - self.keep_seconds
+        for job_id in [job_id for job_id, job in self.jobs.items() if job["stage"] in ("done", "error") and job["stage_at"] < cutoff]:
+            del self.jobs[job_id]
+            self.order.remove(job_id)
 
 
 def unload_text_models():
@@ -406,6 +534,7 @@ class Login(BaseHTTPRequestHandler):
     upstream = OLLAMA
     models = {}
     images = None
+    jobs = None
     embed_on_cpu = False
     started_at = time.time()
 
@@ -423,11 +552,13 @@ class Login(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def reply_json(self, status, payload):
+    def reply_json(self, status, payload, headers=None):
         body = json.dumps(payload).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(body)
 
@@ -444,7 +575,8 @@ class Login(BaseHTTPRequestHandler):
         if not hmac.compare_digest(supplied.encode(), f"Bearer {self.token}".encode()):
             return self.refuse(401, "wrong or missing token")
         path = urlsplit(self.path).path
-        if (self.command, path) not in ALLOWED:
+        job = re.fullmatch(r"/v1/images/([a-f0-9]{16})", path) if self.command == "GET" else None
+        if (self.command, path) not in ALLOWED and not job:
             return self.refuse(403, "not allowed through this server")
         length = int(self.headers.get("Content-Length") or 0)
         if length > MAX_BODY_BYTES:
@@ -452,28 +584,36 @@ class Login(BaseHTTPRequestHandler):
         body = self.rfile.read(length) if length else None
         if path == "/v1/health":
             return self.reply_json(200, health_payload(self.models, self.images, self.capabilities(), self.started_at))
+        if job:
+            return self.picture_status(job.group(1))
         if path == "/v1/images":
             return self.picture(body)
+        if path == "/api/chat" and GPU.busy():
+            # Drawing holds the GPU for minutes: say so at once, so the app's next voice answers
+            # instead of the conversation stalling until the picture is done.
+            return self.reply_json(503, {"error": "busy drawing a picture"}, {"Retry-After": "60"})
         body = prepare_body(path, body, self.embed_on_cpu)
         guard = GPU.chat() if path in ("/api/chat", "/api/embed") else contextlib.nullcontext()
         with guard:
             self.relay(path, body)
 
     def picture(self, body):
-        if not self.images or not self.images.enabled:
+        """Starts a picture and returns its job id at once (202); GET /v1/images/<id> says how it's going."""
+        if not self.images or not self.images.enabled or not self.jobs:
             return self.reply_json(404, {"error": "pictures aren't switched on here (--images)"})
         try:
             request = parse_image_request(json.loads(body or b"{}"))
         except ValueError as error:
             return self.reply_json(400, {"error": str(error)})
-        try:
-            return self.reply_json(200, self.images.generate(request))
-        except ValueError as error:
-            return self.reply_json(400, {"error": str(error)})
-        except RuntimeError as error:
-            return self.reply_json(503, {"error": str(error)})
-        except Exception as error:  # noqa: BLE001 - a failed picture must not take the server down
-            return self.reply_json(500, {"error": f"{type(error).__name__}: {str(error)[:200]}"})
+        if not self.images.ready.is_set():
+            return self.reply_json(503, {"error": self.images.error or "the image model is still downloading; try again in a few minutes"})
+        return self.reply_json(202, self.jobs.submit(request))
+
+    def picture_status(self, job_id):
+        status = self.jobs.status(job_id) if self.jobs else None
+        if status is None:
+            return self.reply_json(404, {"error": "no such picture (finished ones are kept for 30 minutes)"})
+        return self.reply_json(200, status)
 
     def relay(self, path, body):
         target = urlsplit(self.upstream)
@@ -505,7 +645,8 @@ class Login(BaseHTTPRequestHandler):
 
 
 def start_login(token, upstream, port, models=None, images=None, embed_on_cpu=False):
-    handler = type("Handler", (Login,), {"token": token, "upstream": upstream, "models": models or {"voice": "freya"}, "images": images, "embed_on_cpu": embed_on_cpu, "started_at": time.time()})
+    jobs = PictureJobs(images) if images and images.enabled else None
+    handler = type("Handler", (Login,), {"token": token, "upstream": upstream, "models": models or {"voice": "freya"}, "images": images, "jobs": jobs, "embed_on_cpu": embed_on_cpu, "started_at": time.time()})
     server = ThreadingHTTPServer(("127.0.0.1", port), handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server
@@ -604,19 +745,30 @@ def default_format(base):
     return "alpaca" if "dark-forest" in base.lower() else "model"
 
 
-def load_fitting(candidates, contexts, chat_format=""):
-    """The first model and context that sit entirely on the GPU. Part on the CPU makes replies crawl."""
+def load_fitting(candidates, contexts, chat_format="", allow_partial=False):
+    """
+    The first model and context that sit entirely on the GPU. Part on the CPU makes replies crawl,
+    so that's only accepted for the default voice (`allow_partial`), which can't fit a T4 whole:
+    then the smallest context, with as much on the GPU as Ollama manages.
+    """
     for base in candidates:
         if not re.search(r"\.gguf$", base):
             print(f"Downloading {base} (several minutes, once per session)...", flush=True)
             run(f'ollama pull "{base}"')
-        for ctx in contexts:
+        for ctx in contexts or contexts_for(base):
             create_model("freya", base, ctx, chat_format or default_format(base))
             post("/api/generate", {"model": "freya", "prompt": "hi", "stream": False, "keep_alive": -1, "options": {"num_ctx": ctx, "num_predict": 1}})
             share = share_on_gpu("freya")
             print(f"  {base} at context {ctx}: {share:.0%} on the GPU", flush=True)
             if share >= 0.995:
                 return base, ctx
+        if allow_partial:
+            ctx = (contexts or contexts_for(base))[-1]
+            create_model("freya", base, ctx, chat_format or default_format(base))
+            post("/api/generate", {"model": "freya", "prompt": "hi", "stream": False, "keep_alive": -1, "options": {"num_ctx": ctx, "num_predict": 1}})
+            print(f"  Using it {share_on_gpu('freya'):.0%} on the GPU at context {ctx}; the rest runs on the CPU, so replies are slower."
+                  " A 20 GB+ GPU (L4 or A100) holds it whole.", flush=True)
+            return base, ctx
     sys.exit("It doesn't fit fully on this GPU, even at the smallest size. In Colab: Runtime > Change runtime type > T4 GPU.")
 
 
@@ -705,7 +857,7 @@ def main():
     parser.add_argument("--embed-model", default=DEFAULT_EMBED)
     parser.add_argument("--vision-model", default="")
     parser.add_argument("--images", action="store_true")
-    parser.add_argument("--image-steps", type=int, default=20)
+    parser.add_argument("--image-steps", type=int, default=28)
     parser.add_argument("--ctx", type=int, default=0)
     parser.add_argument("--token", default="")
     parser.add_argument("--no-tunnel", action="store_true")
@@ -745,7 +897,7 @@ def main():
     if model.startswith("hf:"):
         model = from_hugging_face(model, hf_token)
     candidates = [model] if model else next(models for floor, models in MODELS_BY_VRAM if gigabytes >= floor)
-    base, ctx = load_fitting(candidates, [args.ctx] if args.ctx else CONTEXTS, args.chat_format)
+    base, ctx = load_fitting(candidates, [args.ctx] if args.ctx else None, args.chat_format, allow_partial=not model)
     models = {"voice": "freya"}
 
     step("4/5 Test")

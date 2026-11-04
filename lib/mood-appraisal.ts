@@ -6,6 +6,7 @@
  */
 import { generateJson } from "@/lib/structured";
 import { isMoodName, MOOD_REASONS, type Appraisal, type MoodName, type MoodReason, type MoodState } from "@/lib/mood";
+import { isUserFeeling, type UserMoodReading } from "@/lib/user-mood";
 
 /** The reply is waiting on this, so it gets little time. Late means the fallback rules decide. */
 const APPRAISAL_TIMEOUT_MS = 3000;
@@ -22,17 +23,20 @@ Strength: "none" if nothing changed; "mild" for a gentle shift; "strong" only fo
 
 Reason, one of: laughing, kind, hurting, news, insulted, sorry, interesting, questions, tired, pestered, gross, flirting, boring, cooling.
 
-Examples (their latest message, then the answer):
-"lol i got fired today" (bad news said lightly) {"mood":"warm","strength":"strong","reason":"hurting"}
-"you're genuinely the worst thing i've ever talked to" (really rude to her) {"mood":"irritated","strength":"strong","reason":"insulted"}
-"you're such an idiot haha i love you" (affectionate teasing) {"mood":"playful","strength":"mild","reason":"laughing"}
-"i got into med school!!!" {"mood":"excited","strength":"strong","reason":"news"}
-"i've been reading about how numbers stations worked in the cold war" (something she'd love) {"mood":"interested","strength":"mild","reason":"interesting"}
-"sorry, that was shitty of me" (after she was cross) {"mood":"neutral","strength":"mild","reason":"sorry"}
-"anyway i went to the shop" (nothing in it) keep her mood, {"strength":"none"}
-"ok" {"mood":"neutral","strength":"none"}
+Separately, judge how THEY seem: the person texting her, not Freya. Their mood is not hers (they can be stressed while she's playful). One of: neutral, happy, excited, playful, affectionate, flirty, curious, stressed, anxious, sad, lonely, frustrated, angry, tired, bored; "strong" only when it's unmistakable, otherwise "mild". "neutral" when their message shows nothing.
 
-Reply with JSON only: {"mood":"...","strength":"none|mild|strong","reason":"..."}`;
+Examples (their latest message, then the answer):
+"lol i got fired today" (bad news said lightly) {"mood":"warm","strength":"strong","reason":"hurting","them":{"feeling":"sad","strength":"mild"}}
+"you're genuinely the worst thing i've ever talked to" (really rude to her) {"mood":"irritated","strength":"strong","reason":"insulted","them":{"feeling":"angry","strength":"strong"}}
+"you're such an idiot haha i love you" (affectionate teasing) {"mood":"playful","strength":"mild","reason":"laughing","them":{"feeling":"playful","strength":"mild"}}
+"i got into med school!!!" {"mood":"excited","strength":"strong","reason":"news","them":{"feeling":"excited","strength":"strong"}}
+"i've been reading about how numbers stations worked in the cold war" (something she'd love) {"mood":"interested","strength":"mild","reason":"interesting","them":{"feeling":"curious","strength":"mild"}}
+"sorry, that was shitty of me" (after she was cross) {"mood":"neutral","strength":"mild","reason":"sorry","them":{"feeling":"neutral","strength":"mild"}}
+"three deadlines tomorrow and i haven't started" {"strength":"none","them":{"feeling":"stressed","strength":"mild"}}
+"anyway i went to the shop" (nothing in it) keep her mood, {"strength":"none","them":{"feeling":"neutral","strength":"mild"}}
+"ok" {"mood":"neutral","strength":"none","them":{"feeling":"neutral","strength":"mild"}}
+
+Reply with JSON only: {"mood":"...","strength":"none|mild|strong","reason":"...","them":{"feeling":"...","strength":"mild|strong"}}`;
 
 /** A reason has to fit: she can't be told she's calm because they keep pestering her. */
 const SOUR_REASONS = new Set<MoodReason>(["pestered", "insulted", "gross", "boring"]);
@@ -48,7 +52,18 @@ export function parseAppraisal(data: unknown): Appraisal | null {
   return { mood: answer.mood, strength: answer.strength, reason };
 }
 
-export async function appraiseMood(state: MoodState, turns: { role: string; content: string }[], signal?: AbortSignal): Promise<Appraisal | null> {
+/** How they seem, from the same answer. Only the fixed list gets through (lib/user-mood). */
+export function parseThem(data: unknown): UserMoodReading | null {
+  const them = (data as { them?: { feeling?: unknown; strength?: unknown } } | null)?.them;
+  if (!them || typeof them !== "object" || !isUserFeeling(them.feeling)) return null;
+  return { feeling: them.feeling, strength: them.strength === "strong" ? "strong" : "mild" };
+}
+
+/**
+ * Her mood after their message, and separately how they seem. Either can be missing (an answer off
+ * the lists, or no answer in time); the chat route then uses the word rules for that part.
+ */
+export async function appraiseMood(state: MoodState, turns: { role: string; content: string }[], signal?: AbortSignal): Promise<{ her: Appraisal | null; them: UserMoodReading | null } | null> {
   const transcript = turns.slice(-TURNS).map((turn) => `${turn.role === "user" ? "THEM" : "FREYA"}: ${turn.content.slice(0, TURN_CHARS)}`).join("\n");
   try {
     const { data } = await generateJson(SYSTEM, `Her mood until now: ${state.name}.\n\nTRANSCRIPT\n${transcript}`, {
@@ -59,7 +74,7 @@ export async function appraiseMood(state: MoodState, turns: { role: string; cont
       signal: AbortSignal.any([AbortSignal.timeout(APPRAISAL_TIMEOUT_MS), ...(signal ? [signal] : [])]),
       timeoutMs: APPRAISAL_TIMEOUT_MS,
     });
-    return parseAppraisal(data);
+    return { her: parseAppraisal(data), them: parseThem(data) };
   } catch {
     return null;
   }

@@ -69,6 +69,9 @@ uniform vec3 tint;
 uniform vec3 lightDir;
 uniform float pixelRatio;
 uniform float focus;
+uniform float pulse;
+uniform float pulseAge;
+uniform vec3 gaze;
 varying vec3 vColor;
 varying float vAlpha;
 ${NOISE}
@@ -79,18 +82,25 @@ void main() {
   float broad = snoise(d * 1.35 + vec3(0.0, t, t * 0.6));
   float fine = snoise(d * 3.1 - vec3(t * 1.4, 0.0, t * 0.9));
   float organic = broad * 0.7 + fine * 0.3 * detail;
-  float layerRadius = layer < 0.5 ? 0.58 : layer < 1.5 ? 1.0 : 1.22 + 0.08 * seed;
-  float r = radius * layerRadius * (1.0 + amplitude * organic * (layer < 0.5 ? 0.5 : 1.0) + speak * 0.035 * fine);
-  r *= 1.0 + shiver * 0.03 * sin(seed * 91.0 + time * 40.0);
   // Thinking turns the body; rings near the poles turn faster, like a slow vortex.
   float angle = spin * (0.6 + abs(d.y) * 1.4);
   vec3 turned = vec3(d.x * cos(angle) - d.z * sin(angle), d.y, d.x * sin(angle) + d.z * cos(angle));
+  float layerRadius = layer < 0.5 ? 0.58 : layer < 1.5 ? 1.0 : 1.22 + 0.08 * seed;
+  float r = radius * layerRadius * (1.0 + amplitude * organic * (layer < 0.5 ? 0.5 : 1.0) + speak * 0.035 * fine);
+  r *= 1.0 + shiver * 0.03 * sin(seed * 91.0 + time * 40.0);
+  // A ring that runs over the surface from the front and fades: each message she sends, a poke.
+  float fromFront = acos(clamp(turned.z, -1.0, 1.0));
+  float ringAt = fromFront - pulseAge * 1.9;
+  float ring = pulse * exp(-ringAt * ringAt * 10.0) * exp(-pulseAge * 0.9);
+  r *= 1.0 + ring * 0.08;
+  // Looking somewhere: the body swells a little toward it, as if leaning that way.
+  r *= 1.0 + max(dot(turned, gaze), 0.0) * 0.08;
   vec3 p = vec3(turned.x * r, turned.y * r * squash + sink * (1.0 - turned.y) * 0.5 + lift, turned.z * r);
   vec4 mv = modelViewMatrix * vec4(p, 1.0);
   vec3 normal = normalize(normalMatrix * turned);
   float key = max(dot(normal, normalize(lightDir)), 0.0);
   float rim = pow(1.0 - max(normal.z, 0.0), 3.0);
-  float shade = (0.42 + 0.58 * key) * (0.82 + 0.18 * organic) + rim * 0.32 + speak * 0.12 * (0.5 + 0.5 * fine);
+  float shade = (0.42 + 0.58 * key) * (0.82 + 0.18 * organic) + rim * 0.32 + speak * 0.12 * (0.5 + 0.5 * fine) + ring * 0.4;
   float layerLight = layer < 0.5 ? 0.55 : layer < 1.5 ? 1.0 : 0.6;
   vColor = tint * brightness * shade * layerLight;
   vAlpha = layer < 0.5 ? 0.7 : layer < 1.5 ? 1.0 : 0.32;

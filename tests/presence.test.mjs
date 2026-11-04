@@ -4,7 +4,7 @@ import { EXPRESSION_FILE, EXPRESSIONS, POSES, requestedExpression } from "../lib
 import { restingFace } from "../lib/expression-director.ts";
 import { MOOD_NAMES } from "../lib/mood.ts";
 import { briefProviderFor } from "../lib/brief.ts";
-import { bubbleDelay, MIN_BUBBLE_GAP_MS, paceFactor, readingDelay, typingDelay } from "../lib/reply-parts.ts";
+import { bubbleDelay, bubbleWait, MIN_BUBBLE_GAP_MS, paceFactor, readingDelay, typingDelay } from "../lib/reply-parts.ts";
 import { POST as chatPost } from "../app/api/chat/route.ts";
 import { resetVisionForTests } from "../lib/vision.ts";
 import { resetLocalRateLimitsForTests } from "../lib/rate-limit.ts";
@@ -61,6 +61,27 @@ test("her mood sets her texting pace: tired is slower, excited quicker, none giv
   assert.ok(typingDelay(text, 0.15) > typingDelay(text) && typingDelay(text) > typingDelay(text, 0.95));
   assert.ok(readingDelay(text, () => 0, 0.15) > readingDelay(text, () => 0, 0.95));
   assert.ok(bubbleDelay("hi", true, 0.95) >= MIN_BUBBLE_GAP_MS, "the one-second gap holds however fast she is");
+});
+
+test("a bubble's wait is its typing time minus however long the server already took", () => {
+  const text = "x".repeat(100);
+  const full = bubbleDelay(text, false);
+  // Nothing elapsed yet: the full typing delay applies, same as bubbleDelay on its own.
+  assert.equal(bubbleWait(text, false, 0), full);
+  // The server already spent all of that time generating: she's already "been typing" it.
+  assert.equal(bubbleWait(text, false, full), 0);
+  assert.equal(bubbleWait(text, false, full * 10), 0, "never negative");
+  // Partway there: only the remainder is waited out.
+  assert.equal(bubbleWait(text, false, full / 2), full - full / 2);
+});
+
+test("a follow-up bubble still keeps the one-second gap, even on a very slow server", () => {
+  // The server took far longer than any typing delay, but the previous bubble posted 200ms ago.
+  assert.equal(bubbleWait("hi", true, 999_999, 200), MIN_BUBBLE_GAP_MS - 200);
+  // A full second has already passed since the last bubble: no extra wait.
+  assert.equal(bubbleWait("hi", true, 999_999, MIN_BUBBLE_GAP_MS), 0);
+  // The very first bubble has no "since last posted" floor to honour.
+  assert.equal(bubbleWait("hi", true, 999_999, undefined), 0);
 });
 
 test("hybrid: the local model is the voice, even for images (Gemini only describes them)", async () => {
