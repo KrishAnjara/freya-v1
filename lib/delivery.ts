@@ -1,12 +1,12 @@
 /**
- * WhatsApp-style ticks on their messages: ✓ sent, ✓✓ delivered, ✓✓ in colour once she's seen it.
- * Seen is set when she opens the message, just before she starts on her answer (app/page runReply),
- * and from then on the message can't be edited: she's already read it. Before that, a message
- * waiting for her can still be corrected, and she answers the corrected version. Pure.
+ * WhatsApp-style ticks on their messages: ✓ sent, ✓✓ delivered, ✓✓ blue once she's answered.
+ * Blue means her reply (or her reaction) has actually arrived, not just that she started on it.
+ * Editing locks earlier, when she opens the message to start her answer (openedAt): before that,
+ * a message waiting for her can still be corrected, and she answers the corrected version. Pure.
  */
 export type Delivery = "failed" | "sent" | "delivered" | "seen";
 
-type Tracked = { role: string; failed?: boolean; delivered?: boolean; seenAt?: string; command?: string; herReaction?: string };
+type Tracked = { role: string; failed?: boolean; delivered?: boolean; openedAt?: string; seenAt?: string; command?: string; herReaction?: string };
 
 export function deliveryOf(message: Tracked, index: number, all: Tracked[]): Delivery {
   if (message.failed) return "failed";
@@ -16,9 +16,9 @@ export function deliveryOf(message: Tracked, index: number, all: Tracked[]): Del
   return message.delivered ? "delivered" : "sent";
 }
 
-/** Editable only until she's seen it. */
+/** Editable only until she's opened it to answer. */
 export function canEdit(message: Tracked, index: number, all: Tracked[]) {
-  return message.role === "user" && deliveryOf(message, index, all) !== "seen";
+  return message.role === "user" && !message.openedAt && deliveryOf(message, index, all) !== "seen";
 }
 
 /** Something a person would stop and think about before answering. */

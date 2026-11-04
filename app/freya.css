@@ -1329,10 +1329,19 @@ button.attachment-face:hover { border-color: rgba(176, 188, 186, .5); background
 .picture-failed { color: #d298a7; font-size: 12px; line-height: 1.5; }
 @media (prefers-reduced-motion: reduce) { .picture-pending::after { animation: none; } }
 
-/* Delivery ticks on their messages (lib/delivery): ✓ sent, ✓✓ delivered, ✓✓ in colour when seen. */
-.message-ticks { color: #6f7a79; letter-spacing: -.12em; }
-.message-ticks.seen { color: #53bdeb; }
-.message-ticks em { margin-left: 6px; color: #8c9896; font-style: normal; letter-spacing: .08em; }
+/* Delivery ticks (lib/delivery): one tick sent; the second draws in when delivered; both turn
+   blue once her answer has arrived. */
+.message-ticks { display: inline-flex; align-items: center; gap: 5px; color: #7a8584; }
+.message-ticks svg { overflow: visible; }
+.message-ticks .tick { fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; stroke-dasharray: 16; stroke-dashoffset: 0; transition: stroke .45s ease; }
+.message-ticks.sent .tick-1 { animation: tick-draw .28s ease-out both; }
+.message-ticks.sent .tick-2 { opacity: 0; }
+.message-ticks.delivered .tick-2 { animation: tick-draw .32s ease-out both; }
+.message-ticks.seen .tick { stroke: #53bdeb; }
+.message-ticks em { color: #8c9896; font-style: normal; letter-spacing: .08em; animation: seen-in .4s ease-out both; }
+@keyframes tick-draw { from { stroke-dashoffset: 16; } to { stroke-dashoffset: 0; } }
+@keyframes seen-in { from { opacity: 0; transform: translateY(2px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) { .message-ticks .tick, .message-ticks em { animation: none; transition: none; } }
 
 /* Unread: a line where they start when the chat is opened, and a count on the jump button. */
 .unread-divider { display: flex; align-items: center; gap: 10px; margin: 10px 0 6px; color: #53bdeb; font: 8px var(--mono); letter-spacing: .14em; }
@@ -1341,3 +1350,12 @@ button.attachment-face:hover { border-color: rgba(176, 188, 186, .5); background
 .jump-count { display: inline-grid; min-width: 16px; height: 16px; margin-right: 6px; padding: 0 4px; place-items: center; border-radius: 8px; background: #53bdeb; color: #05090b; font-size: 9px; }
 @keyframes unread-nudge { from { transform: translateY(6px); opacity: .4; } to { transform: none; opacity: 1; } }
 @media (prefers-reduced-motion: reduce) { .jump-latest.has-new { animation: none; } }
+
+/* A picture on its way: an empty box of the same shape, breathing, no words. */
+.picture-placeholder { width: min(240px, 60vw); aspect-ratio: 3 / 4; border: 1px solid rgba(150, 162, 162, .2); border-radius: 2px; background: linear-gradient(110deg, rgba(150, 162, 162, .05) 20%, rgba(150, 162, 162, .14) 40%, rgba(150, 162, 162, .05) 60%) 0 0 / 250% 100%; animation: picture-shimmer 1.6s linear infinite; }
+@keyframes picture-shimmer { to { background-position: -250% 0; } }
+.picture-svg { max-width: min(100%, 320px); }
+/* The unread line shows for a few seconds once read, then fades out. */
+.unread-divider { animation: unread-fade 6s ease forwards; }
+@keyframes unread-fade { 0%, 75% { opacity: 1; } 100% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .picture-placeholder, .unread-divider { animation: none; } }

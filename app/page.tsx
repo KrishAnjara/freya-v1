@@ -279,6 +279,8 @@ type Message = {
   failed?: boolean;
   /** Their message reached her (✓✓), and when she read it (✓✓ in colour, "Seen"). */
   delivered?: boolean;
+  /** When she opened it to answer (editing locks), and when her answer arrived (blue ticks). */
+  openedAt?: string;
   seenAt?: string;
   /** A composed piece (essay, letter…) shown as one typed-out message. */
   longform?: boolean;
@@ -487,6 +489,7 @@ function sanitizeMessage(message: Message): Message {
     ...(message.spoken === true ? { spoken: true } : {}),
     ...(message.failed === true ? { failed: true } : {}),
     ...(message.delivered === true ? { delivered: true } : {}),
+    ...(optional(message.openedAt) ? { openedAt: message.openedAt } : {}),
     ...(optional(message.seenAt) ? { seenAt: message.seenAt } : {}),
     ...(message.longform === true ? { longform: true } : {}),
     ...(message.initiative === true ? { initiative: true } : {}),
@@ -1118,6 +1121,12 @@ export default function Home() {
     userMoodRef.current = userMood;
     if (moodLoadedRef.current) saveUserMood(userMood, moodAccountRef.current);
   }, [userMood]);
+  // The unread line is read once it's on screen: it fades out (CSS) and is gone after six seconds.
+  useEffect(() => {
+    if (!unreadFrom) return;
+    const timer = window.setTimeout(() => setUnreadFrom(null), 6000);
+    return () => window.clearTimeout(timer);
+  }, [unreadFrom]);
   // After a refresh: pick up the replies she owed (lib/resume), once the saved chats are loaded.
   useEffect(() => {
     if (!hydrated) return;
@@ -3150,15 +3159,17 @@ export default function Home() {
     // before she starts on her answer. Only their messages up to the one she's answering.
     const answersThem =
       target.role === "user" && !initiative && !job.extraPrompt;
-    const markUserMessages = (seen: boolean) => {
+    // "Opened" locks editing when she starts on it; the blue ticks come only once her answer has
+    // arrived (lib/delivery: a message with her reply after it is seen).
+    const markUserMessages = (opened: boolean) => {
       if (!answersThem) return;
       const at = new Date().toISOString();
       patchConversation(job.conversationId, (messages) =>
         messages.map((message, index) =>
           message.role === "user" &&
           index <= targetIndex &&
-          (seen ? !message.seenAt : !message.delivered)
-            ? { ...message, delivered: true, ...(seen ? { seenAt: at } : {}) }
+          (opened ? !message.openedAt : !message.delivered)
+            ? { ...message, delivered: true, ...(opened ? { openedAt: at } : {}) }
             : message,
         ),
       );
@@ -3221,12 +3232,13 @@ export default function Home() {
     const postBubble = (text: string) => {
       const first = posted.length === 0 && !job.turn;
       delivery = delivery.then(async () => {
-        // How much of this bubble's believable typing time the server's own time already paid for,
-        // counted from when the request was sent, not from the last bubble: a reply that took 8s to
-        // generate has already "been typing" for 8s, whatever shape the bubbles end up taking.
-        const evaluationElapsed = performance.now() - evalStartedAt;
+        // Every block is typed. The first is credited with the server's time since the request (she
+        // has "been typing" while it answered); each later block gets its own typing time, credited
+        // only with the time since the block before it landed, so blocks never arrive in a heap.
         const sinceLastPosted =
           posted.length > 0 ? performance.now() - lastPostedAt : undefined;
+        const evaluationElapsed =
+          sinceLastPosted ?? performance.now() - evalStartedAt;
         const wait = bubbleWait(
           text,
           posted.length > 0,
@@ -4084,13 +4096,7 @@ export default function Home() {
     }
   }
 
-  /** ⋯ → Change it: the next thing they type is the change to that picture. */
-  function startPictureEdit(message: Message) {
-    setPictureEditId((current) => (current === message.id ? "" : message.id));
-    setReplyingToId("");
-    setRefiningId("");
-    window.requestAnimationFrame(() => composerRef.current?.focus());
-  }
+
 
   /** The card's Refine button: tags that form in the composer and puts it on the canvas. */
   function tagForRefine(message: Message) {
@@ -6020,12 +6026,10 @@ export default function Home() {
                                     </button>
                                   </div>
                                 </div>
-                              ) : message.command ? (
+                              ) : message.command && message.command !== "image" ? (
                                 <div className="command-chip">
                                   <span className="command-chip-label">
-                                    {message.command === "image"
-                                      ? "PICTURE"
-                                      : message.command === "refine"
+                                    {message.command === "refine"
                                         ? "REFINE"
                                         : "VISUALIZE"}
                                   </span>
@@ -6049,39 +6053,6 @@ export default function Home() {
                                   image={message.attachments?.find(
                                     (item) => item.kind === "image",
                                   )}
-                                  onEdit={() => startPictureEdit(message)}
-                                  onCopyPrompt={() =>
-                                    void navigator.clipboard
-                                      .writeText(
-                                        message.picture!.refined ||
-                                          message.picture!.prompt,
-                                      )
-                                      .catch(() => undefined)
-                                  }
-                                  onVariation={
-                                    replyingHere
-                                      ? undefined
-                                      : () =>
-                                          void runPicture(
-                                            message.picture!.prompt,
-                                            "variation",
-                                            { from: message, variation: true },
-                                          )
-                                  }
-                                  onStyle={
-                                    replyingHere
-                                      ? undefined
-                                      : (style) =>
-                                          void runPicture(
-                                            message.picture!.prompt,
-                                            `in ${PICTURE_STYLES.find(([key]) => key === style)?.[1].toLowerCase() ?? style}`,
-                                            {
-                                              from: message,
-                                              style,
-                                              variation: true,
-                                            },
-                                          )
-                                  }
                                 />
                               ) : message.longform ? (
                                 <LongformMessage
@@ -6299,7 +6270,10 @@ export default function Home() {
                                     title={delivery === "seen" ? "Seen" : delivery === "delivered" ? "Delivered" : "Sent"}
                                     aria-label={delivery === "seen" ? "Seen" : delivery === "delivered" ? "Delivered" : "Sent"}
                                   >
-                                    {delivery === "sent" ? "✓" : "✓✓"}
+                                    <svg viewBox="0 0 18 11" width="16" height="10" aria-hidden="true">
+                                      <path className="tick tick-1" d="M1 5.8 L3.9 8.7 L10 1.8" />
+                                      <path className="tick tick-2" d="M6.2 7.9 L7 8.7 L13.1 1.8" />
+                                    </svg>
                                     {delivery === "seen" && index === lastUserIndex && <em>Seen</em>}
                                   </span>
                                 );
