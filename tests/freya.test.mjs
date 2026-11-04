@@ -403,7 +403,7 @@ test("layout has a separate profile/settings tab dialog, top composer, bottom ca
   assert.match(page, /SETTINGS/);
   const composerPosition = page.indexOf("className={`composer-wrap");
   const conversationPosition = page.indexOf('<div className="conversation-shell">');
-  const canvasPosition = page.indexOf('<EmotionCanvas signal={canvasSignal}');
+  const canvasPosition = page.indexOf('<EmotionCanvas ');
   assert.ok(composerPosition >= 0 && composerPosition < conversationPosition && conversationPosition < canvasPosition);
   // Pinch zoom stays available (WCAG 1.4.4); only double-tap zoom on the app chrome is off.
   assert.doesNotMatch(layout, /maximumScale: 1|userScalable: false/);

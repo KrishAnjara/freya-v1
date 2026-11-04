@@ -135,13 +135,15 @@ function falloff(distance: number) {
  * scaled by it, and the expression's photo is used from PHOTO_FROM_LEVEL up; below that the
  * face moves a little and the photo stays her resting one.
  */
-export default function PortraitParticles({ expression = "neutral", intensity = 1, glance = null, motion = STILL_MOTION }: {
+export default function PortraitParticles({ expression = "neutral", intensity = 1, glance = null, motion = STILL_MOTION, asleep = false }: {
   expression?: Expression;
   intensity?: number;
   /** A glance away from her mood (lib/expression-director): eyes, a little tilt and turn, held a moment. */
   glance?: Glance | null;
   /** How her head moves at rest in her mood: sway, pace, droop, lean, bounce. */
   motion?: MoodMotion;
+  /** Offline: her eyes stay closed and she breathes slowly, asleep. */
+  asleep?: boolean;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const expressionRef = useRef<Expression>(expression);
@@ -152,6 +154,8 @@ export default function PortraitParticles({ expression = "neutral", intensity = 
   useEffect(() => { intensityRef.current = Math.max(0, Math.min(1, intensity)); }, [intensity]);
   useEffect(() => { glanceRef.current = glance; }, [glance]);
   useEffect(() => { motionRef.current = motion; }, [motion]);
+  const asleepRef = useRef(asleep);
+  useEffect(() => { asleepRef.current = asleep; }, [asleep]);
   const [fallback, setFallback] = useState(false);
   const [failed, setFailed] = useState(false);
   const [disturbed, setDisturbed] = useState(false);
@@ -382,6 +386,7 @@ export default function PortraitParticles({ expression = "neutral", intensity = 
     let blinkDuration = 0.14;
     let doubleBlink = false;
     let idleLip = 0;
+    let sleepLids = 0;
     let lipOpen = 0;
 
     /**
@@ -443,6 +448,9 @@ export default function PortraitParticles({ expression = "neutral", intensity = 
           }
         }
 
+        // Asleep: the lids close and stay closed, easing down rather than snapping.
+        sleepLids += ((asleepRef.current ? 1 : 0) - sleepLids) * 0.04 * step;
+        blink = Math.max(blink, sleepLids);
         // Lips follow the spoken-word envelope; idle breathing takes over between utterances.
         tickCaption(timestamp);
         const spoken = mouthOpening(timestamp);

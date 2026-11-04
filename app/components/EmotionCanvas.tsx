@@ -185,7 +185,7 @@ function startingLevel(quality: CanvasQuality): keyof typeof COUNTS {
   return cores <= 4 || memory <= 4 ? "medium" : "high";
 }
 
-export default function EmotionCanvas({ signal, mood, form = null, onClearForm, quality = "auto", reaction = null, glance = null, beat = 0, typed = 0 }: {
+export default function EmotionCanvas({ signal, mood, form = null, onClearForm, quality = "auto", reaction = null, glance = null, beat = 0, typed = 0, offline = false }: {
   signal: CanvasSignal; mood: MoodState; form?: CanvasForm | null; onClearForm?: () => void; quality?: CanvasQuality;
   /** The latest face her portrait showed (lib/expression-director); each new one moves the body. */
   reaction?: { expression: Expression; level: number; startedAt: number } | null;
@@ -195,6 +195,8 @@ export default function EmotionCanvas({ signal, mood, form = null, onClearForm, 
   beat?: number;
   /** How much they've typed: each keystroke makes her shimmer. */
   typed?: number;
+  /** Every model is down: she's dim and slow, and the label says offline instead of her mood. */
+  offline?: boolean;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const [fallback, setFallback] = useState(false);
@@ -600,11 +602,11 @@ export default function EmotionCanvas({ signal, mood, form = null, onClearForm, 
   const activity = activityOf(signal);
   return <section
     className={`emotion-canvas presence-canvas signal-${signal} activity-${activity} mood-${mood.name}`}
-    aria-label={`FREYA's presence: ${ACTIVITY_LABEL[activity].toLowerCase()}, mood ${mood.name}. Shows the app's simulated mood and conversation state.`}
+    aria-label={offline ? "FREYA is offline." : `FREYA's presence: ${ACTIVITY_LABEL[activity].toLowerCase()}, mood ${mood.name}. Shows the app's simulated mood and conversation state.`}
   >
     {fallback && <div className="canvas-fallback" aria-hidden="true"><span>✧</span><i/><i/><i/><i/><i/><i/><i/><i/></div>}
     <div ref={hostRef} className={`three-host ${form?.status === "ready" || form?.status === "refining" ? "form-in-hand" : ""}`} aria-hidden="true" />
-    <div className="presence-status" aria-hidden="true">{ACTIVITY_LABEL[activity]} · {mood.name.toUpperCase()}</div>
+    <div className="presence-status" aria-hidden="true">{offline ? "OFFLINE" : `${ACTIVITY_LABEL[activity]} · ${mood.name.toUpperCase()}`}</div>
     {form && <div className={`form-caption form-${form.status}`} role="status" aria-live="polite">
       <span>{form.status === "loading" ? `Composing · ${form.title}…` : form.status === "refining" ? `Refining · ${form.title}…` : form.status === "error" ? `Couldn't visualise ${form.title}` : `${form.title}${fallback ? " · 3D view needs motion enabled" : ""}`}</span>
       {form.status !== "loading" && form.status !== "refining" && onClearForm && <button type="button" onClick={onClearForm} aria-label="Clear the visualisation">Clear</button>}

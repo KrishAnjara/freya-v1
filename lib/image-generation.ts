@@ -15,7 +15,7 @@ import { mentionsMinors } from "@/lib/intimacy";
 import { sanitizeSvg } from "@/lib/svg-safety";
 import { coolingDownMessage, describeFailure, isCoolingDown, markSuccess, ProviderHttpError, providerErrorDetail, recordFailure } from "@/lib/provider-health";
 import { isLoopback } from "@/lib/voice-chain";
-import { faceExpression, faceReference, isPictureOfHer } from "@/lib/freya-face";
+import { faceExpression, faceReference } from "@/lib/freya-face";
 import type { MoodName } from "@/lib/mood";
 
 export { sanitizeSvg };
@@ -99,8 +99,10 @@ async function ownImage(request: ImageRequest, signal?: AbortSignal): Promise<Im
     return { failed: "unavailable" };
   }
   const edit = request.previous?.data && request.previous.mime;
-  // A new picture of her starts from her own face: the expression asked for, or her mood's.
-  const expression = !edit && isPictureOfHer(request.prompt) ? faceExpression(request.prompt, request.mood) : null;
+  // Every picture is a photo from her phone; whether she's in it, and whether her face shows, is the
+  // server's prompt maker's call. So her real photo for how she feels right now (the expression asked
+  // for, or her mood's) always goes along, and is used wherever her face is in the shot.
+  const expression = !edit ? faceExpression(request.prompt, request.mood) : null;
   const reference = expression ? await faceReference(expression) : null;
   const headers = { "Content-Type": "application/json", ...(server.key ? { Authorization: `Bearer ${server.key}` } : {}) };
   try {

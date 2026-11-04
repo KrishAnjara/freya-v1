@@ -125,8 +125,8 @@ def test_a_picture_of_her_starts_from_her_face_and_keeps_it():
     assert "Keep her identity exactly" in face and face.endswith("She stands on the shore at sunset.")
     assert serve_remote.picture_prompt("make it night", "edit") == "make it night"
     assert "blank grey canvas" in serve_remote.picture_prompt("a lighthouse", "new")
-    assert serve_remote.picture_size(request, "face") == (896, 1216), "room for a full-body shot"
-    assert serve_remote.picture_size(serve_remote.parse_image_request({"prompt": "a lighthouse"}), "new") == (1024, 1024)
+    assert serve_remote.picture_size(request, "face") == (832, 1216), "a phone photo: vertical"
+    assert serve_remote.picture_size(serve_remote.parse_image_request({"prompt": "a lighthouse", "width": 1216, "height": 832}), "new") == (1216, 832), "a size they asked for stays"
 
 
 def test_the_prompt_maker_writes_around_her_face_and_expression(monkeypatch):
@@ -198,7 +198,8 @@ def test_normal_pictures_use_her_face_spicy_ones_the_nsfw_model_and_each_backs_u
     engine = serve_remote.ImageEngine(True)
     assert engine.pipe is None, "nothing is loaded until a picture needs it"
     assert engine.model_name == serve_remote.SDXL_MODEL_NAME
-    assert serve_remote.sdxl_prompt("on a beach at sunset", "face").startswith("photo of a 20 year old woman, on a beach")
+    assert serve_remote.sdxl_prompt("on a beach at sunset", "face").startswith("phone photo of a 20 year old woman, on a beach")
+    assert serve_remote.PHONE_LOOK in serve_remote.sdxl_prompt("a lighthouse", "new")
 
 
 def test_moss_describes_her_since_it_draws_from_words():
@@ -263,3 +264,38 @@ def test_the_key_is_kept_between_runs(tmp_path):
     first = serve_remote.saved_token(str(tmp_path))
     assert len(first) >= 24
     assert serve_remote.saved_token(str(tmp_path)) == first, "a restart (or a crash) keeps the same key"
+
+
+def test_every_picture_is_a_phone_photo_and_her_face_shows_only_when_the_shot_shows_it():
+    plan = serve_remote.plan_fallback
+    assert plan("send me a selfie", True)["shot"] == "selfie" and plan("send me a selfie", True)["face"]
+    back = plan("mirror pic from behind", True)
+    assert back["shot"] == "mirror_back" and back["her"] and not back["face"], "from behind: her, no face"
+    assert plan("mirror selfie in your outfit", True)["shot"] == "mirror_front"
+    view = plan("show me the view outside", True)
+    assert view["shot"] == "outdoor" and not view["her"]
+    assert plan("pov what you're eating", True)["shot"] == "pov" and not plan("pov what you're eating", True)["face"]
+    assert not plan("send me a selfie", False)["her"], "no photo of her sent: she isn't put in it"
+    assert serve_remote.FACE_STRENGTH["selfie"] > serve_remote.FACE_STRENGTH["mirror_front"], "a close selfie takes the most of her real photo"
+
+
+def test_the_prompt_maker_plans_the_shot_and_cannot_cross_the_line(monkeypatch):
+    seen = {}
+    replies = iter([
+        {"message": {"content": json.dumps({"shot": "mirror_back", "her": True, "face": True, "prompt": "A mirror selfie over her shoulder in a dim bedroom, oversized hoodie, warm lamp light, phone flash."})}},
+        {"message": {"content": json.dumps({"refuse": True})}},
+        {"message": {"content": "not json at all"}},
+    ])
+
+    def reply(path, payload, timeout=0):
+        seen["payload"] = payload
+        return next(replies)
+    monkeypatch.setattr(serve_remote, "post", reply)
+    plan = serve_remote.plan_picture("mirror pic from behind", "freya-helper", "playful")
+    assert plan["shot"] == "mirror_back" and plan["her"] and not plan["face"], "a face can't show from behind, whatever it says"
+    assert plan["refined"] and "hoodie" in plan["prompt"]
+    assert seen["payload"]["format"] == "json" and "a playful smirk" in seen["payload"]["messages"][0]["content"]
+    with pytest.raises(ValueError):
+        serve_remote.plan_picture("something", "freya-helper")
+    fallback = serve_remote.plan_picture("send me a selfie", "freya-helper")
+    assert fallback["shot"] == "selfie" and not fallback["refined"], "nonsense from the helper: read from their words"

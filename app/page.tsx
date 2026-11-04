@@ -127,6 +127,19 @@ import {
 } from "@/lib/relationship";
 import { newerState, pullState, pushState } from "@/lib/freya-state-sync";
 
+/** Asleep (offline): slow, low, barely moving. */
+const SLEEP_MOTION: MoodMotion = { sway: 0.35, pace: 0.35, droop: 0.7, lean: -0.1, bounce: 0 };
+
+/**
+ * A failure that means nobody answered (every model down, the server unreachable), as opposed to
+ * something about the message itself (too long, a limit, not signed in), which still gets said.
+ */
+function isUnreachable(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  if (/limit|too large|too long|invalid|sign in|access|not allowed|attachment/i.test(message)) return false;
+  return error instanceof TypeError || /couldn't get a response|configured AI providers|private|voice|empty reply|unreadable|Request failed \((5\d\d)\)|failed to fetch|network|timed? ?out|unavailable/i.test(message);
+}
+
 /** The relationship, as the profile panel shows it. */
 const STAGE_LABEL: Record<Stage, string> = {
   stranger: "JUST MET",
@@ -201,6 +214,7 @@ import {
   type ExpressionIntensity,
 } from "@/lib/expression-director";
 import { useExpressionDirector } from "@/app/components/useExpressionDirector";
+import type { MoodMotion } from "@/lib/expression-director";
 import StatusPanel from "@/app/components/StatusPanel";
 import { sanitizeSvg } from "@/lib/svg-safety";
 import { captureExplicitPreference } from "@/lib/memory-capture";
@@ -1028,6 +1042,12 @@ export default function Home() {
     intensity: expressionIntensity,
   });
   const offerFace = portrait.offer;
+  /**
+   * Offline: every one of her models failed (her server, the laptop, Groq, Gemini). She shows as
+   * offline and asleep, her mood is hidden, and the app checks every so often until one answers,
+   * then resends what didn't get through. No error pop-ups: it reads like a phone that's off.
+   */
+  const [offline, setOffline] = useState(false);
   /** New messages from her that arrived while scrolled up, for the "↓ N new" button. */
   const [newBelow, setNewBelow] = useState(0);
   /** Where this chat's unread messages began when it was opened: a divider is drawn there. */
@@ -1121,6 +1141,28 @@ export default function Home() {
     userMoodRef.current = userMood;
     if (moodLoadedRef.current) saveUserMood(userMood, moodAccountRef.current);
   }, [userMood]);
+  useEffect(() => {
+    if (!offline) return;
+    let stopped = false;
+    const check = async () => {
+      const status = await fetch("/api/status", { cache: "no-store" }).then((response) => response.ok ? response.json() : null).catch(() => null);
+      const chain: { own: boolean; state: string }[] = Array.isArray(status?.chain) ? status.chain : [];
+      // Her own server answering its probe, or a cloud model no longer being skipped.
+      const back = chain.some((tier) => tier.state === "ready" || (!tier.own && tier.state === "unknown"));
+      if (stopped || !back) return;
+      setOffline(false);
+      const open = conversationsRef.current.find((conversation) => conversation.id === activeIdRef.current);
+      const stuck = open?.messages.at(-1);
+      if (open && stuck?.role === "user" && stuck.failed) {
+        patchConversation(open.id, (messages) => messages.map((message) => message.id === stuck.id ? { ...message, failed: false } : message));
+        enqueueReply({ conversationId: open.id, targetId: stuck.id });
+      }
+    };
+    const timer = window.setInterval(() => void check(), 45_000);
+    return () => { stopped = true; window.clearInterval(timer); };
+    // enqueueReply and patchConversation read everything through refs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [offline]);
   // The unread line is read once it's on screen: it fades out (CSS) and is gone after six seconds.
   useEffect(() => {
     if (!unreadFrom) return;
@@ -2032,11 +2074,9 @@ export default function Home() {
           Array.isArray(payload.proposals) ? payload.proposals : [],
         );
       } catch {
+        // Not worth a pop-up: the profile saved in this browser is used, as before.
         if (active)
-          notify(
-            "Cloud character profile could not be loaded; the browser profile remains available.",
-            "info",
-          );
+          reportError("profile", "cloud profile unavailable", "Cloud character profile could not be loaded; the browser profile remains available.");
       } finally {
         if (active) setCloudProfileReady(true);
       }
@@ -3545,6 +3585,7 @@ export default function Home() {
         saveTimings(timingsRef.current);
       }
       finishStream(truncated);
+      setOffline(false);
       await finishPiece();
       // Her own feelings: what her reply shows sets her mood (lib/mood moodFromReply), and one more
       // unanswered text if she went first.
@@ -3613,7 +3654,11 @@ export default function Home() {
           error.message.startsWith("Chat request limit reached"))
           ? error.message
           : undefined;
-      notify(reportError("chat", error, reason), "error");
+      if (isUnreachable(error)) {
+        // Nobody answered at all: she's offline, said quietly, not as an error.
+        reportError("chat", error, reason);
+        setOffline(true);
+      } else notify(reportError("chat", error, reason), "error");
     } finally {
       if (activeChatRequest.current === controller)
         activeChatRequest.current = null;
@@ -5664,7 +5709,9 @@ export default function Home() {
                         ? "will reply in a moment"
                         : loading
                           ? "replying in another chat"
-                          : `online · ${mood.name}`}
+                          : offline
+                            ? "offline"
+                            : `online · ${mood.name}`}
             </span>
             <span className="status-trailing" title={activeConversation?.title}>
               {activeConversation?.title ?? UNTITLED}
@@ -6402,8 +6449,9 @@ export default function Home() {
             )}
           </div>
           <EmotionCanvas
-            signal={canvasSignal}
-            mood={mood}
+            signal={offline ? "idle" : canvasSignal}
+            mood={offline ? { ...mood, name: "tired", energy: 0.1 } : mood}
+            offline={offline}
             form={canvasForm}
             onClearForm={() => setCanvasForm(null)}
             quality={canvasQuality}
@@ -6419,16 +6467,18 @@ export default function Home() {
         </section>
 
         <aside className="profile-panel" aria-label="FREYA profile">
+          {/* Offline she's asleep: eyes closed, her sleepy face, barely moving. */}
           <PortraitParticles
-            expression={portrait.face.expression}
-            intensity={portrait.face.level}
-            glance={portrait.glance}
-            motion={portrait.motion}
+            expression={offline ? "tired" : portrait.face.expression}
+            intensity={offline ? 0.6 : portrait.face.level}
+            glance={offline ? null : portrait.glance}
+            motion={offline ? SLEEP_MOTION : portrait.motion}
+            asleep={offline}
           />
           <div className="profile-name-row">
             <h2>FREYA, 20</h2>
-            <span className="profile-state">
-              ONLINE · {mood.name.toUpperCase()}
+            <span className={`profile-state ${offline ? "is-offline" : ""}`}>
+              {offline ? "OFFLINE" : `ONLINE · ${mood.name.toUpperCase()}`}
             </span>
           </div>
           <p className="profile-description">

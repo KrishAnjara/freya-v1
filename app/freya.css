@@ -1361,3 +1361,6 @@ button.attachment-face:hover { border-color: rgba(176, 188, 186, .5); background
 .unread-divider { animation: unread-fade 6s ease forwards; }
 @keyframes unread-fade { 0%, 75% { opacity: 1; } 100% { opacity: 0; } }
 @media (prefers-reduced-motion: reduce) { .picture-placeholder, .unread-divider { animation: none; } }
+
+/* Offline: her status goes grey, as on a phone. */
+.profile-state.is-offline { color: #6f7a79; }
