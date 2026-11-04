@@ -2127,7 +2127,7 @@ export default function Home() {
     const fullPrompt = variation && previous ? previous.prompt : previous ? `${previous.prompt}; ${prompt}` : prompt;
     const { conversationId, cardId } = postCommand("image", shown, { picture: { status: "loading", prompt: styleName ? `${fullPrompt} (${styleName.toLowerCase()})` : fullPrompt } });
     try {
-      const response = await fetch("/api/image", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt, ...(previous ? { previous } : {}), ...(style ? { style } : {}), ...(variation ? { variation: true } : {}) }) });
+      const response = await fetch("/api/image", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt, mood: moodRef.current.name, ...(previous ? { previous } : {}), ...(style ? { style } : {}), ...(variation ? { variation: true } : {}) }) });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(typeof payload?.error === "string" ? payload.error : "That picture couldn't be made.");
       if (payload.kind === "generated" && typeof payload.data === "string" && typeof payload.mime === "string") {

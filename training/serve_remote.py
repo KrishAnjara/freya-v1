@@ -3,29 +3,33 @@ FREYA's models on a GPU that isn't your laptop: Google Colab, or any Linux machi
 
     python training/serve_remote.py
 
-It installs Ollama, downloads her voice (Dark Forest 20B, an uncensored roleplay model), makes sure it
-fits on the GPU, puts a login in front of it (Ollama has none), opens a Cloudflare tunnel, tests
-itself, then prints one line to run on your laptop. training/freya_server.ipynb is this same file in
-a notebook. Nothing is sent to your laptop until you run that line, and your laptop runs no model.
+It installs Ollama, downloads her voice (SexyGPT v3 Thinking, a Qwen3.8 27B roleplay fine-tune,
+uncensored), checks how much of it fits on the GPU, puts a login in front of it (Ollama has none),
+opens a Cloudflare tunnel, tests itself, then prints one line to run on your laptop.
+training/freya_server.ipynb is this same file in a notebook. Nothing is sent to your laptop until you
+run that line, and your laptop runs no model. Her voice is 16.8 GB: whole on a 20 GB+ GPU (L4, A100);
+on a free T4 part of it runs on the CPU, so replies are slower.
 
 Behind the same login and address it also serves:
   - a helper model (Qwen3.5 4B abliterated): her fallback voice when the big one fails inside the
-    session, her eyes (Dark Forest can't see images), and the picture-prompt refiner
+    session, her eyes for images, and the picture prompt maker
   - an embedding model, so her memory can be matched by meaning
-  - pictures (--images): Qwen-Image 2.1, uncensored, Q4_K_M, run by a headless ComfyUI. Every
-    request is first spell- and grammar-checked and rewritten into a vivid, realistic, exaggerated
-    prompt by the helper model, on this machine. Text-to-image, edits of a picture, variations.
-    A free T4 (~15 GB) can't hold her voice and the image model at once, so a picture unloads her
-    voice for a moment and the next message reloads it (20-40 s). On a T4 a picture takes minutes.
+  - pictures (--images): Qwen-Image-Edit 2511 with an NSFW LoRA (diffusers). A picture of her starts
+    from one of her portrait photos (the app picks the one for her mood or the asked expression), so
+    it keeps her face, in any shot: a selfie, full body, somewhere else. The prompt maker (the helper
+    model, on this machine) fixes spelling and grammar and writes the full prompt first. Pictures run
+    as background jobs (a quick tunnel cuts any request after ~100 s); while one draws, chats get a
+    quick "busy" so the app's next voice answers. ~58 GB to download; 4-bit below 70 GB of GPU memory.
+    Sexual content involving anyone under 18 is refused here, before and after the prompt maker.
 
   --model NAME           an Ollama model, an hf.co/... name, a .gguf path, or hf:USER/REPO/FILE.gguf
                          (your fine-tune on Hugging Face; private repos use HF_TOKEN)
-  --chat-format FORMAT   alpaca | chatml | model (the model's own). Dark Forest uses alpaca.
+  --chat-format FORMAT   alpaca | chatml | model (the model's own). Dark Forest (--model) uses alpaca.
   --fallback-model NAME  the helper model (default: Qwen3.5 4B abliterated; "none" to skip)
   --embed-model NAME     for memory (default: nomic-embed-text; "none" to skip)
   --vision-model NAME    what reads images when her voice can't (default: the helper model)
-  --images               serve pictures (downloads ~15 GB the first time, in the background)
-  --image-steps N        sampling steps per picture (default 20; the official workflow uses 25)
+  --images               serve pictures (downloads ~58 GB the first time, in the background)
+  --image-steps N        sampling steps per picture (default 28; the model card uses 40)
   --ctx N                context window (default: the largest that fits)
   --token TOKEN          keep the same login between runs (default: a new random one)
   --no-tunnel            don't open a tunnel: for a server with its own public address
@@ -886,7 +890,7 @@ def main():
     # The helper (an Ollama library model) refines picture prompts; a .gguf or hf: helper works too once built.
     images = ImageEngine(args.images, hf_token, refiner="freya-helper" if helper else "", steps=max(4, min(50, args.image_steps)))
     if args.images:
-        # ComfyUI and ~15 GB of weights download while the text model loads; the GPU isn't touched yet.
+        # The image model (~58 GB) downloads and loads while the text model loads.
         threading.Thread(target=images.prepare, daemon=True).start()
 
     step("2/5 Ollama")

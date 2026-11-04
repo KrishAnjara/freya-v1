@@ -1,9 +1,10 @@
 /**
  * Pictures in the chat, from the first of these that can make one:
- *   1. her own image server: the Colab gateway's /v1/images (Qwen-Image 2.1 uncensored, through
- *      ComfyUI; see training/serve_remote.py), at FREYA_IMAGE_URL or, by default, the same address
- *      as her remote voice model. A local helper model there fixes the spelling and grammar and
- *      rewrites the request into a vivid, realistic prompt first. Text-to-image, edits, variations.
+ *   1. her own image server: the Colab gateway's /v1/images (Qwen-Image-Edit 2511 with an NSFW
+ *      LoRA; see training/serve_remote.py), at FREYA_IMAGE_URL or, by default, the same address as
+ *      her remote voice model. A picture of her is sent with one of her portrait photos (the
+ *      expression asked for, or her mood's: lib/freya-face) so it keeps her face. A helper model
+ *      there writes the full prompt first. Pictures run as jobs there, polled until done.
  *   2. Gemini's image models (generateContent with IMAGE in responseModalities). On a free-tier
  *      key they often have no quota (429); that is reported as the reason, never hidden.
  *   3. an SVG drawing by a text model, labelled as such by the browser.
@@ -14,6 +15,8 @@ import { mentionsMinors } from "@/lib/intimacy";
 import { sanitizeSvg } from "@/lib/svg-safety";
 import { coolingDownMessage, describeFailure, isCoolingDown, markSuccess, ProviderHttpError, providerErrorDetail, recordFailure } from "@/lib/provider-health";
 import { isLoopback } from "@/lib/voice-chain";
+import { faceExpression, faceReference, isPictureOfHer } from "@/lib/freya-face";
+import type { MoodName } from "@/lib/mood";
 
 export { sanitizeSvg };
 
@@ -41,6 +44,8 @@ export type ImageRequest = {
   style?: ImageStyle;
   /** Another take on the previous picture: same idea, new seed, close to the original. */
   variation?: boolean;
+  /** Her mood when asked, for the face a picture of her shows (lib/freya-face). */
+  mood?: MoodName;
 };
 
 const SEXUAL = /\b(nude|naked|nsfw|porn\w*|sex\w*|explicit|lingerie|topless|genitals?|erotic)\b/i;
@@ -94,21 +99,25 @@ async function ownImage(request: ImageRequest, signal?: AbortSignal): Promise<Im
     return { failed: "unavailable" };
   }
   const edit = request.previous?.data && request.previous.mime;
+  // A new picture of her starts from her own face: the expression asked for, or her mood's.
+  const expression = !edit && isPictureOfHer(request.prompt) ? faceExpression(request.prompt, request.mood) : null;
+  const reference = expression ? await faceReference(expression) : null;
+  const headers = { "Content-Type": "application/json", ...(server.key ? { Authorization: `Bearer ${server.key}` } : {}) };
   try {
     const response = await fetch(`${server.url}/v1/images`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", ...(server.key ? { Authorization: `Bearer ${server.key}` } : {}) },
+      headers,
       body: JSON.stringify({
         prompt: promptText(request),
+        ...(reference && expression ? { reference, expression } : {}),
         negative_prompt: request.style ? IMAGE_STYLES[request.style].negative : "text, watermark, deformed, blurry",
         // How far from the last picture: a variation stays close, a restyle needs room to change.
         ...(edit ? { image: request.previous!.data, instruction: editInstruction(request), strength: request.variation ? (request.style ? 0.7 : 0.45) : 0.65 } : {}),
       }),
-      // Qwen-Image on a T4 takes minutes, more for the first picture of a session (it loads first).
-      signal: AbortSignal.any([AbortSignal.timeout(900_000), ...(signal ? [signal] : [])]),
+      signal: AbortSignal.any([AbortSignal.timeout(90_000), ...(signal ? [signal] : [])]),
       cache: "no-store",
     });
-    const payload = await response.json().catch(() => null);
+    let payload = await response.json().catch(() => null);
     // Refused on the server (the hard limit, checked there again on the refined prompt): not
     // something to route around with another model.
     if (response.status === 400) return { failed: "blocked" };
@@ -118,6 +127,8 @@ async function ownImage(request: ImageRequest, signal?: AbortSignal): Promise<Im
       return { failed: "not-configured" };
     }
     if (!response.ok) throw new ProviderHttpError(`Image server failed (${response.status}).`, response.status, undefined, providerErrorDetail(payload));
+    // A picture is a background job (it takes minutes; a quick tunnel cuts requests at ~100 s).
+    if (response.status === 202 && typeof payload?.job === "string") payload = await waitForPicture(server, headers, payload.job, signal);
     if (typeof payload?.image !== "string" || !/^[A-Za-z0-9+/]+=*$/.test(payload.image)) throw new Error("The image server returned no image.");
     markSuccess(IMAGE_SERVER_HEALTH);
     const mime = typeof payload.mime === "string" && /^image\/(png|jpeg|webp)$/.test(payload.mime) ? payload.mime : "image/png";
@@ -128,10 +139,38 @@ async function ownImage(request: ImageRequest, signal?: AbortSignal): Promise<Im
     };
   } catch (error) {
     if (signal?.aborted) throw error;
+    // The hard limit, checked again on what the prompt maker wrote: final, never routed elsewhere.
+    if (error instanceof PictureRefused) return { failed: "blocked" };
     recordFailure(IMAGE_SERVER_HEALTH, error);
     console.warn(`FREYA image server unavailable (${describeFailure(error)}); trying Gemini.`);
     return { failed: "unavailable" };
   }
+}
+
+const POLL_MS = 4000;
+const PICTURE_LIMIT_MS = 20 * 60_000;
+
+class PictureRefused extends Error {}
+
+/** Asks the image server how a picture is going until it's done or failed. */
+async function waitForPicture(server: { url: string }, headers: Record<string, string>, job: string, signal?: AbortSignal) {
+  if (!/^[a-f0-9]{16}$/.test(job)) throw new Error("The image server returned an unreadable job.");
+  const deadline = Date.now() + PICTURE_LIMIT_MS;
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, POLL_MS));
+    if (signal?.aborted) throw signal.reason ?? new Error("aborted");
+    const response = await fetch(`${server.url}/v1/images/${job}`, { headers, cache: "no-store", signal: AbortSignal.any([AbortSignal.timeout(30_000), ...(signal ? [signal] : [])]) }).catch(() => null);
+    if (!response) continue; // a dropped poll; the job carries on
+    if (response.status === 404) throw new Error("The image server lost the picture (it may have restarted).");
+    const status = await response.json().catch(() => null);
+    if (status?.status === "done") return status;
+    if (status?.status === "error") {
+      const reason = String(status.error || "");
+      if (/not something I'll draw/i.test(reason)) throw new PictureRefused();
+      throw new Error(`The picture failed: ${reason.slice(0, 200)}`);
+    }
+  }
+  throw new Error("The picture took longer than 20 minutes.");
 }
 
 async function geminiImage(request: ImageRequest, signal?: AbortSignal): Promise<ImageResult | Failure> {
