@@ -27,7 +27,8 @@ import { applyAppraisal, initiativePrompt, moodPrompt, normalizeMood, reactToMes
 import { appraiseMood } from "@/lib/mood-appraisal";
 import { faceReading, nextUserMood, normalizeUserMood, readUserMood, userMoodSection } from "@/lib/user-mood";
 import { homeTimeReply, noSearchReply, timeReply, unknownZoneReply } from "@/lib/plain-replies";
-import { asksOut, bondSection, nextBond, normalizeBond } from "@/lib/relationship";
+import { asksOut, bondSection, initialBond, nextBond, normalizeBond } from "@/lib/relationship";
+import { loadCloudBond, newerBond, saveCloudBond } from "@/lib/bond-store";
 import { INTIMACY_PROMPT, PLAYFUL_HEAT_PROMPT, PRIVATE_VOICE_DOWN, isIntimateTone, mentionsMinors, romanticMinorRequest, soundsUpset } from "@/lib/intimacy";
 import { canonSection, closenessOf, normalizeTotals } from "@/lib/canon";
 import { herMoment } from "@/lib/her-day";
@@ -666,10 +667,16 @@ export async function POST(request: Request) {
     const userMood = judges ? nextUserMood(userMoodBefore, theirReading, now.getTime(), reading?.them ? "model" : "words") : userMoodBefore;
     // Where the two of them are (lib/relationship): moved by this message, from the same reads as
     // her mood. It's remembered history, so it follows the "Use memories" setting.
-    const bondBefore = useMemories ? normalizeBond(requestData.bond) : null;
+    // Signed in: the bond saved with the account is checked too (lib/bond-store), and the newer copy
+    // wins, so a cleared or stale browser can't reset where the two of them are.
+    const bearer = request.headers.get("authorization")?.match(/^Bearer\s+(\S+)$/i)?.[1] ?? "";
+    const cloudBond = useMemories && !privacyMode && bearer ? await loadCloudBond(bearer) : null;
+    const bondBefore = useMemories ? newerBond(normalizeBond(requestData.bond), cloudBond?.bond ?? null) ?? (cloudBond ? initialBond(now.getTime()) : null) : null;
     const askedOut = judges && Boolean(bondBefore) && asksOut(lastText) && bondBefore!.stage !== "together";
     const moodReason = appraisal?.reason ?? (mood && moodBefore && (mood.name !== moodBefore.name || mood.why !== moodBefore.why) ? mood.why : undefined);
     const bond = judges && bondBefore ? nextBond(bondBefore, { text: lastText, now: now.getTime(), reason: moodReason, feeling: theirReading?.feeling }) : bondBefore;
+    // Saved back with the account straight away; the browser gets the same in the reply's meta.
+    if (cloudBond && bond && bond !== cloudBond.bond) void saveCloudBond(bearer, cloudBond.userId, bond);
     const summaryInput = requestData.historySummary;
     const historySummary = typeof summaryInput === "string" ? redactSensitiveCredentials(summaryInput.trim().slice(0, 1800)) : "";
     const summaryContext = historySummary ? `

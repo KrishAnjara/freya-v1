@@ -14,12 +14,13 @@ Behind the same login and address it also serves:
   - a helper model (Qwen3.5 4B abliterated): her fallback voice when the big one fails inside the
     session, her eyes for images, and the picture prompt maker
   - an embedding model, so her memory can be matched by meaning
-  - pictures (--images): Qwen-Image-Edit 2511 with an NSFW LoRA (diffusers). A picture of her starts
-    from one of her portrait photos (the app picks the one for her mood or the asked expression), so
-    it keeps her face, in any shot: a selfie, full body, somewhere else. The prompt maker (the helper
-    model, on this machine) fixes spelling and grammar and writes the full prompt first. Pictures run
-    as background jobs (a quick tunnel cuts any request after ~100 s); while one draws, chats get a
-    quick "busy" so the app's next voice answers. ~58 GB to download; 4-bit below 70 GB of GPU memory.
+  - pictures (--images), sized to the GPU: on 40 GB+ (A100) Qwen-Image-Edit 2511 with an NSFW
+    LoRA; on smaller GPUs (T4, L4) RealVisXL (SDXL) with IP-Adapter Face, loaded only at the first
+    picture so it never competes with her voice. A picture of her starts from one of her portrait
+    photos (the app picks the one for her mood or the asked expression), so it keeps her face. The
+    prompt maker (the helper model, on this machine) fixes spelling and grammar and writes the full
+    prompt first. Pictures run as background jobs (a quick tunnel cuts requests after ~100 s); while
+    one draws, chats get a quick "busy" so the app's next voice answers.
     Sexual content involving anyone under 18 is refused here, before and after the prompt maker.
 
   --model NAME           an Ollama model, an hf.co/... name, a .gguf path, or hf:USER/REPO/FILE.gguf
@@ -96,6 +97,12 @@ IMAGE_LORA = "ScottzillaSystems/qwen-image-edit-plus-nsfw-lora"
 IMAGE_MODEL_NAME = "Qwen-Image-Edit 2511 + NSFW LoRA"
 #: Below this much GPU memory the model is loaded in 4-bit and moved on and off the GPU per part.
 IMAGE_FULL_VRAM_GB = 70
+#: Qwen-Image-Edit is a 20B model: below this much GPU memory it can't load beside her voice (a T4
+#: ran out of memory), so smaller GPUs use SDXL with a face adapter instead (ImageEngine).
+QWEN_MIN_VRAM_GB = 40
+SDXL_MODEL = "SG161222/RealVisXL_V5.0"
+SDXL_MODEL_NAME = "RealVisXL 5 (SDXL) + IP-Adapter Face"
+IP_ADAPTER_REPO = "h94/IP-Adapter"
 #: Expressions the app may name for her reference photo (lib/expression).
 IMAGE_EXPRESSION = re.compile(r"[a-z-]{2,30}")
 #: The login only lets these through: chatting, embeddings, reading what's loaded, and FREYA's own
@@ -324,11 +331,26 @@ def picture_size(request, kind):
     return request["width"], request["height"]
 
 
+def choose_backend(vram_gb):
+    """Qwen-Image-Edit needs a big GPU (20B); anything smaller gets SDXL with a face adapter."""
+    return "qwen" if vram_gb >= QWEN_MIN_VRAM_GB else "sdxl"
+
+
+def sdxl_prompt(prompt, kind):
+    """SDXL reads ~75 tokens: the subject first. For her, the reference face comes from the adapter."""
+    lead = "photo of a 20 year old woman, " if kind == "face" else ""
+    return f"{lead}{prompt}, photorealistic, natural skin texture, detailed, sharp focus"
+
+
 class ImageEngine:
     """
-    Qwen-Image-Edit 2511 with the NSFW LoRA, through diffusers. Downloads and loads in the
-    background; on the GPU only to draw. With less than IMAGE_FULL_VRAM_GB of GPU memory, the
-    transformer and text encoder load in 4-bit and parts move to the GPU only while they work.
+    Pictures, by GPU size (choose_backend):
+      - 40 GB+ (A100): Qwen-Image-Edit 2511 with the NSFW LoRA. It edits from her portrait photo, so
+        pictures of her keep her face. Whole on the GPU from 70 GB, in 4-bit below that.
+      - smaller (T4, L4): RealVisXL (photoreal SDXL, ~7 GB) with IP-Adapter Face-Plus, which takes
+        her face from the same portrait photo. Her voice already fills a T4, so nothing is loaded at
+        startup (that ran out of memory): files download in the background, and the model loads at
+        the first picture, after her voice has been let go, with parts on the GPU only while they work.
     """
 
     def __init__(self, enabled, token="", refiner="", steps=28):
@@ -339,41 +361,75 @@ class ImageEngine:
         self.ready = threading.Event()
         self.error = ""
         self.pipe = None
+        self.backend = ""
         self.whole_on_gpu = False
-        #: How long the drawing itself takes here, learned from each picture (a first guess for 4-bit on a T4).
-        self.draw_seconds = 20.0 + 12.0 * steps
+        self._load_lock = threading.Lock()
+        #: How long the drawing itself takes here, learned from each picture (a first guess for a T4).
+        self.draw_seconds = 20.0 + 6.0 * steps
+
+    @property
+    def model_name(self):
+        return IMAGE_MODEL_NAME if self.backend == "qwen" else SDXL_MODEL_NAME
 
     def prepare(self):
         try:
             subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-U", "diffusers", "transformers", "accelerate", "peft", "safetensors", "bitsandbytes"], check=True)
             import torch
-            from diffusers import DiffusionPipeline
             vram = torch.cuda.get_device_properties(0).total_memory / 1e9
-            # T4s have no bfloat16; half precision there.
-            dtype = torch.bfloat16 if torch.cuda.get_device_capability(0)[0] >= 8 else torch.float16
-            options = {"torch_dtype": dtype, "token": self.token}
-            self.whole_on_gpu = vram >= IMAGE_FULL_VRAM_GB
-            if not self.whole_on_gpu:
-                from diffusers import PipelineQuantizationConfig
-                options["quantization_config"] = PipelineQuantizationConfig(
-                    quant_backend="bitsandbytes_4bit",
-                    quant_kwargs={"load_in_4bit": True, "bnb_4bit_quant_type": "nf4", "bnb_4bit_compute_dtype": dtype},
-                    components_to_quantize=["transformer", "text_encoder"],
-                )
-            print(f"  Pictures: downloading {IMAGE_MODEL} (~58 GB, once per session) and the LoRA...", flush=True)
-            pipe = DiffusionPipeline.from_pretrained(IMAGE_MODEL, **options)
-            pipe.load_lora_weights(IMAGE_LORA, token=self.token)
-            if self.whole_on_gpu:
-                pipe.to("cuda")
+            self.backend = choose_backend(vram)
+            if self.backend == "qwen":
+                self._load_qwen(vram)
             else:
-                pipe.enable_model_cpu_offload()
-            pipe.set_progress_bar_config(disable=True)
-            self.pipe = pipe
+                # Download only: loading now, beside her voice, is what ran out of GPU memory.
+                from huggingface_hub import snapshot_download
+                print(f"  Pictures: {vram:.0f} GB GPU, so {SDXL_MODEL_NAME}. Downloading (~8 GB)...", flush=True)
+                snapshot_download(SDXL_MODEL, allow_patterns=["*.json", "*.txt", "*fp16.safetensors", "tokenizer*/*"], token=self.token)
+                snapshot_download(IP_ADAPTER_REPO, allow_patterns=["sdxl_models/ip-adapter-plus-face_sdxl_vit-h.safetensors", "models/image_encoder/*"], token=self.token)
+                print("  Pictures: ready (the model loads with the first picture).", flush=True)
             self.ready.set()
-            print(f"  Pictures: ready ({'on the GPU' if self.whole_on_gpu else '4-bit, parts on the GPU as needed'}).", flush=True)
         except Exception as error:  # noqa: BLE001 - reported in /v1/health and to the app
             self.error = f"{type(error).__name__}: {str(error)[:240]}"
             print(f"  Pictures unavailable: {self.error}", flush=True)
+
+    def _load_qwen(self, vram):
+        import torch
+        from diffusers import DiffusionPipeline
+        dtype = torch.bfloat16 if torch.cuda.get_device_capability(0)[0] >= 8 else torch.float16
+        options = {"torch_dtype": dtype, "token": self.token}
+        self.whole_on_gpu = vram >= IMAGE_FULL_VRAM_GB
+        if not self.whole_on_gpu:
+            from diffusers import PipelineQuantizationConfig
+            options["quantization_config"] = PipelineQuantizationConfig(
+                quant_backend="bitsandbytes_4bit",
+                quant_kwargs={"load_in_4bit": True, "bnb_4bit_quant_type": "nf4", "bnb_4bit_compute_dtype": dtype},
+                components_to_quantize=["transformer", "text_encoder"],
+            )
+        print(f"  Pictures: downloading {IMAGE_MODEL} (~58 GB, once per session) and the LoRA...", flush=True)
+        pipe = DiffusionPipeline.from_pretrained(IMAGE_MODEL, **options)
+        pipe.load_lora_weights(IMAGE_LORA, token=self.token)
+        if self.whole_on_gpu:
+            pipe.to("cuda")
+        else:
+            pipe.enable_model_cpu_offload()
+        pipe.set_progress_bar_config(disable=True)
+        self.pipe = pipe
+        print(f"  Pictures: ready ({'on the GPU' if self.whole_on_gpu else '4-bit, parts on the GPU as needed'}).", flush=True)
+
+    def _load_sdxl(self):
+        """At the first picture, with the GPU free. fp16; parts move onto the GPU only while they work."""
+        with self._load_lock:
+            if self.pipe is not None:
+                return
+            import torch
+            from diffusers import StableDiffusionXLPipeline
+            from transformers import CLIPVisionModelWithProjection
+            encoder = CLIPVisionModelWithProjection.from_pretrained(IP_ADAPTER_REPO, subfolder="models/image_encoder", torch_dtype=torch.float16, token=self.token)
+            pipe = StableDiffusionXLPipeline.from_pretrained(SDXL_MODEL, torch_dtype=torch.float16, variant="fp16", image_encoder=encoder, token=self.token)
+            pipe.load_ip_adapter(IP_ADAPTER_REPO, subfolder="sdxl_models", weight_name="ip-adapter-plus-face_sdxl_vit-h.safetensors", token=self.token)
+            pipe.enable_model_cpu_offload()
+            pipe.enable_vae_slicing()
+            pipe.set_progress_bar_config(disable=True)
+            self.pipe = pipe
 
     def generate(self, request, report=lambda stage: None):
         """Makes one picture. `report(stage)` is called as it moves on (refining the prompt, waiting
@@ -392,7 +448,6 @@ class ImageEngine:
         report("refining")
         prompt, refined = refine_prompt(asked, self.refiner, edit=kind == "edit", face=kind == "face", expression=request["expression"]) if request["refine"] else (asked, False)
         width, height = picture_size(request, kind)
-        source = decode_picture(request["image"]) if kind == "edit" else decode_picture(request["reference"]) if kind == "face" else Image.new("RGB", (width, height), (128, 128, 128))
         report("waiting")
         with GPU.picture():
             report("drawing")
@@ -400,22 +455,40 @@ class ImageEngine:
             # Her voice doesn't fit beside it on a smaller GPU: let it go; the next message reloads it.
             if not self.whole_on_gpu:
                 unload_text_models()
-            call = {
-                "image": [source], "prompt": picture_prompt(prompt, kind), "negative_prompt": request["negative_prompt"] or " ",
-                "true_cfg_scale": 4.0, "guidance_scale": 1.0, "num_inference_steps": self.steps,
-                "generator": torch.Generator("cpu").manual_seed(request["seed"]), "num_images_per_prompt": 1,
-            }
-            try:
-                result = self.pipe(**call, width=width, height=height)
-            except TypeError:
-                result = self.pipe(**call)
+            generator = torch.Generator("cpu").manual_seed(request["seed"])
+            if self.backend == "qwen":
+                source = decode_picture(request["image"]) if kind == "edit" else decode_picture(request["reference"]) if kind == "face" else Image.new("RGB", (width, height), (128, 128, 128))
+                call = {
+                    "image": [source], "prompt": picture_prompt(prompt, kind), "negative_prompt": request["negative_prompt"] or " ",
+                    "true_cfg_scale": 4.0, "guidance_scale": 1.0, "num_inference_steps": self.steps, "generator": generator, "num_images_per_prompt": 1,
+                }
+                try:
+                    result = self.pipe(**call, width=width, height=height)
+                except TypeError:
+                    result = self.pipe(**call)
+            else:
+                self._load_sdxl()
+                negative = request["negative_prompt"] or "deformed, blurry, bad anatomy, extra fingers, watermark, text"
+                if kind == "edit":
+                    from diffusers import StableDiffusionXLImg2ImgPipeline
+                    self.pipe.set_ip_adapter_scale(0.0)
+                    edit = StableDiffusionXLImg2ImgPipeline.from_pipe(self.pipe)
+                    result = edit(prompt=sdxl_prompt(prompt, kind), negative_prompt=negative, image=decode_picture(request["image"]),
+                                  ip_adapter_image=Image.new("RGB", (224, 224), (128, 128, 128)),
+                                  strength=request["strength"], num_inference_steps=self.steps, guidance_scale=5.0, generator=generator)
+                else:
+                    face = decode_picture(request["reference"]) if kind == "face" else Image.new("RGB", (224, 224), (128, 128, 128))
+                    # Her face from the reference photo; for anything else the adapter is switched off.
+                    self.pipe.set_ip_adapter_scale(0.7 if kind == "face" else 0.0)
+                    result = self.pipe(prompt=sdxl_prompt(prompt, kind), negative_prompt=negative, ip_adapter_image=face, width=width, height=height,
+                                       num_inference_steps=self.steps, guidance_scale=5.0, generator=generator)
             buffer = BytesIO()
             result.images[0].save(buffer, "PNG")
             torch.cuda.empty_cache()
             # What a picture really takes here, so the next estimate is closer.
             self.draw_seconds = 0.6 * self.draw_seconds + 0.4 * (time.time() - started)
             return {
-                "image": base64.b64encode(buffer.getvalue()).decode(), "mime": "image/png", "model": IMAGE_MODEL_NAME,
+                "image": base64.b64encode(buffer.getvalue()).decode(), "mime": "image/png", "model": self.model_name,
                 "seed": request["seed"], "ms": int((time.time() - started) * 1000), **({"refined": prompt} if refined else {}),
             }
 

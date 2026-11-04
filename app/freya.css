@@ -1333,3 +1333,11 @@ button.attachment-face:hover { border-color: rgba(176, 188, 186, .5); background
 .message-ticks { color: #6f7a79; letter-spacing: -.12em; }
 .message-ticks.seen { color: #53bdeb; }
 .message-ticks em { margin-left: 6px; color: #8c9896; font-style: normal; letter-spacing: .08em; }
+
+/* Unread: a line where they start when the chat is opened, and a count on the jump button. */
+.unread-divider { display: flex; align-items: center; gap: 10px; margin: 10px 0 6px; color: #53bdeb; font: 8px var(--mono); letter-spacing: .14em; }
+.unread-divider::before, .unread-divider::after { content: ""; flex: 1; height: 1px; background: rgba(83, 189, 235, .35); }
+.jump-latest.has-new { border-color: rgba(83, 189, 235, .6); color: #e5f4fb; animation: unread-nudge .3s ease-out; }
+.jump-count { display: inline-grid; min-width: 16px; height: 16px; margin-right: 6px; padding: 0 4px; place-items: center; border-radius: 8px; background: #53bdeb; color: #05090b; font-size: 9px; }
+@keyframes unread-nudge { from { transform: translateY(6px); opacity: .4; } to { transform: none; opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .jump-latest.has-new { animation: none; } }

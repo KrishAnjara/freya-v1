@@ -110,3 +110,26 @@ test("woken up by them she's groggy, not delighted; otherwise she's glad they're
   assert.equal(home.why, "herDay");
   assert.equal(arrive(home, evening).why, ["content", "tired", "restless", "melancholy"].includes(home.name) ? "back" : home.why);
 });
+
+test("her own reply sets her mood: what she already feels is fed, a new mood needs a strong sign", async () => {
+  const { moodFromReply, idleMood, IDLE_AFTER_MS } = await import("../lib/mood.ts");
+  const now = Date.parse("2026-11-04T12:00:00Z");
+  const neutral = { ...initialMood(now), lastUserAt: now };
+  assert.equal(moodFromReply(neutral, "lmao stop 😂", now).name, "playful", "from no mood in particular, one sign is enough");
+  const warm = { ...neutral, name: "warm", why: "kind" };
+  assert.equal(moodFromReply(warm, "haha ok", now).name, "warm", "one passing laugh doesn't change a mood");
+  assert.equal(moodFromReply(warm, "LMAO 😂😂 i'm dead", now).name, "playful", "a real laugh does");
+  assert.equal(moodFromReply(warm, "aww 🥺", now).quiet, 0, "more of the same feeds it");
+  assert.equal(moodFromReply(neutral, "k", now).name, "bored", "a one-word answer from her is her being bored");
+  assert.equal(moodFromReply(neutral, "the capital of mongolia is ulaanbaatar", now), neutral, "an ordinary answer changes nothing");
+  // Half an hour of quiet: the moment's over, and how it ended decides where she lands.
+  const later = now + IDLE_AFTER_MS + 60_000;
+  const playful = { ...neutral, name: "playful", why: "laughing", talked: 5 };
+  assert.equal(idleMood(playful, now + 10 * MIN), playful, "not yet");
+  assert.equal(idleMood(playful, later, [{ role: "user", content: "haha that was great, night!" }]).name, "content");
+  const dry = [{ role: "user", content: "ok" }, { role: "assistant", content: "so what's new" }, { role: "user", content: "nm" }, { role: "user", content: "k" }];
+  assert.equal(idleMood(playful, later, dry).name, "bored", "a dry ending leaves her bored");
+  assert.equal(idleMood({ ...neutral, name: "annoyed", why: "pestered" }, later).name, "neutral", "annoyance doesn't outlast the chat");
+  const settled = idleMood(playful, later);
+  assert.equal(idleMood(settled, later + MIN), settled, "and then it stays put");
+});

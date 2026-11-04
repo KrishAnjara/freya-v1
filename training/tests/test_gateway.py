@@ -189,3 +189,15 @@ def test_a_refiner_that_is_down_never_stops_the_picture(monkeypatch):
         raise OSError("connection refused")
     monkeypatch.setattr(serve_remote, "post", down)
     assert serve_remote.refine_prompt("a red fox", "freya-helper") == ("a red fox", False)
+
+
+def test_pictures_fit_the_gpu_and_never_load_beside_her_voice_on_a_small_one():
+    assert serve_remote.choose_backend(14.56) == "sdxl", "a T4 ran out of memory with the 20B model"
+    assert serve_remote.choose_backend(22.5) == "sdxl"
+    assert serve_remote.choose_backend(40) == "qwen"
+    engine = serve_remote.ImageEngine(True)
+    engine.backend = "sdxl"
+    assert engine.model_name.startswith("RealVisXL")
+    assert engine.pipe is None, "nothing is loaded until the first picture"
+    assert serve_remote.sdxl_prompt("on a beach at sunset", "face").startswith("photo of a 20 year old woman, on a beach")
+    assert not serve_remote.sdxl_prompt("a lighthouse", "new").startswith("photo of a 20 year old woman")

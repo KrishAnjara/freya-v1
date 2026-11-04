@@ -3,6 +3,7 @@
 import {
   CSSProperties,
   FormEvent,
+  Fragment,
   KeyboardEvent,
   useCallback,
   useEffect,
@@ -90,6 +91,7 @@ import {
   loadMood,
   mergeVerdict,
   normalizeMood,
+  moodFromReply,
   passTime,
   reactToMessage,
   resumeMood,
@@ -1023,6 +1025,10 @@ export default function Home() {
     intensity: expressionIntensity,
   });
   const offerFace = portrait.offer;
+  /** New messages from her that arrived while scrolled up, for the "↓ N new" button. */
+  const [newBelow, setNewBelow] = useState(0);
+  /** Where this chat's unread messages began when it was opened: a divider is drawn there. */
+  const [unreadFrom, setUnreadFrom] = useState<{ conversationId: string; messageId: string; count: number } | null>(null);
   /** Counts the messages she posts here, so the canvas can answer each one. */
   const [bubbleBeat, setBubbleBeat] = useState(0);
   /** Set when a reply used up its continuation budget and still had more to say. */
@@ -1035,7 +1041,7 @@ export default function Home() {
     if (moodAccountRef.current === moodAccount) return;
     moodAccountRef.current = moodAccount;
     if (moodLoadedRef.current) {
-      setMood(passTime(loadMood(moodAccount)));
+      setMood(passTime(loadMood(moodAccount), Date.now(), recentTurns()));
       setUserMood(loadUserMood(moodAccount));
       setBond(loadBond(moodAccount));
     }
@@ -1262,7 +1268,7 @@ export default function Home() {
       setCloudFallbackOn(localStorage.getItem(CLOUD_FALLBACK_KEY) !== "false");
       setFeedbackCount(loadFeedback().length);
       moodLoadedRef.current = true;
-      setMood(passTime(loadMood()));
+      setMood(passTime(loadMood(), Date.now(), recentTurns()));
       setUserMood(loadUserMood());
       setBond(loadBond());
       timingsRef.current = loadTimings();
@@ -2157,7 +2163,7 @@ export default function Home() {
     const tick = () => {
       // Time moves her mood too: moods wear off, she misses them, and her own day goes on (lib/mood).
       checkServerRun();
-      setMood((current) => passTime(current));
+      setMood((current) => passTime(current, Date.now(), recentTurns()));
       // Their mood fades on its own when nothing new has shown how they are.
       setUserMood((current) =>
         nextUserMood(current, null, Date.now(), current?.source ?? "words"),
@@ -2200,6 +2206,13 @@ export default function Home() {
   useEffect(() => {
     const markRead = () => {
       if (document.hidden) return;
+      // Where the unread ones start, for the "unread messages" line, before they're marked read.
+      const open = conversationsRef.current.find((conversation) => conversation.id === activeIdRef.current);
+      if (open?.unread) {
+        const replies = open.messages.filter((message) => message.role === "assistant");
+        const first = replies[Math.max(0, replies.length - open.unread)];
+        if (first) setUnreadFrom({ conversationId: open.id, messageId: first.id, count: open.unread });
+      }
       setConversations((previous) =>
         previous.some(
           (conversation) =>
@@ -2240,6 +2253,7 @@ export default function Home() {
       element.scrollHeight - element.scrollTop - element.clientHeight < 90;
     atBottomRef.current = near;
     setAtBottom(near);
+    if (near) setNewBelow(0);
   }
 
   // Auto-grow the composer up to a ceiling, then let it scroll internally.
@@ -2844,6 +2858,12 @@ export default function Home() {
     void pumpReplies();
   }
 
+  /** The open chat's last few messages, for how a quiet chat leaves her mood (lib/mood idleMood). */
+  function recentTurns() {
+    const open = conversationsRef.current.find((conversation) => conversation.id === activeIdRef.current);
+    return (open?.messages ?? []).filter((message) => !message.command).slice(-6).map((message) => ({ role: message.role, content: message.content }));
+  }
+
   /** What she owes, saved as it changes, so a refresh picks it back up (lib/resume). */
   function persistInflight(lastPostedId?: string) {
     if (lastPostedId) lastPostedIdRef.current = lastPostedId;
@@ -2936,7 +2956,7 @@ export default function Home() {
     if (!document.hidden && elsewhere && first)
       notify(`FREYA in “${title}”: ${preview}`);
     else if (!document.hidden && !elsewhere && !atBottomRef.current)
-      notify(`FREYA: ${preview}`);
+      setNewBelow((count) => count + 1);
     if (!document.hidden && !elsewhere) return;
     setConversations((previous) =>
       previous.map((conversation) =>
@@ -3508,7 +3528,10 @@ export default function Home() {
       }
       finishStream(truncated);
       await finishPiece();
-      // Her own feelings: a mood she reported, and one more unanswered text if she went first.
+      // Her own feelings: what her reply shows sets her mood (lib/mood moodFromReply), and one more
+      // unanswered text if she went first.
+      if (received.trim())
+        setMood((current) => moodFromReply(current, extractHerReaction(extractMoodTag(received).text).text || received, Date.now()));
       if (initiative)
         setMood((current) => ({
           ...current,
@@ -3732,6 +3755,7 @@ export default function Home() {
     atBottomRef.current = true;
     setAtBottom(true);
     enqueueReply({ conversationId: activeIdRef.current, targetId: message.id });
+    setUnreadFrom(null);
     // Delivered a moment after it's sent, as a phone shows it, even while she's busy elsewhere.
     const sentTo = activeIdRef.current;
     window.setTimeout(() => {
@@ -5915,8 +5939,13 @@ export default function Home() {
                     const info = thread[index];
                     const clock = info.endsRun ? formatClock(message.at) : "";
                     return (
+                      <Fragment key={message.id}>
+                      {unreadFrom?.conversationId === activeId && unreadFrom.messageId === message.id && (
+                        <div className="unread-divider" role="separator" aria-label={`${unreadFrom.count} unread messages`}>
+                          <span>{unreadFrom.count} UNREAD MESSAGE{unreadFrom.count === 1 ? "" : "S"}</span>
+                        </div>
+                      )}
                       <article
-                        key={message.id}
                         id={`message-${message.id}`}
                         className={`message ${message.role} ${message.longform ? "longform" : ""} ${searchMatches.includes(message.id) ? (searchMatches[Math.min(searchIndex, searchMatches.length - 1)] === message.id ? "search-hit search-current" : "search-hit") : ""} ${info.startsRun ? "run-start" : "run-continued"} ${info.endsRun ? "run-end" : ""}`}
                       >
@@ -6324,6 +6353,7 @@ export default function Home() {
                             )}
                         </div>
                       </article>
+                      </Fragment>
                     );
                   })}
                   {received && (
@@ -6372,14 +6402,22 @@ export default function Home() {
             {!atBottom && messages.length > 0 && (
               <button
                 type="button"
-                className="jump-latest"
+                className={`jump-latest ${newBelow ? "has-new" : ""}`}
                 onClick={() => {
                   atBottomRef.current = true;
                   setAtBottom(true);
+                  setNewBelow(0);
                   scrollToBottom();
                 }}
+                aria-label={newBelow ? `${newBelow} new message${newBelow === 1 ? "" : "s"}, jump to latest` : "Jump to latest"}
               >
-                ↓ Latest
+                {newBelow ? (
+                  <>
+                    <span className="jump-count">{newBelow}</span> new message{newBelow === 1 ? "" : "s"} ↓
+                  </>
+                ) : (
+                  "↓ Latest"
+                )}
               </button>
             )}
           </div>

@@ -65,7 +65,8 @@ test("a very long chat with nothing in it wears on her", () => {
 test("the mood model decides with restraint", () => {
   const playful = { ...initialMood(NOW), name: "playful", turns: 0, quiet: 4 };
   assert.equal(applyAppraisal(playful, { mood: "curious", strength: "mild" }, NOW).name, "playful", "a mild change waits its turn");
-  assert.equal(applyAppraisal({ ...playful, turns: 3 }, { mood: "curious", strength: "mild" }, NOW).name, "curious");
+  assert.equal(applyAppraisal({ ...playful, turns: 3 }, { mood: "curious", strength: "mild" }, NOW).name, "playful", "consistent: a mild signal never moves her out of a mood");
+  assert.equal(applyAppraisal({ ...playful, turns: 3 }, { mood: "curious", strength: "strong" }, NOW).name, "curious", "a strong reason does");
   assert.equal(applyAppraisal(playful, { mood: "irritated", strength: "strong", reason: "insulted" }, NOW).name, "irritated");
   assert.equal(applyAppraisal(playful, { mood: "irritated", strength: "strong" }, NOW).previous, "playful", "and she'll come back from it");
   assert.equal(applyAppraisal(playful, { mood: "playful", strength: "mild", reason: "laughing" }, NOW).quiet, 0, "more of the same feeds it");

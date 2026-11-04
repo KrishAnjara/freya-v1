@@ -17,7 +17,7 @@ MODEL = ""  #@param {type:"string"}
 FALLBACK_MODEL = "huihui_ai/qwen3.5-abliterated:4B"  #@param {type:"string"}
 #@markdown **Memory by meaning**: a small embedding model ("none" to skip).
 EMBED_MODEL = "nomic-embed-text"  #@param {type:"string"}
-#@markdown **Pictures**: Qwen-Image-Edit 2511 + NSFW LoRA. Pictures of her start from her portrait (her face, her mood's expression); the helper writes the full prompt. ~58 GB download in the background; needs a High-RAM runtime, an A100 is best (4-bit below 70 GB of GPU memory). On a T4 it usually won't load.
+#@markdown **Pictures**, sized to the GPU: A100 (40 GB+) uses Qwen-Image-Edit 2511 + NSFW LoRA; a T4 or L4 uses RealVisXL (SDXL) + IP-Adapter Face, loaded at the first picture (her voice is paused while it draws). Pictures of her keep her face; the helper writes the full prompt.
 IMAGES = True  #@param {type:"boolean"}
 IMAGE_STEPS = 28  #@param {type:"slider", min:8, max:50, step:1}
 #@markdown Keep the same key between sessions (leave empty for a new one each time):
@@ -48,7 +48,7 @@ Runs her models on Colab's GPU, so your laptop runs no model at all: her voice (
 4. Copy the line it prints and run it on your laptop, in the freya-v1 folder.
 5. Keep this tab open. To stop, interrupt the cell. When the session ends she falls back (Grok, Gemini or Groq, if \`cloudFallback\` is on in freya.config.json) until you run this again; her memory is on your laptop, so nothing is lost.
 
-**What each GPU can do:** her voice is 16.8 GB. A T4 (15 GB) holds most of it and runs the rest on the CPU: it works, slowly; pictures won't fit on a T4. An L4 (24 GB) holds her voice whole. An A100 (40/80 GB, High-RAM) runs her voice and pictures; below 80 GB a picture briefly unloads her voice and the next message takes longer. Pictures run as background jobs and take one to several minutes. Embeddings run on the CPU. Sessions end after some hours, and a GPU isn't guaranteed.
+**What each GPU can do:** her voice is 16.8 GB. A T4 (15 GB) holds most of it and runs the rest on the CPU: it works, slowly. An L4 (24 GB) holds her voice whole. On a T4 or L4 pictures use the smaller SDXL model (about a minute or two each); an A100 (40/80 GB, High-RAM) runs Qwen-Image-Edit; below 80 GB a picture briefly unloads her voice and the next message takes longer. Pictures run as background jobs and take one to several minutes. Embeddings run on the CPU. Sessions end after some hours, and a GPU isn't guaranteed.
 
 **Licences:** check each model's card on Hugging Face (SexyGPT v3 is Apache-2.0; Qwen-Image-Edit 2511 is Apache-2.0; the LoRA has its own terms). Sexual content involving anyone under 18 is refused by the image server, whatever the settings.
 

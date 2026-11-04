@@ -222,9 +222,68 @@ export function ownMood(state: MoodState, now = Date.now()): MoodState {
   return { ...enter(state, day.name, now, 0.4, day.why), warmth: state.warmth };
 }
 
-/** Everything time does to her between messages: moods expire, she misses them, her day goes on. */
-export function passTime(state: MoodState, now = Date.now()): MoodState {
-  return ownMood(resumeMood(state, now), now);
+/** Quiet this long and the conversation's mood is over: she settles (idleMood). */
+export const IDLE_AFTER_MS = 30 * MINUTE;
+
+type Turn = { role: string; content: string };
+
+/**
+ * Half an hour after their last message the moment has passed, and she settles according to how
+ * it ended: a dry, one-word end leaves her bored; anything else lets her come back to neutral (or
+ * content, if it ended well). Friction isn't forgotten, it's kept in the relationship (lib/relationship),
+ * just not worn as a mood. Moods time already set (her day, missing them) and plain ones stay.
+ */
+export function idleMood(state: MoodState, now = Date.now(), recent: Turn[] = []): MoodState {
+  if (now - state.lastUserAt < IDLE_AFTER_MS || isOwnDay(state) || state.why === "missed" || state.why === "boring" && state.name === "bored") return state;
+  if (state.name === "neutral" || (state.name === "content" && state.why === "cooling")) return state;
+  const theirs = recent.filter((turn) => turn.role === "user").slice(-3);
+  const dry = theirs.length >= 2 && theirs.every((turn) => turn.content.trim().length < 15 && !/\?/.test(turn.content));
+  if (dry) return enter(state, "bored", now, 0.4, "boring");
+  const endedWell = ["happy", "playful", "warm", "excited", "interested", "curious", "horny", "content"].includes(state.name);
+  return enter({ ...state, previous: undefined }, endedWell ? "content" : "neutral", now, 0.4, "cooling");
+}
+
+/**
+ * Everything time does to her between messages: moods expire, the moment passes after half an hour
+ * (idleMood, from how the chat ended), she misses them, her day goes on.
+ */
+export function passTime(state: MoodState, now = Date.now(), recent: Turn[] = []): MoodState {
+  return ownMood(idleMood(resumeMood(state, now), now, recent), now);
+}
+
+const REPLY_CUES: [RegExp, MoodName, MoodReason][] = [
+  [/😂|🤣|💀|\b(lmao|lmfao|ha(ha){2,}|i'?m (dead|dying|crying))\b/gi, "playful", "laughing"],
+  [/🥺|❤️|🫶|🥰|😘|\b(miss(ed)? you|aww+|that'?s (so )?sweet|love that|proud of you)\b/gi, "warm", "kind"],
+  [/🙄|😤|\b(ugh+|seriously\?|i swear to god|for fuck'?s sake|stop it)\b/gi, "annoyed", "pestered"],
+  [/!{2,}|🤩|\b(omg|no way|wait what|that'?s (amazing|insane|huge))\b/gi, "excited", "news"],
+  [/\b(tell me more|how come|wait,? why|what happened next|go on)\b/gi, "curious", "questions"],
+];
+const FLAT_REPLY = /^\W*(k|ok|okay|sure|whatever|meh|cool|fine|mhm|yeah)\W*$/i;
+
+/**
+ * What her own reply shows about how she feels. Her reply is the clearest sign of her mood, so it
+ * sets it, with the same restraint as everything else: what she's already feeling is fed; a
+ * different mood takes two clear signs in one reply (a strong reason), or one when she was in no
+ * mood in particular. A one-word flat answer from her is her being bored.
+ */
+export function moodFromReply(state: MoodState, reply: string, now = Date.now()): MoodState {
+  const text = reply.trim();
+  if (!text) return state;
+  if (FLAT_REPLY.test(text) && (state.name === "bored" || state.name === "tired" || LIGHT(state.name))) {
+    return state.name === "bored" ? { ...state, quiet: 0 } : enter(state, "bored", now, 0.3, "boring");
+  }
+  let best: { name: MoodName; why: MoodReason; hits: number } | null = null;
+  for (const [pattern, name, why] of REPLY_CUES) {
+    const hits = text.match(pattern)?.length ?? 0;
+    if (hits && (!best || hits > best.hits)) best = { name, why, hits };
+  }
+  if (!best) return state;
+  if (best.name === state.name) return { ...state, quiet: 0, why: state.why ?? best.why };
+  // Annoyed with them, a laugh in passing doesn't undo it; real warmth or a big laugh does.
+  const strong = best.hits >= 2;
+  if (!strong && !LIGHT(state.name)) return state;
+  if (best.name === "annoyed" && !strong) return state;
+  return enter(state, best.name, now, strong ? 0.45 : 0.3, best.why);
 }
 
 /**
@@ -257,6 +316,9 @@ function settle(state: MoodState, now: number) {
   return state.name !== "neutral" && state.quiet >= HOLD[state.name] ? enter(state, state.previous ?? EASES_TO[state.name] ?? "neutral", now, 0.3, "cooling") : state;
 }
 
+/** Moods with nothing much in them: anything can move her out of these. */
+const LIGHT = (name: MoodName) => name === "neutral" || name === "content";
+
 const SOURED = (name: MoodName) => name === "annoyed" || name === "disgusted" || name === "irritated" || name === "sulking";
 
 /** What the mood model decided, with the same restraint: moods hold, and mild changes wait their turn. */
@@ -264,7 +326,9 @@ export function applyAppraisal(state: MoodState, { mood, strength, reason }: App
   const next: MoodState = { ...state, turns: state.turns + 1, quiet: (state.quiet ?? 0) + 1 };
   if (mood === state.name && strength !== "none") return { ...next, quiet: 0, why: reason ?? state.why };
   if (mood === state.name || strength === "none") return settle(next, now);
-  if (strength === "mild" && state.name !== "neutral" && state.turns < MIN_TURNS_BETWEEN_CHANGES) return settle(next, now);
+  // Consistent: once she's in a mood, only something strong changes it. A mild signal can move her
+  // only from nothing in particular (neutral, content).
+  if (strength === "mild" && !LIGHT(state.name)) return settle(next, now);
   const interrupted = !SOURED(mood) ? undefined : SOURED(state.name) ? state.previous : state.name === "neutral" ? undefined : state.name === "horny" ? "playful" : state.name;
   // Over it: she goes back to how she was, rather than to nothing.
   const target = mood === "neutral" && SOURED(state.name) ? state.previous ?? mood : mood;
@@ -312,7 +376,7 @@ const HOSTILE = (name: MoodName) => name === "irritated" || name === "sulking";
 export function reactToMessage(state: MoodState, text: string, now = Date.now(), options: { intimate?: boolean } = {}): MoodState {
   const next: MoodState = { ...state, lastUserAt: now, unprompted: 0, turns: state.turns + 1, quiet: (state.quiet ?? 0) + 1 };
   const fond = KIND.test(text) || PLAYFUL.test(text);
-  const canShift = state.name === "neutral" || state.turns >= MIN_TURNS_BETWEEN_CHANGES;
+  const canShift = LIGHT(state.name);
   const feeds = (name: MoodName) => canShift || state.name === name;
   const interrupted = HOSTILE(state.name) || SOUR(state.name) ? state.previous : state.name === "neutral" ? undefined : state.name === "horny" ? "playful" : state.name;
   if (INSULT.test(text) && !fond) {
