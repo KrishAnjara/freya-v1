@@ -64,6 +64,10 @@ it to Auto, Always or Off in Settings.
 1. Create a Supabase development project and run `supabase/schema.sql` in its SQL Editor. It
    enables RLS with per-user select/insert/update/delete policies.
 2. For cloud character profiles and revision history, also run `supabase/personality.sql`.
+   For one browser session per account (`oneSession` in freya.config.json), run
+   `supabase/freya-sessions.sql`. With `ownerOnly` on, only `FREYA_OWNER_EMAIL` (default
+   krishanjara@zohomail.in) can use the API (middleware.ts, lib/access.ts); also turn off sign-ups
+   in Supabase (Authentication > Sign In / Providers > Allow new users to sign up).
    To keep her mood, her read on you and your relationship with your account (instead of only in
    one browser), also run `supabase/freya-state.sql`. Until it's run, the app says so once in the
    browser console and keeps that state in the browser.
