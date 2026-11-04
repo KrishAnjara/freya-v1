@@ -735,7 +735,7 @@ export default function PortraitParticles({ expression = "neutral", intensity = 
   }, []);
 
   return (
-    <div className={`portrait-particle-stage ${disturbed ? "is-disturbed" : ""}`} role="img" aria-label="User-provided FREYA portrait as a lit 3D relief that follows the cursor" style={{ filter: "grayscale(100%) brightness(90%)" }}>
+    <div className={`portrait-particle-stage ${disturbed ? "is-disturbed" : ""}`} role="img" aria-label="User-provided FREYA portrait as a lit 3D relief that follows the cursor" style={{ filter: "saturate(0%) brightness(110%)" }}>
       <div className="portrait-particle-host" ref={hostRef} aria-hidden="true" />
       {fallback && <Image className="portrait-static-fallback" src={portraitAsset} alt="" fill sizes="(max-width: 850px) 88vw, 19vw" priority />}
       {/* Nothing sits under her unless she is speaking; then the words appear as she says them. */}
