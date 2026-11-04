@@ -267,7 +267,7 @@ HEARTBEAT_S = 10
 
 
 def blocked(text):
-    return bool(MINORS.search(text) or SEXUAL.search(text))
+    return bool(MINORS.search(text) and SEXUAL.search(text))
 
 
 def parse_image_request(payload):
