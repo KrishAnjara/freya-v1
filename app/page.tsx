@@ -6430,15 +6430,15 @@ export default function Home() {
             opinions about most things.
           </p>
           {/* Two separate things: her own mood (above) and her read on them, which she could have wrong. */}
-          {userMood && (
+          {/* {userMood && (
             <p className="profile-read">
               TO HER, YOU SEEM {userMood.feeling.toUpperCase()}
               {userMood.strength === "strong" ? " (VERY)" : ""}
             </p>
-          )}
-          {memoryEnabled && (
+          )} */}
+          {/* {memoryEnabled && (
             <p className="profile-read">YOU TWO · {STAGE_LABEL[bond.stage]}</p>
-          )}
+          )} */}
           <div className="profile-sigil" aria-hidden="true">
             ✦
           </div>
