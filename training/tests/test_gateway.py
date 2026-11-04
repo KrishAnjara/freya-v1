@@ -191,13 +191,58 @@ def test_a_refiner_that_is_down_never_stops_the_picture(monkeypatch):
     assert serve_remote.refine_prompt("a red fox", "freya-helper") == ("a red fox", False)
 
 
-def test_pictures_fit_the_gpu_and_never_load_beside_her_voice_on_a_small_one():
-    assert serve_remote.choose_backend(14.56) == "sdxl", "a T4 ran out of memory with the 20B model"
-    assert serve_remote.choose_backend(22.5) == "sdxl"
-    assert serve_remote.choose_backend(40) == "qwen"
+def test_normal_pictures_use_her_face_spicy_ones_the_nsfw_model_and_each_backs_up_the_other():
+    assert serve_remote.picture_order(False) == ["face", "moss"], "normal: image-guided from her portrait first"
+    assert serve_remote.picture_order(True) == ["moss", "face"], "adult content: the NSFW model first"
+    assert serve_remote.is_spicy("a picture of you in lingerie") and not serve_remote.is_spicy("you on a beach at sunset", "")
     engine = serve_remote.ImageEngine(True)
-    engine.backend = "sdxl"
-    assert engine.model_name.startswith("RealVisXL")
-    assert engine.pipe is None, "nothing is loaded until the first picture"
+    assert engine.pipe is None, "nothing is loaded until a picture needs it"
+    assert engine.model_name == serve_remote.SDXL_MODEL_NAME
     assert serve_remote.sdxl_prompt("on a beach at sunset", "face").startswith("photo of a 20 year old woman, on a beach")
-    assert not serve_remote.sdxl_prompt("a lighthouse", "new").startswith("photo of a 20 year old woman")
+
+
+def test_moss_describes_her_since_it_draws_from_words():
+    of_her = serve_remote.moss_prompt("sitting on a rooftop at dusk", "face", "laugh")
+    assert of_her.startswith(serve_remote.FREYA_LOOK) and "laughing" in of_her and "rooftop" in of_her
+    assert "20-year-old adult woman" in serve_remote.FREYA_LOOK
+    assert serve_remote.MOSS_TRIGGER not in serve_remote.moss_prompt("a lighthouse in a storm", "new"), "the adult style only for adult content"
+    assert serve_remote.moss_prompt("a nude woman on a bed", "new").startswith(serve_remote.MOSS_TRIGGER)
+
+
+def test_a_failed_model_hands_the_picture_to_the_other(monkeypatch):
+    events = []
+
+    class Broken:
+        name, key, downloaded, pipe = "broken", "face", True, None
+
+        def load(self):
+            raise RuntimeError("CUDA out of memory")
+
+        def release(self):
+            events.append("released broken")
+
+    class Working:
+        name, key, downloaded, pipe = "working", "moss", True, None
+
+        def load(self):
+            pass
+
+        def draw(self, request, prompt, kind, width, height):
+            from PIL import Image
+            return Image.new("RGB", (8, 8))
+
+        def release(self):
+            events.append("released working")
+
+    pytest.importorskip("torch")
+    pytest.importorskip("PIL")
+    engine = serve_remote.ImageEngine(True)
+    engine.models = {"face": Broken(), "moss": Working()}
+    engine.whole_on_gpu = True
+    engine.ready.set()
+    monkeypatch.setattr(serve_remote, "refine_prompt", lambda text, *a, **k: (text, False))
+    monkeypatch.setattr(serve_remote, "log", lambda area, message: events.append(message))
+    result = engine.generate(serve_remote.parse_image_request({"prompt": "a lighthouse at night"}))
+    assert result["model"] == "working"
+    assert any("broken failed" in event and "switching to working" in event for event in events)
+    assert "released broken" in events, "a failed model gives the GPU back"

@@ -1,10 +1,10 @@
 /**
  * Pictures in the chat, from the first of these that can make one:
- *   1. her own image server: the Colab gateway's /v1/images (Qwen-Image-Edit 2511 with an NSFW
+ *   1. her own image server: the Colab gateway's /v1/images (MOSS-Image with an NSFW uncensored
  *      LoRA; see training/serve_remote.py), at FREYA_IMAGE_URL or, by default, the same address as
- *      her remote voice model. A picture of her is sent with one of her portrait photos (the
- *      expression asked for, or her mood's: lib/freya-face) so it keeps her face. A helper model
- *      there writes the full prompt first. Pictures run as jobs there, polled until done.
+ *      her remote voice model. A picture of her carries her expression (asked for, or her mood's:
+ *      lib/freya-face) and her portrait; the server describes her look, since that model draws from
+ *      words. A helper model there writes the full prompt first. Pictures run as jobs, polled.
  *   2. Gemini's image models (generateContent with IMAGE in responseModalities). On a free-tier
  *      key they often have no quota (429); that is reported as the reason, never hidden.
  *   3. an SVG drawing by a text model, labelled as such by the browser.
