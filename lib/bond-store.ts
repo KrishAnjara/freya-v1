@@ -63,9 +63,13 @@ export async function saveCloudBond(token: string, userIdValue: string, bond: Bo
   }
 }
 
-/** The newer of two copies: the one changed last. */
+/**
+ * Which copy to keep: the one with more history, so a fresh browser's untouched copy never resets
+ * the relationship; with the same history, the one changed last.
+ */
 export function newerBond(local: Bond | null, cloud: Bond | null): Bond | null {
   if (!local) return cloud;
   if (!cloud) return local;
+  if (cloud.messages !== local.messages) return cloud.messages > local.messages ? cloud : local;
   return cloud.updatedAt > local.updatedAt ? cloud : local;
 }

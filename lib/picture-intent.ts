@@ -53,12 +53,18 @@ const NOT_ASKING = /\b(i (just )?(sent|took|made|saw|posted|uploaded|shared)|you
 /** Phone shots asked for in so many words: a mirror pic, a pic from behind, the view, a POV. */
 const PHONE_SHOT = /\b(mirror (pic|selfie|photo|shot)s?|(pic|photo|selfie)s? from (behind|the back)|pov (pic|photo|shot)|(show|send) me (the|ur|your) (view|room|outfit|fit|nails|food|setup|place|window)|(show|send) me what (you'?re|u r|ur|you are) (wearing|doing|eating|looking at))\b/i;
 
+/**
+ * A request anywhere in a message: "(can|could|will) you send/show me a pic(ture)/photo/selfie/nudes",
+ * "i want/wanna/need to see a pic of you", "send (me) a pic". Group 2 is what follows ("of you right now").
+ */
+const SCAN = /\b(?:(?:can|could|would|will)\s+(?:you|u)\s+(?:send|show|share|take|snap)|i\s+(?:want|wanna|need|would love|'d love)\s+(?:to\s+see|see|you\s+to\s+send(?:\s+me)?|a)|(?:pls\s+|please\s+)?send\s+(?:me|us))\s+(?:me\s+|us\s+)?(?:a\s+|an\s+|one\s+|another\s+|some\s+|ur\s+|your\s+|the\s+)?(?:new\s+|quick\s+|cute\s+|hot\s+)?(pic|picture|photo|selfie|snap|nude|nudes)s?\b\s*((?:of|with|where|showing|from|in|wearing)\s+[^.!?]{1,160})?/i;
+
 const FIGURE = /^(conclusions?|the line|attention|a blank|breath|straws?|up a plan|from (?:experience|memory)|on (?:your|my) experience|the curtains?|a crowd|fire|blood|near|closer|this|that|the picture|it out)\b/i;
 const FOLLOW_UP = /^(?:(?:ok|okay|now|and|but|hmm|pls|please)[\s,]+)*(another(?: one)?|one more|again|more|(?:make|do) (?:it|that|one|her|him)\b.*|same\b.*|but\b.*|now\b.*|(?:darker|brighter|bigger|smaller|closer|wider|zoom(?: in| out)?)\b.*|without\b.*|with\b.*|in (?:the )?(?:style|colou?r)\b.*|change\b.*)$/i;
 
 /** Clean a captured subject: trailing punctuation, "for me", a leading "of". */
 function subjectOf(raw: string | undefined) {
-  return (raw ?? "").trim().replace(/[?!.]+$/, "").replace(/\s+(?:for me|pls|please|rn|now|real quick)$/i, "").replace(/^of\s+/i, "").trim();
+  return (raw ?? "").trim().replace(/[?!.]+$/, "").replace(/\s+(?:for me|pls|please|rn|right now|now|real quick)$/i, "").replace(/^of\s+/i, "").trim();
 }
 
 /**
@@ -66,6 +72,33 @@ function subjectOf(raw: string | undefined) {
  * darker" mean the last picture rather than nothing.
  */
 export function pictureIntent(text: string, { hasRecentPicture = false } = {}): PictureIntent | null {
+  const whole = pictureIntentOf(text, hasRecentPicture);
+  if (whole?.kind === "clear") return whole;
+  // The trigger scanner: a request inside a longer message ("i was thinking of you, can u send a
+  // picture of you right now"), clause by clause, then anywhere in it.
+  const clauses = text.split(/[.!?;\n]+|,\s+|\s+(?:and|but|so|also|then)\s+/i).map((clause) => clause.trim()).filter((clause) => clause.length > 4);
+  if (clauses.length > 1) {
+    for (const clause of clauses) {
+      const found = pictureIntentOf(clause, hasRecentPicture);
+      if (found?.kind === "clear") return found;
+    }
+  }
+  if (!NOT_ASKING.test(text)) {
+    const scanned = text.match(SCAN);
+    if (scanned) {
+      const subject = subjectOf(scanned[2]);
+      const ofHer = !subject || OF_HER.test(subject) || /\b(selfie|of (you|u|urself|yourself))\b/i.test(scanned[0]);
+      // Nudity asked for stays in the words, so the server knows which kind of picture this is.
+      const nude = /nude/i.test(scanned[1]);
+      const base = subject || "yourself, a casual photo like one you'd text a friend";
+      return { kind: "clear", subject: nude ? `a nude photo of yourself${subject ? `, ${subject}` : ""}` : base, ofHer, followUp: false };
+    }
+  }
+  return whole;
+}
+
+/** One clause, or the whole message: the rules below. */
+function pictureIntentOf(text: string, hasRecentPicture: boolean): PictureIntent | null {
   // Trailing punctuation, emoji and "pls" don't change what they asked for.
   const clean = text.trim().replace(/\s+/g, " ").replace(/(?:[\s?!.,]|\p{Extended_Pictographic}|\b(?:pls|plz|please|rn|babe|for me|real quick)\b)+$/u, "");
   if (!clean || clean.length > 320 || /\n/.test(text.trim())) return null;

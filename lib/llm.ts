@@ -1,9 +1,10 @@
 import { ollamaContextLength, ollamaIsLocal } from "@/lib/ollama-models";
 import { redactSensitiveCredentials } from "@/lib/sensitive-data";
-import { coolingDownMessage, describeFailure, isCoolingDown, markSuccess, ProviderHttpError, providerErrorDetail, recordFailure, retryAfterOf } from "@/lib/provider-health";
+import { CoolingDownError, describeFailure, isCoolingDown, isDown, markSuccess, ProviderHttpError, providerErrorDetail, recordFailure, retryAfterOf } from "@/lib/provider-health";
 import { geminiModel, geminiThinking } from "@/lib/gemini-config";
 import { grokModel, hasGrok } from "@/lib/grok";
-import { ChainConfigError, planVoiceChain, resolvePair, VOICE_SERVER_HEALTH, type ChainOptions, type OllamaTier, type ProviderName, type Tier } from "@/lib/voice-chain";
+import { ChainConfigError, onServer, planVoiceChain, PROVIDER_SWITCHES, resolvePair, VOICE_SERVER_HEALTH, type ChainOptions, type OllamaTier, type ProviderName, type Tier } from "@/lib/voice-chain";
+import { loadConfig } from "@/lib/freya-config";
 
 export type { ProviderName } from "@/lib/voice-chain";
 
@@ -270,7 +271,7 @@ function geminiHealthKey() {
 
 /** Error thrown immediately while an upstream is in cooldown, instead of waiting on it again. */
 function coolingDownError(key: string) {
-  return new Error(`${key} is ${coolingDownMessage(key)}.`);
+  return new CoolingDownError(key);
 }
 
 async function geminiChat(system: string, messages: ChatMessage[], signal?: AbortSignal) {
@@ -729,11 +730,28 @@ type Link = {
   chat: (system: string, turns: ChatMessage[], signal?: AbortSignal) => Promise<string>;
 };
 
+/** Providers switched off in freya.config.json ("server": false, …). */
+function switchedOff(): string[] {
+  const config = loadConfig() as Record<string, boolean | undefined>;
+  return PROVIDER_SWITCHES.filter((name) => config[name] === false);
+}
+
+/**
+ * After a tier fails: may the next one try? Her server's main model hands over to its fallback
+ * model for any failure (out of memory, a crash). Leaving her server for the laptop or the cloud
+ * takes the server being genuinely down; up but failing (busy, a model error) is reported instead.
+ */
+export function mayMoveOn(failed: Tier, next: Tier | undefined, error: unknown) {
+  if (!next) return false;
+  if (!onServer(failed) || onServer(next)) return true;
+  return isDown(error);
+}
+
 /** The voice chain for this reply (lib/voice-chain), each tier bound to its adapter. */
 export function voiceLinks(options: ProviderOptions = {}): Link[] {
   let tiers: Tier[];
   try {
-    tiers = planVoiceChain(options, process.env, hasGrok());
+    tiers = planVoiceChain({ ...options, off: switchedOff() }, process.env, hasGrok());
   } catch (error) {
     if (error instanceof ChainConfigError) throw new ChatInputError(error.message);
     throw error;
@@ -809,7 +827,8 @@ export async function* streamReply(
     const startedThisPass = emitted;
     let lastError: unknown = null;
     let answered = false;
-    for (const link of links) {
+    for (const [index, link] of links.entries()) {
+      if (index && lastError && !mayMoveOn(links[index - 1].tier, link.tier, lastError)) break;
       try {
         if (outcome) outcome.provider = link.tier.label;
         options.onProvider?.(link.tier.label);
@@ -853,7 +872,7 @@ export async function generateReply(system: string, input: unknown, signal?: Abo
   const links = voiceLinks(options);
   const failures: string[] = [];
   let firstError: unknown = null;
-  for (const link of links) {
+  for (const [index, link] of links.entries()) {
     try {
       options.onProvider?.(link.tier.label);
       return await link.chat(promptFor(link, system, options), messages, signal);
@@ -861,6 +880,10 @@ export async function generateReply(system: string, input: unknown, signal?: Abo
       if (signal?.aborted || links.length === 1) throw error;
       firstError ??= error;
       failures.push(`${TIER_NAMES[link.tier.label] ?? link.tier.label}: ${error instanceof Error ? error.message : String(error)}`);
+      if (!mayMoveOn(link.tier, links[index + 1]?.tier, error)) {
+        if (failures.length === 1) throw error;
+        break;
+      }
     }
   }
   if (!failures.length) throw firstError;

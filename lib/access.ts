@@ -7,8 +7,11 @@
  *               freya_sessions (supabase/freya-sessions.sql), and a request from any other browser
  *               session is refused, so that browser signs itself out.
  *
- * Both are switches in freya.config.json. The check uses the caller's own Supabase token against
- * Supabase's REST API (no service key), and caches answers briefly so chat isn't slowed.
+ * Both are switches in freya.config.json. Signing in is not: with both off, any signed-in account
+ * gets in, but nobody gets in signed out (no guest mode). The check uses the caller's own Supabase
+ * token against Supabase's REST API (no service key), and caches answers briefly so chat isn't
+ * slowed; a refusal is never made from the cache, since a device that has just taken over would
+ * otherwise be refused (and sign out) for the cache's lifetime.
  */
 
 export type AccessOptions = { ownerOnly: boolean; oneSession: boolean };
@@ -40,7 +43,6 @@ export function resetAccessCacheForTests() {
 }
 
 export async function checkAccess(headers: Headers, options: AccessOptions, fetchImpl: typeof fetch = fetch, now = Date.now()): Promise<AccessResult> {
-  if (!options.ownerOnly && !options.oneSession) return { ok: true };
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL?.trim().replace(/\/+$/, "");
   const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY?.trim();
   if (!url || !key) return refuse(503, "unavailable", "Sign-in isn't set up on this server (NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY).");
@@ -66,7 +68,8 @@ export async function checkAccess(headers: Headers, options: AccessOptions, fetc
   if (options.oneSession) {
     const claimed = headers.get(SESSION_HEADER) ?? "";
     let known = sessions.get(user.id);
-    if (!known || now - known.at > SESSION_TTL_MS) {
+    // A cached answer can say yes; only a fresh one can say no.
+    if (!known || now - known.at > SESSION_TTL_MS || (known.current && claimed !== known.current)) {
       try {
         const response = await fetchImpl(`${url}/rest/v1/freya_sessions?select=session_id&user_id=eq.${encodeURIComponent(user.id)}`, {
           headers: { apikey: key, Authorization: `Bearer ${token}`, Accept: "application/json" }, cache: "no-store",

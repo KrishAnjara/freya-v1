@@ -14,7 +14,8 @@ import {
 import type { User } from "@supabase/supabase-js";
 import { getSupabaseBrowserClient } from "@/lib/supabase-browser";
 import TabGate from "@/app/components/TabGate";
-import { answerRequest, askForSession, decide, deviceLabel, heartbeat, HEARTBEAT_MS, pendingRequest, readSession, takeSession, withdrawRequest } from "@/lib/device-session";
+import AuthGate, { LEAVE_EVENT } from "@/app/components/AuthGate";
+import { answerRequest, decide, heartbeat, HEARTBEAT_MS, pendingRequest, readSession, takeSession, withdrawRequest } from "@/lib/device-session";
 import { adoptSessionId, forgetLocalSession, installApiAuth, localSessionId, newSessionId, setApiToken, type AccessCode } from "@/lib/api-auth";
 import { stopSpeaking } from "@/lib/mouth-drive";
 import { cancelSpeech, primeVoices, speak } from "@/lib/speech";
@@ -62,6 +63,7 @@ import {
   type WireAttachment,
 } from "@/lib/attachments";
 import {
+  connectCloudFiles,
   deleteAttachments,
   getAttachment,
   putAttachment,
@@ -111,7 +113,7 @@ import {
 import { herStatusLine } from "@/lib/her-day";
 import { canEdit, deliveryOf, thoughtful } from "@/lib/delivery";
 import { loadInflight, resumeJobs, saveInflight } from "@/lib/resume";
-import { chatDiff, clearCloudChat, deleteForEveryone, deleteForMe, forHer, mergeChats, mergeCloud, pullChat, pushChat } from "@/lib/one-chat";
+import { chatDiff, clearForMe, deleteForEveryone, deleteForMe, forHer, mergeChats, mergeCloud, pullChat, pushChat } from "@/lib/one-chat";
 import {
   initialBond,
   initiativeFactor,
@@ -904,11 +906,16 @@ function conversationToMarkdown(conversation: Conversation) {
   return lines.join("\n");
 }
 
-/** One tab at a time (app/components/TabGate); the app itself loads only in the tab that has her. */
+/**
+ * One tab at a time (app/components/TabGate), and only signed in, allowed and on the account's
+ * device (app/components/AuthGate): the app itself loads only after both.
+ */
 export default function Home() {
   return (
     <TabGate>
-      <FreyaApp />
+      <AuthGate>
+        <FreyaApp />
+      </AuthGate>
     </TabGate>
   );
 }
@@ -1083,15 +1090,12 @@ function FreyaApp() {
       setBond(loadBond(moodAccount));
     }
   }, [moodAccount]);
-  const [authEmail, setAuthEmail] = useState("");
   /** Why the site is locked (lib/access): not signed in, not the owner, or signed in elsewhere. */
   const [accessIssue, setAccessIssue] = useState<AccessCode | "">("");
   const accessIssueRef = useRef<AccessCode | "">("");
   useEffect(() => { accessIssueRef.current = accessIssue; }, [accessIssue]);
   /** The other-device request already put to them, so it's asked once. */
   const askedRequestRef = useRef("");
-  const [authPassword, setAuthPassword] = useState("");
-  const [authBusy, setAuthBusy] = useState(false);
 
   const bottomRef = useRef<HTMLDivElement>(null);
   const conversationRef = useRef<HTMLDivElement>(null);
@@ -1118,6 +1122,11 @@ function FreyaApp() {
   const lastPostedIdRef = useRef("");
   /** The chat's cloud copy (lib/one-chat): whether the table is there, and what was last written. */
   const chatCloudRef = useRef(false);
+  /**
+   * Where the chat is kept: "pending" until Supabase answers, "cloud" (the only copy; nothing in
+   * this browser), or "browser" only while the messages table doesn't exist, so nothing is lost.
+   */
+  const [chatStore, setChatStore] = useState<"pending" | "cloud" | "browser">("pending");
   const chatSyncedRef = useRef<Map<string, string>>(new Map());
   const moodRef = useRef<MoodState>(mood);
   const userMoodRef = useRef<UserMood | null>(null);
@@ -1192,25 +1201,35 @@ function FreyaApp() {
     const timer = window.setTimeout(() => setUnreadFrom(null), 6000);
     return () => window.clearTimeout(timer);
   }, [unreadFrom]);
-  // The one chat, kept with the account (lib/one-chat): fetched and merged when signed in, then
-  // written back a few seconds after it changes. Without the table it stays in this browser.
+  // Pictures and files follow the account too (lib/attachment-store, the freya-files bucket).
+  useEffect(() => {
+    connectCloudFiles(supabase, user?.id ?? null);
+  }, [user]);
+  // The one chat lives in Supabase (lib/one-chat): fetched when signed in, then written back a few
+  // seconds after it changes. A browser copy from before is merged in once, then dropped. Without
+  // the table it stays in this browser; Supabase not answering, it tries again shortly.
   useEffect(() => {
     if (!hydrated || !supabase || !user) { chatCloudRef.current = false; return; }
     let cancelled = false;
-    void pullChat<Message>(supabase, user.id).then((cloud) => {
+    let retry = 0;
+    const pull = () => void pullChat<Message>(supabase, user.id).then((cloud) => {
       if (cancelled) return;
-      if (!cloud) {
+      if (cloud === "missing") {
         console.info("FREYA: run supabase/freya-messages.sql to keep the chat with your account. Until then it stays in this browser.");
+        setChatStore("browser");
         return;
       }
+      if (!cloud) { retry = window.setTimeout(pull, 5000); return; }
       chatCloudRef.current = true;
       const conversationId = activeIdRef.current;
       const local = conversationsRef.current.find((chat) => chat.id === conversationId)?.messages ?? [];
       const merged = mergeCloud(local, cloud) as Message[];
       chatSyncedRef.current = new Map(cloud.map((message) => [message.id, JSON.stringify(message)]));
       patchConversation(conversationId, () => merged);
-    }).catch(() => undefined);
-    return () => { cancelled = true; };
+      setChatStore("cloud");
+    }).catch(() => { if (!cancelled) retry = window.setTimeout(pull, 5000); });
+    pull();
+    return () => { cancelled = true; window.clearTimeout(retry); };
   }, [hydrated, user]);
   useEffect(() => {
     if (!supabase || !user || !chatCloudRef.current) return;
@@ -1222,9 +1241,9 @@ function FreyaApp() {
     }, 3000);
     return () => window.clearTimeout(timer);
   }, [conversations, activeId, user]);
-  // After a refresh: pick up the replies she owed (lib/resume), once the saved chats are loaded.
+  // After a refresh: pick up the replies she owed (lib/resume), once the chat is in from Supabase.
   useEffect(() => {
-    if (!hydrated) return;
+    if (!hydrated || chatStore === "pending") return;
     const timer = window.setTimeout(() => {
       const jobs = resumeJobs(loadInflight(), conversationsRef.current);
       saveInflight(null);
@@ -1233,7 +1252,7 @@ function FreyaApp() {
     return () => window.clearTimeout(timer);
     // Once per page load; enqueueReply reads everything through refs.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hydrated]);
+  }, [hydrated, chatStore === "pending"]);
   useEffect(() => {
     bondRef.current = bond;
     if (moodLoadedRef.current) saveBond(bond, moodAccountRef.current);
@@ -1244,12 +1263,15 @@ function FreyaApp() {
       const code = (event as CustomEvent<AccessCode>).detail;
       // Waiting for the other device to allow this one, every request is refused: that's expected.
       if (accessIssueRef.current === "awaiting-approval") return;
-      if (code === "session-replaced" && user) void signOutReplaced(user.id);
-      else setAccessIssue(code);
+      if (code === "session-replaced" && user) void confirmReplaced(user.id);
+      else if (code === "sign-in") void confirmSignedOut();
+      // Supabase didn't answer the server just now: a hiccup, not a reason to lock her away.
+      else if (code !== "unavailable") void signOutReplaced(user?.id ?? "", code);
     };
     window.addEventListener("freya:access", onAccess);
     return () => window.removeEventListener("freya:access", onAccess);
-    // signOutReplaced only reads refs and setters, so the listener follows the user alone.
+    // signOutReplaced and the confirm helpers read refs and setters only, so the listener follows the user alone.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user]);
   // One device per account (lib/device-session), checked every few seconds while the tab is open:
   // the device in use keeps a heartbeat and answers requests from other devices; a device that asked
@@ -1259,7 +1281,9 @@ function FreyaApp() {
     let lastBeat = 0;
     let busy = false;
     const check = async () => {
-      if (busy || document.hidden) return;
+      // Hidden tabs keep their heartbeat too: a laptop tab in the background is still in use, and
+      // going quiet would let another device take over without asking.
+      if (busy) return;
       busy = true;
       try {
         const localId = localSessionId(user.id);
@@ -1695,9 +1719,11 @@ function FreyaApp() {
     [],
   );
 
+  /** A phone-sized screen: her portrait (a heavy WebGL scene) isn't drawn there. */
+  const [phone, setPhone] = useState(false);
   useEffect(() => {
     const media = window.matchMedia("(max-width: 700px)");
-    const syncDrawerForViewport = () => setDrawerOpen(!media.matches);
+    const syncDrawerForViewport = () => { setDrawerOpen(!media.matches); setPhone(media.matches); };
     syncDrawerForViewport();
     media.addEventListener("change", syncDrawerForViewport);
     return () => media.removeEventListener("change", syncDrawerForViewport);
@@ -1874,8 +1900,9 @@ function FreyaApp() {
       }
     });
     const { data: listener } = supabase.auth.onAuthStateChange(
-      (_event, session) => {
+      (event, session) => {
         if (!active) return;
+        if (event === "SIGNED_OUT") window.dispatchEvent(new CustomEvent(LEAVE_EVENT, { detail: "signed-out" }));
         setApiToken(session?.access_token);
         setUser(session?.user ?? null);
         setCloudProfileReady(!session?.user);
@@ -1945,58 +1972,6 @@ function FreyaApp() {
     );
   }
 
-  /** Sign-in only: new accounts are switched off (and should be off in Supabase too). */
-  async function submitAuth(event?: FormEvent) {
-    event?.preventDefault();
-    if (!supabase) return;
-    if (!authEmail.trim() || authPassword.length < 6) {
-      notify(
-        "Enter a valid email and a password with at least 6 characters.",
-        "error",
-      );
-      return;
-    }
-    setAuthBusy(true);
-    setToasts([]);
-    try {
-      const result = await supabase.auth.signInWithPassword({
-        email: authEmail.trim(),
-        password: authPassword,
-      });
-      if (result.error) throw result.error;
-      // A fresh sign-in: this device takes the account if nobody else is using it, and asks the
-      // device that is, otherwise (lib/device-session).
-      if (result.data.user) await beginDevice(result.data.user.id);
-      else setAccessIssue("");
-      setAuthPassword("");
-    } catch (error) {
-      notify(reportError("auth", error), "error");
-    } finally {
-      setAuthBusy(false);
-    }
-  }
-
-  /**
-   * A new sign-in on this device: take the account's session if nobody is using it (or the device
-   * that was has gone quiet); otherwise ask that device, and wait for its answer.
-   */
-  async function beginDevice(userId: string) {
-    if (!supabase) return;
-    const id = newSessionId();
-    adoptSessionId(userId, id);
-    if (switches.oneSession === false) { await takeSession(supabase, userId, id); setAccessIssue(""); return; }
-    const row = await readSession(supabase, userId).catch(() => null);
-    const state = decide(row, id);
-    if (state === "unclaimed" || state === "stale") {
-      await takeSession(supabase, userId, id);
-      setAccessIssue("");
-      notify("Signed in.");
-      return;
-    }
-    await askForSession(supabase, userId, id, deviceLabel(navigator.userAgent));
-    setAccessIssue("awaiting-approval");
-  }
-
   /**
    * Where this device stands on opening (or while it waits): true when it can't go on (signed out,
    * or waiting for permission), false when it's the account's session.
@@ -2023,21 +1998,45 @@ function FreyaApp() {
     return true;
   }
 
-  /** Another browser signed in to this account: this one signs out, and says why. */
+  /**
+   * FREYA moved to another device (or this one was refused): the app steps aside for the sign-in
+   * gate (app/components/AuthGate), which offers "Use here". This browser stays signed in, so it
+   * never needs the sign-in page again.
+   */
   async function signOutReplaced(userId: string, why: AccessCode = "session-replaced") {
-    if (!supabase) return;
-    forgetLocalSession(userId);
-    // Only this browser's sign-in ends; the other browser's stays valid.
-    await supabase.auth.signOut({ scope: "local" }).catch(() => undefined);
-    setApiToken("");
-    setUser(null);
+    if (userId) forgetLocalSession(userId);
     setAccessIssue(why);
+    window.dispatchEvent(new CustomEvent(LEAVE_EVENT, { detail: why }));
+  }
+
+  /**
+   * The server said another device has the account. Checked against the account's row before
+   * stepping aside: a refusal from a moment ago (a device that has just taken over) is not a
+   * reason to leave.
+   */
+  async function confirmReplaced(userId: string) {
+    if (!supabase) return;
+    const localId = localSessionId(userId);
+    const row = await readSession(supabase, userId).catch(() => null);
+    const state = decide(row, localId);
+    if (state === "current") return;
+    if (state === "stale" || state === "unclaimed") { await takeSession(supabase, userId, localId || newSessionId()); return; }
+    await signOutReplaced(userId, state === "denied" ? "switch-denied" : state === "expired" ? "switch-expired" : "session-replaced");
+  }
+
+  /** The server said the sign-in has run out: refreshed if it can be, otherwise the gate asks again. */
+  async function confirmSignedOut() {
+    if (!supabase) return;
+    const { data } = await supabase.auth.refreshSession().catch(() => ({ data: { session: null } }));
+    if (data.session) { setApiToken(data.session.access_token); return; }
+    await signOutReplaced(user?.id ?? "", "sign-in");
   }
 
   async function signOut() {
     if (!supabase) return;
     if (user) forgetLocalSession(user.id);
-    const { error } = await supabase.auth.signOut();
+    // This browser only: signing out here never signs out the account's other devices.
+    const { error } = await supabase.auth.signOut({ scope: "local" });
     if (error)
       notify(reportError("auth", error, "Sign-out did not complete."), "error");
     else {
@@ -2047,6 +2046,7 @@ function FreyaApp() {
       setProfileRevisions([]);
       setPersonalityProposals([]);
       notify("Signed out. Cloud memories remain in your account.");
+      window.dispatchEvent(new CustomEvent(LEAVE_EVENT, { detail: "signed-out" }));
     }
   }
 
@@ -2299,11 +2299,16 @@ function FreyaApp() {
   ]);
 
   useEffect(() => {
-    if (!hydrated) return;
+    if (!hydrated || chatStore === "pending") return;
     try {
+      // No messages in the browser: the chat is in Supabase. Only the thread itself (its id, the
+      // unread count) is kept here, unless the messages table doesn't exist yet.
+      const kept = chatStore === "cloud"
+        ? conversations.map((conversation) => ({ ...conversation, messages: [] }))
+        : conversations;
       localStorage.setItem(
         CONVERSATIONS_KEY,
-        JSON.stringify(conversations.slice(0, MAX_CONVERSATIONS)),
+        JSON.stringify(kept.slice(0, MAX_CONVERSATIONS)),
       );
       if (activeId) localStorage.setItem(ACTIVE_CONVERSATION_KEY, activeId);
     } catch {
@@ -2316,7 +2321,7 @@ function FreyaApp() {
         "error",
       );
     }
-  }, [conversations, activeId, hydrated, notify]);
+  }, [conversations, activeId, hydrated, notify, chatStore]);
 
   const scrollToBottom = useCallback((smooth = true) => {
     const reduceMotion = window.matchMedia(
@@ -4369,24 +4374,22 @@ function FreyaApp() {
     patchConversation(conversationId, (messages) => scope === "me" ? deleteForMe(messages, message.id) : deleteForEveryone(messages, message.id));
   }
 
-  /** The whole chat, gone: here, in the cloud, and what she was about to say. Her memories stay. */
+  /**
+   * The whole chat leaves the screen, on every device: each message is deleted for me (into the
+   * deleted messages, lib/one-chat), so she still has them. What she was about to say is dropped.
+   */
   async function clearChat() {
     const sure = await askFor({
       title: "Clear the whole chat?",
-      body: "Every message goes, here and in your account. She keeps her memories of you, and how she feels about you.",
+      body: "Every message leaves the chat, here and on your other devices. She still remembers what you talked about.",
       confirmLabel: "Clear chat",
       cancelLabel: "Keep it",
     });
     if (sure !== true) return;
     const conversationId = activeIdRef.current;
     cancelRepliesFor(conversationId);
-    const files = (conversationsRef.current.find((chat) => chat.id === conversationId)?.messages ?? [])
-      .flatMap((message) => [...(message.attachments ?? []).map((item) => item.id), ...(message.voice ? [message.voice.id] : [])]);
-    if (files.length) void deleteAttachments(files);
-    patchConversation(conversationId, () => []);
+    patchConversation(conversationId, (messages) => clearForMe(messages));
     saveInflight(null);
-    chatSyncedRef.current = new Map();
-    if (supabase && user && chatCloudRef.current) void clearCloudChat(supabase, user.id);
     notify("Chat cleared.");
   }
 
@@ -4892,78 +4895,10 @@ function FreyaApp() {
       )
     : undefined;
 
-  // Locked (lib/access): owner-only and nobody signed in, or the server refused this browser.
-  const locked =
-    Boolean(supabase) &&
-    hydrated &&
-    (accessIssue !== "" || (switches.ownerOnly === true && !user));
-  if (locked) {
-    const why =
-      accessIssue === "not-allowed"
-        ? "This account doesn't have access to FREYA."
-        : accessIssue === "awaiting-approval"
-          ? "FREYA is in use on another device. Asking it to let you switch here… Allow it there."
-        : accessIssue === "switch-denied"
-          ? "Your other device didn't allow the switch, so FREYA stays there."
-        : accessIssue === "switch-expired"
-          ? "Your other device didn't answer. Sign in again to ask once more."
-        : accessIssue === "session-replaced"
-          ? "FREYA moved to your other device, so this one was signed out."
-          : accessIssue === "unavailable"
-            ? "Sign-in couldn't be checked just now. Try again in a moment."
-            : "FREYA is private. Sign in to continue.";
-    return (
-      <main className="access-lock">
-        <form
-          className="access-card"
-          onSubmit={(event) => void submitAuth(event)}
-        >
-          <h1>FREYA</h1>
-          <p>{why}</p>
-          <input
-            type="email"
-            value={authEmail}
-            onChange={(event) => setAuthEmail(event.target.value)}
-            placeholder="Email"
-            autoComplete="email"
-            required
-          />
-          <input
-            type="password"
-            value={authPassword}
-            onChange={(event) => setAuthPassword(event.target.value)}
-            placeholder="Password"
-            autoComplete="current-password"
-            minLength={6}
-            required
-          />
-          <button type="submit" disabled={authBusy}>
-            {authBusy ? "Signing in…" : "Sign in"}
-          </button>
-          {user && accessIssue === "not-allowed" && (
-            <button
-              type="button"
-              className="access-secondary"
-              onClick={() => {
-                void signOut();
-                setAccessIssue("");
-              }}
-            >
-              Sign out
-            </button>
-          )}
-          {toasts
-            .filter((toast) => toast.tone === "error")
-            .slice(-1)
-            .map((toast) => (
-              <p key={toast.id} className="access-error" role="alert">
-                {toast.text}
-              </p>
-            ))}
-        </form>
-      </main>
-    );
-  }
+  // Locked: the sign-in gate (app/components/AuthGate) has taken over. No guests: with Supabase set
+  // up, nothing of hers shows without a signed-in account.
+  if (Boolean(supabase) && hydrated && (accessIssue !== "" || !user))
+    return <main className="access-lock" aria-busy="true" />;
 
   return (
     <main className="app-shell single-chat">
@@ -5093,7 +5028,7 @@ function FreyaApp() {
                   />
                   {supabase && (
                     <div className="settings-account-block">
-                      {user ? (
+                      {user && (
                         <>
                           <p className="memory-description">
                             Cloud memories are scoped to this signed-in account.
@@ -5105,46 +5040,6 @@ function FreyaApp() {
                           >
                             Sign out
                           </button>
-                        </>
-                      ) : (
-                        <>
-                          <div className="side-label">CLOUD MEMORY ACCOUNT</div>
-                          <p className="memory-description">
-                            Sign in to sync personal memories.
-                          </p>
-                          <form
-                            className="memory-form"
-                            onSubmit={(event) => void submitAuth(event)}
-                          >
-                            <input
-                              type="email"
-                              value={authEmail}
-                              onChange={(event) =>
-                                setAuthEmail(event.target.value)
-                              }
-                              placeholder="Email"
-                              autoComplete="email"
-                              required
-                            />
-                            <input
-                              type="password"
-                              value={authPassword}
-                              onChange={(event) =>
-                                setAuthPassword(event.target.value)
-                              }
-                              placeholder="Password (min. 6 chars)"
-                              autoComplete="current-password"
-                              minLength={6}
-                              required
-                            />
-                            <button
-                              className="small-primary"
-                              type="submit"
-                              disabled={authBusy}
-                            >
-                              {authBusy ? "Please wait…" : "Sign in"}
-                            </button>
-                          </form>
                         </>
                       )}
                     </div>
@@ -6585,14 +6480,16 @@ function FreyaApp() {
         </section>
 
         <aside className="profile-panel" aria-label="FREYA profile">
-          {/* Offline she's asleep: eyes closed, her sleepy face, barely moving. */}
-          <PortraitParticles
-            expression={offline ? "tired" : portrait.face.expression}
-            intensity={offline ? 0.6 : portrait.face.level}
-            glance={offline ? null : portrait.glance}
-            motion={offline ? SLEEP_MOTION : portrait.motion}
-            asleep={offline}
-          />
+          {/* Offline she's asleep: eyes closed, her sleepy face, barely moving. Not on phones. */}
+          {!phone && (
+            <PortraitParticles
+              expression={offline ? "tired" : portrait.face.expression}
+              intensity={offline ? 0.6 : portrait.face.level}
+              glance={offline ? null : portrait.glance}
+              motion={offline ? SLEEP_MOTION : portrait.motion}
+              asleep={offline}
+            />
+          )}
           <div className="profile-name-row">
             <h2>FREYA, 20</h2>
             <span className={`profile-state ${offline ? "is-offline" : ""}`}>

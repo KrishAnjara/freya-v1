@@ -13,5 +13,11 @@
   "cloudFallback": true,
   "externalFiles": true,
   "ownerOnly": true,
-  "oneSession": true
+  "oneSession": true,
+  "server": true,
+  "serverFallback": true,
+  "laptop": true,
+  "grok": false,
+  "gemini": true,
+  "groq": true
 }

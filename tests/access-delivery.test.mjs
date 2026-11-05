@@ -36,7 +36,8 @@ test("only the owner's account gets in; everyone else is refused, signed in or n
   assert.equal((await checkAccess(request("other"), { ownerOnly: true, oneSession: false }, fake)).code, "not-allowed");
   assert.equal((await checkAccess(request(), { ownerOnly: true, oneSession: false }, fake)).status, 401);
   assert.equal((await checkAccess(request("expired"), { ownerOnly: true, oneSession: false }, fake)).code, "sign-in");
-  assert.deepEqual(await checkAccess(request(), { ownerOnly: false, oneSession: false }, fake), { ok: true }, "both switches off: open, as before");
+  assert.equal((await checkAccess(request(), { ownerOnly: false, oneSession: false }, fake)).code, "sign-in", "both switches off: still no guests");
+  assert.deepEqual(await checkAccess(request("other"), { ownerOnly: false, oneSession: false }, fake), { ok: true, userId: "u2" }, "both off: any signed-in account");
   assert.equal(isOpenRoute("/api/session"), true);
   assert.equal(isOpenRoute("/api/chat"), false);
 });
@@ -49,6 +50,17 @@ test("one browser per account: the newest sign-in wins, an older browser is refu
   const old = await checkAccess(request("owner", "browser-a"), both, fake);
   assert.equal(old.status, 409);
   assert.equal(old.code, "session-replaced");
+  resetAccessCacheForTests();
+  // A device that has just taken over is never refused from a stale cache.
+  let current = "browser-a";
+  const moving = async (url, init) => String(url).endsWith("/auth/v1/user")
+    ? new Response(JSON.stringify({ id: "u1", email: "krishanjara@zohomail.in" }), { status: 200 })
+    : new Response(JSON.stringify([{ session_id: current }]), { status: 200 });
+  resetAccessCacheForTests();
+  assert.equal((await checkAccess(request("owner", "browser-a"), both, moving)).ok, true);
+  current = "browser-b";
+  assert.equal((await checkAccess(request("owner", "browser-b"), both, moving)).ok, true, "the new device gets in at once");
+  assert.equal((await checkAccess(request("owner", "browser-a"), both, moving)).status, 409, "and the old one is told");
   resetAccessCacheForTests();
   const noTable = supabase({ owner: { id: "u1", email: "krishanjara@zohomail.in" } }, {}, { table: false });
   assert.equal((await checkAccess(request("owner", "anything"), both, noTable)).ok, true, "without the table it can't be enforced, and nothing breaks");

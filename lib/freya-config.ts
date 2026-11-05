@@ -9,7 +9,7 @@
 import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 
-export const SWITCHES = ["sexTalk", "swearing", "unhinged", "stayInCharacter", "realisticTiming", "textsFirst", "replyChecks", "rateLimit", "thinking", "camera", "cloudFallback", "externalFiles", "ownerOnly", "oneSession"] as const;
+export const SWITCHES = ["sexTalk", "swearing", "unhinged", "stayInCharacter", "realisticTiming", "textsFirst", "replyChecks", "rateLimit", "thinking", "camera", "cloudFallback", "externalFiles", "ownerOnly", "oneSession", "server", "serverFallback", "laptop", "grok", "gemini", "groq"] as const;
 export type FreyaConfig = Partial<Record<(typeof SWITCHES)[number], boolean>>;
 
 const asSwitch = (value: unknown) => value === true || value === "on" ? true : value === false || value === "off" ? false : undefined;

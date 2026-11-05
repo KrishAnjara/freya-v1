@@ -14,16 +14,15 @@ Behind the same login and address it also serves:
   - a helper model (Qwen3.5 4B abliterated): her fallback voice when the big one fails inside the
     session, her eyes for images, and the picture prompt maker
   - an embedding model, so her memory can be matched by meaning
-  - pictures (--images), two models, one on the GPU at a time: normal pictures with RealVisXL +
-    IP-Adapter Face (image-guided: a picture of her takes her face from her portrait photo), spicy
-    ones with MOSS-Image + an NSFW uncensored LoRA. If one fails, the other tries, and the log says
-    so. On a T4 or L4 nothing loads beside her voice: each picture pauses her voice, loads its model,
-    draws and frees the GPU. Every picture is a photo from her phone: a selfie, a mirror selfie from
+  - pictures (--images): RealVisXL + IP-Adapter Face (image-guided: a picture of her takes her face
+    from her portrait photo), for every picture, adult ones included. On a T4 or L4 nothing loads
+    beside her voice: each picture pauses her voice, loads the model, draws and frees the GPU. Every picture is a photo from her phone: a selfie, a mirror selfie from
     the front or behind, her point of view, the view where she is, a thing. The small uncensored
     prompt maker (the helper model, on this machine) picks the shot, whether she's in it and whether
     her face shows, and expands the request into the full prompt; where her face shows, her real
     photo for her current mood goes in, not just a description. Pictures run as background jobs (a quick tunnel cuts
-    requests after ~100 s); while one draws, chats get a quick "busy" so the app's next voice answers.
+    requests after ~100 s); a chat that comes in while one draws waits for it behind a heartbeat, so the
+    tunnel never cuts it and the app never switches voices because of a picture.
     Every request, picture step and model switch is logged (route, status, time; never content).
     Sexual content involving anyone under 18 is refused here, before and after the prompt maker.
 
@@ -94,24 +93,23 @@ CONTEXTS = [4096]
 
 def contexts_for(base):
     return CONTEXTS if "dark-forest" in base.lower() else VOICE_CONTEXTS
-DEFAULT_FALLBACK = "DavidAU/gemma-3-4b-it-heretic-uncensored-abliterated-Extreme"
+#: The same Gemma 3 4B uncensored, as a GGUF Ollama can pull: a bare "DavidAU/..." name is looked
+#: up on ollama.com, where it doesn't exist, so the helper (fallback voice, prompt maker) never loaded.
+DEFAULT_FALLBACK = "hf.co/mradermacher/gemma-3-4b-it-heretic-uncensored-abliterated-Extreme-GGUF:Q4_K_M"
 DEFAULT_EMBED = "nomic-embed-text"
 #: Her eyes for pictures they send: Gemma 3 4B, uncensored (heretic, abliterated), with its vision
 #: projector, as a GGUF Ollama loads straight from Hugging Face (~3 GB).
 DEFAULT_VISION = "hf.co/mradermacher/gemma-3-4b-it-heretic-uncensored-abliterated-Extreme-GGUF:Q4_K_M"
-#: Pictures, two models (ImageEngine): normal ones image-guided from her portrait, spicy ones with
-#: an NSFW model; if one fails the other tries.
+#: Ollama gives a Hugging Face GGUF eyes only when its repo has the vision projector (an mmproj file)
+#: beside it; without one the model loads as text only and can't read a picture. Checked after the
+#: pull (model_can_see): then this, Ollama's own Gemma 3 4B with its projector, reads them instead.
+VISION_FALLBACK = "gemma3:4b"
+#: Pictures (ImageEngine): image-guided from her portrait.
 SDXL_MODEL = "SG161222/RealVisXL_V5.0"
 SDXL_MODEL_NAME = "RealVisXL 5 + IP-Adapter Face"
 IP_ADAPTER_REPO = "h94/IP-Adapter"
-IMAGE_MODEL = "Ansh92928219/Moss-image-nsfw-uncensored-lora"
-IMAGE_MODEL_NAME = "MOSS-Image + NSFW LoRA"
-#: The LoRA's trigger word, for its adult photo style (moss_prompt adds it only for adult content).
-MOSS_TRIGGER = "moss_xvstyle"
 #: From this much GPU memory the face model stays loaded beside her voice.
 IMAGE_KEEP_VRAM_GB = 40
-#: From this much (an 80 GB A100) MOSS runs in full precision and stays loaded; below, 4-bit per picture.
-IMAGE_FULL_VRAM_GB = 70
 #: Her look, from her portrait (app/static/freya.png), so every picture of her is the same woman.
 FREYA_LOOK = ("Freya, a 20-year-old adult woman with black hair pulled back loosely with a few strands falling around her face, "
               "pale fair skin, striking grey-green eyes, dark straight eyebrows, high cheekbones, a defined jaw and full lips")
@@ -166,8 +164,8 @@ class GpuTurns:
     """One GPU, two kinds of work: any number of chats at once, or one picture on its own.
 
     While a picture is drawing, or waiting for the chats in progress to finish so it can start, the
-    GPU is `busy()`: new chats are turned away at once (the app's next voice answers them) rather
-    than left hanging for the minutes a picture takes."""
+    GPU is `busy()`. A streamed chat then waits its turn behind relay_stream's heartbeat (the app
+    stays on her voice); only an unstreamed one is turned away with a quick "busy"."""
 
     def __init__(self):
         self._condition = threading.Condition()
@@ -477,38 +475,10 @@ def picture_size(request, kind):
     return request["width"], request["height"]
 
 
-def moss_prompt(prompt, kind, expression=""):
-    """
-    What MOSS-Image reads. It can't take a reference photo, so a picture of her carries her look in
-    words, the same every time (FREYA_LOOK), with the face her mood or the request asks for. The
-    LoRA's trigger word goes in only for adult content, where its photo style is meant to apply.
-    """
-    parts = []
-    if SEXUAL.search(prompt):
-        parts.append(MOSS_TRIGGER)
-    if kind == "face":
-        face = EXPRESSION_WORDS.get(expression, "")
-        parts.append(f"{FREYA_LOOK}{f', {face}' if face else ''}")
-    elif kind == "body":
-        parts.append(FREYA_LOOK.split(" with ")[0] + ", seen from behind or out of frame")
-    parts.append(prompt)
-    return ", ".join(parts) + f". {PHONE_LOOK}."
-
-
 def sdxl_prompt(prompt, kind):
     """SDXL reads ~75 tokens: the subject first. Her face comes from the adapter and her real photo."""
     lead = "phone photo of a 20 year old woman, " if kind in ("face", "body") else "phone photo, "
     return f"{lead}{prompt}, {PHONE_LOOK}"
-
-
-def load_module(path, name):
-    """Imports the model's own pipeline file (pipeline_moss_image.py) from where it was downloaded."""
-    import importlib.util
-    spec = importlib.util.spec_from_file_location(name, path)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
 
 
 def gpu_memory():
@@ -519,16 +489,6 @@ def gpu_memory():
         return f"{(total - free) / 1e9:.1f}/{total / 1e9:.1f} GB used"
     except Exception:  # noqa: BLE001 - only for the log
         return ""
-
-
-def is_spicy(*texts):
-    """Adult content: goes to the NSFW model first (picture_order)."""
-    return any(SEXUAL.search(text or "") for text in texts)
-
-
-def picture_order(spicy):
-    """Which model tries first; the other is the fallback if the first fails."""
-    return ["moss", "face"] if spicy else ["face", "moss"]
 
 
 class FaceModel:
@@ -600,86 +560,11 @@ class FaceModel:
             self.pipe = None
 
 
-class MossModel:
-    """
-    Spicy pictures: MOSS-Image (OpenMOSS) with the NSFW uncensored LoRA merged in, through its own
-    pipeline file. Text to image, so pictures of her are described (moss_prompt). ~28 GB. Full
-    precision and kept on the GPU from IMAGE_FULL_VRAM_GB; below that it loads in 4-bit (~9 GB, all on
-    the GPU) for each picture and is freed again.
-    """
-
-    name = IMAGE_MODEL_NAME
-    key = "moss"
-
-    def __init__(self, token, steps, keep):
-        self.token, self.steps, self.keep = token, steps, keep
-        self.pipe = None
-        self.downloaded = False
-        self.root = ""
-
-    def download(self):
-        from huggingface_hub import snapshot_download
-        folder = snapshot_download(IMAGE_MODEL, allow_patterns=["merged-model/*"], ignore_patterns=["merged-model/assets/*"], token=self.token)
-        self.root = os.path.join(folder, "merged-model")
-        self.downloaded = True
-
-    def load(self):
-        if self.pipe is not None:
-            return
-        import torch
-        from diffusers import AutoencoderKLFlux2
-        from transformers import AutoModel, AutoTokenizer
-        moss = load_module(os.path.join(self.root, "pipeline_moss_image.py"), "pipeline_moss_image")
-        # T4s have no bfloat16; half precision there.
-        dtype = torch.bfloat16 if torch.cuda.get_device_capability(0)[0] >= 8 else torch.float16
-        transformer_options, encoder_options = {"torch_dtype": dtype}, {"dtype": dtype}
-        if not self.keep:
-            from diffusers import BitsAndBytesConfig as DiffusersBnb
-            from transformers import BitsAndBytesConfig as TransformersBnb
-            four_bit = {"load_in_4bit": True, "bnb_4bit_quant_type": "nf4", "bnb_4bit_compute_dtype": dtype}
-            transformer_options["quantization_config"] = DiffusersBnb(**four_bit)
-            encoder_options["quantization_config"] = TransformersBnb(**four_bit)
-            encoder_options["device_map"] = {"": 0}
-        transformer = moss.MOSSImageTransformer.from_pretrained(self.root, subfolder="transformer", **transformer_options).eval()
-        tokenizer = AutoTokenizer.from_pretrained(self.root, subfolder="tokenizer")
-        text_encoder = AutoModel.from_pretrained(self.root, subfolder="text_encoder", **encoder_options).eval()
-        vae = AutoencoderKLFlux2.from_pretrained(self.root, subfolder="vae", torch_dtype=torch.float32).eval()
-        scheduler = moss.MOSSImageScheduler.from_pretrained(self.root, subfolder="scheduler")
-        pipe = moss.MOSSImagePipeline(transformer=transformer, scheduler=scheduler, text_encoder=text_encoder, tokenizer=tokenizer, vae=vae)
-        if self.keep:
-            pipe.to("cuda")
-        else:
-            pipe.vae.to("cuda")
-            if str(getattr(pipe.transformer, "device", "cuda")) == "cpu":
-                pipe.transformer.to("cuda")
-        pipe.set_progress_bar_config(disable=True)
-        self.pipe = pipe
-
-    def draw(self, request, prompt, kind, width, height):
-        import torch
-        # A change to the last picture is a new picture from the combined description: words only.
-        kind = "new" if kind == "edit" else kind
-        return self.pipe(
-            moss_prompt(prompt, kind, request["expression"]),
-            negative_prompt=request["negative_prompt"] or "",
-            width=width // 16 * 16, height=height // 16 * 16,
-            num_inference_steps=self.steps, guidance_scale=3.0,
-            generator=torch.Generator("cpu").manual_seed(request["seed"]),
-        ).images[0]
-
-    def release(self):
-        if not self.keep:
-            self.pipe = None
-
-
 class ImageEngine:
     """
-    Two picture models, one at a time on the GPU (picture_order):
-      - normal pictures: FaceModel (RealVisXL + IP-Adapter Face), image-guided from her portrait;
-      - spicy (adult) pictures: MossModel (MOSS-Image + NSFW LoRA).
-    If the first fails (out of memory, a load error), the other one tries, and the log says so. Both
-    download in the background at startup (the smaller face model first) but nothing loads beside her
-    voice on a small GPU: each picture lets her voice go, loads its model, draws, and frees the GPU.
+    The picture model: FaceModel (RealVisXL + IP-Adapter Face), image-guided from her portrait, for
+    every picture. It downloads in the background at startup, but nothing loads beside her voice on
+    a small GPU: each picture lets her voice go, loads the model, draws, and frees the GPU.
     """
 
     def __init__(self, enabled, token="", refiner="", steps=28):
@@ -691,6 +576,8 @@ class ImageEngine:
         self.error = ""
         self.models = {}
         self.whole_on_gpu = False
+        #: Where finished pictures are kept, with their prompts (save_picture); "" keeps none.
+        self.save_dir = ""
         self.last_model = ""
         #: How long the drawing itself takes here, learned from each picture (a first guess for a T4).
         self.draw_seconds = 60.0 + 4.0 * steps
@@ -710,14 +597,10 @@ class ImageEngine:
             subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-U", "diffusers>=0.38", "transformers>=5.3", "accelerate", "peft", "safetensors", "bitsandbytes"], check=True)
             import torch
             vram = torch.cuda.get_device_properties(0).total_memory / 1e9
-            self.whole_on_gpu = vram >= IMAGE_FULL_VRAM_GB
-            self.models = {
-                "face": FaceModel(self.token, self.steps, keep=vram >= IMAGE_KEEP_VRAM_GB),
-                "moss": MossModel(self.token, self.steps, keep=self.whole_on_gpu),
-            }
-            log("pictures", f"GPU {vram:.0f} GB: normal = {SDXL_MODEL_NAME} ({'kept loaded' if self.models['face'].keep else 'loaded per picture'}), "
-                f"spicy = {IMAGE_MODEL_NAME} ({'full precision, kept loaded' if self.whole_on_gpu else '4-bit, loaded per picture'})")
-            for key, size in (("face", "~8 GB"), ("moss", "~28 GB")):
+            self.whole_on_gpu = vram >= IMAGE_KEEP_VRAM_GB
+            self.models = {"face": FaceModel(self.token, self.steps, keep=self.whole_on_gpu)}
+            log("pictures", f"GPU {vram:.0f} GB: {SDXL_MODEL_NAME} ({'kept loaded' if self.whole_on_gpu else 'loaded per picture'})")
+            for key, size in (("face", "~8 GB"),):
                 model = self.models[key]
                 started = time.time()
                 log("pictures", f"downloading {model.name} ({size})...")
@@ -727,12 +610,8 @@ class ImageEngine:
                     self.ready.set()
                 except Exception as error:  # noqa: BLE001 - the other model can still serve
                     log("pictures", f"{model.name} unavailable: {type(error).__name__}: {str(error)[:200]}")
-            if self.whole_on_gpu and self.models["moss"].downloaded:
-                log("pictures", f"loading {IMAGE_MODEL_NAME} onto the GPU...")
-                self.models["moss"].load()
-                log("pictures", f"{IMAGE_MODEL_NAME} loaded · {gpu_memory()}")
             if not self.ready.is_set():
-                raise RuntimeError("neither picture model could be downloaded")
+                raise RuntimeError("the picture model couldn't be downloaded")
             log("pictures", "ready")
         except Exception as error:  # noqa: BLE001 - reported in /v1/health and to the app
             self.error = f"{type(error).__name__}: {str(error)[:240]}"
@@ -766,9 +645,7 @@ class ImageEngine:
             log("picture", f"planned in {time.time() - started_refine:.0f} s ({'helper' if refined else 'from their words'}): "
                 f"{plan['shot']} · {'her, face showing (her real photo, ' + (request['expression'] or 'neutral') + ')' if plan['face'] else 'her, no face' if plan['her'] else 'not her'} · {len(prompt)} chars")
         width, height = picture_size(request, kind)
-        # Her face showing: the model that takes her real photo goes first, whatever the content.
-        preferred = ["face", "moss"] if kind == "face" else picture_order(is_spicy(asked, prompt))
-        order = [key for key in preferred if self.models.get(key) and self.models[key].downloaded]
+        order = [key for key in ("face",) if self.models.get(key) and self.models[key].downloaded]
         if not order:
             raise RuntimeError("no picture model is downloaded yet; try again in a few minutes")
         report("waiting")
@@ -794,6 +671,12 @@ class ImageEngine:
                     image.save(buffer, "PNG")
                     seconds = time.time() - drawing
                     log("picture", f"done with {model.name} in {seconds:.0f} s ({buffer.tell() // 1024} KB)")
+                    kept = save_picture(self.save_dir, buffer.getvalue(), {
+                        "asked": asked, "prompt": prompt, "negative_prompt": request["negative_prompt"], "model": model.name,
+                        "seed": request["seed"], "expression": request["expression"], "kind": kind, "at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    })
+                    if kept:
+                        log("picture", f"kept as pictures/{kept}.png (+ .json with the prompt)")
                     self.last_model = model.name
                     # What a picture really takes here, so the next estimate is closer.
                     self.draw_seconds = 0.6 * self.draw_seconds + 0.4 * (time.time() - started)
@@ -801,7 +684,7 @@ class ImageEngine:
                         "image": base64.b64encode(buffer.getvalue()).decode(), "mime": "image/png", "model": model.name,
                         "seed": request["seed"], "ms": int((time.time() - started) * 1000), **({"refined": prompt} if refined else {}),
                     }
-                except Exception as error:  # noqa: BLE001 - the other model gets a go
+                except Exception as error:  # noqa: BLE001 - reported to the app
                     reason = f"{type(error).__name__}: {str(error)[:200]}"
                     failures.append(f"{model.name}: {reason}")
                     nxt = self.models[order[position + 1]].name if position + 1 < len(order) else ""
@@ -1007,12 +890,15 @@ class Login(BaseHTTPRequestHandler):
             return self.picture_status(job.group(1))
         if path == "/v1/images":
             return self.picture(body)
-        if path == "/api/chat" and GPU.busy():
-            log("chat", "turned away while a picture draws (the app's next voice answers)")
-            # Drawing holds the GPU for minutes: say so at once, so the app's next voice answers
-            # instead of the conversation stalling until the picture is done.
-            return self.reply_json(503, {"error": "busy drawing a picture"}, {"Retry-After": "60"})
         body = prepare_body(path, body, self.embed_on_cpu, self.voice_partial)
+        if path == "/api/chat" and streams(path, body):
+            if GPU.busy():
+                log("chat", "waiting for a picture to finish (heartbeat keeps the tunnel open)")
+            # Waits for the GPU inside, after the answer headers, so the tunnel never times out.
+            return self.relay_stream(path, body, GPU.chat)
+        if path == "/api/chat" and GPU.busy():
+            log("chat", "unstreamed chat turned away while a picture draws")
+            return self.reply_json(503, {"error": "busy drawing a picture"}, {"Retry-After": "60"})
         guard = GPU.chat() if path in ("/api/chat", "/api/embed") else contextlib.nullcontext()
         with guard:
             self.relay(path, body)
@@ -1061,7 +947,7 @@ class Login(BaseHTTPRequestHandler):
             connection.close()
             free_memory()
 
-    def relay_stream(self, path, body):
+    def relay_stream(self, path, body, turn=contextlib.nullcontext):
         """
         A streamed chat: the app gets its answer headers at once and a blank line every HEARTBEAT_S
         while nothing else is coming (her voice loading, a long prompt being read), so the tunnel
@@ -1078,14 +964,15 @@ class Login(BaseHTTPRequestHandler):
             target = urlsplit(self.upstream)
             connection = http.client.HTTPConnection(target.hostname, target.port, timeout=900)
             try:
-                connection.request(self.command, path, body, {"Content-Type": "application/json"})
-                response = connection.getresponse()
-                events.put(("status", response.status))
-                while True:
-                    chunk = response.read1(8192)
-                    if not chunk:
-                        break
-                    events.put(("chunk", chunk))
+                with turn():
+                    connection.request(self.command, path, body, {"Content-Type": "application/json"})
+                    response = connection.getresponse()
+                    events.put(("status", response.status))
+                    while True:
+                        chunk = response.read1(8192)
+                        if not chunk:
+                            break
+                        events.put(("chunk", chunk))
             except OSError as error:
                 events.put(("failed", str(error)))
             finally:
@@ -1161,6 +1048,32 @@ def post(path, payload, timeout=900):
     request = urllib.request.Request(f"{OLLAMA}{path}", json.dumps(payload).encode(), {"Content-Type": "application/json"})
     with urllib.request.urlopen(request, timeout=timeout) as response:
         return json.loads(response.read())
+
+
+def model_can_see(name):
+    """True when Ollama loaded `name` with its vision projector (capabilities include "vision")."""
+    try:
+        return "vision" in (post("/api/show", {"model": name}, timeout=60).get("capabilities") or [])
+    except (OSError, ValueError):
+        return False
+
+
+def save_picture(folder, png, record):
+    """Keeps a finished picture on the server: <time>-<seed>.png and a .json beside it with the
+    prompt as asked, the prompt drawn, the model and the seed. Never stops a picture if it fails."""
+    if not folder:
+        return ""
+    try:
+        os.makedirs(folder, exist_ok=True)
+        name = f"{time.strftime('%Y%m%d-%H%M%S')}-{record.get('seed', 0)}"
+        with open(os.path.join(folder, f"{name}.png"), "wb") as handle:
+            handle.write(png)
+        with open(os.path.join(folder, f"{name}.json"), "w", encoding="utf-8") as handle:
+            json.dump(record, handle, ensure_ascii=False, indent=2)
+        return name
+    except OSError as error:
+        log("picture", f"couldn't keep the picture on the server: {error}")
+        return ""
 
 
 def saved_token(state_dir):
@@ -1419,6 +1332,7 @@ def main():
     helper = use(args.fallback_model)
     # The helper (an Ollama library model) refines picture prompts; a .gguf or hf: helper works too once built.
     images = ImageEngine(args.images, hf_token, refiner="freya-helper" if helper else "", steps=max(4, min(50, args.image_steps)))
+    images.save_dir = os.path.join(args.state_dir, "pictures")
     if args.images:
         # The image model (~58 GB) downloads and loads while the text model loads.
         threading.Thread(target=images.prepare, daemon=True).start()
@@ -1449,7 +1363,20 @@ def main():
         pull_in_background(helper, "Helper model (fallback, eyes, picture prompts)", after=build, token=hf_token)
     if use(args.vision_model):
         models["vision"] = use(args.vision_model)
-        pull_in_background(models["vision"], "Vision model")
+
+        def check_eyes(source):
+            # Pulled, but can it see? (A Hugging Face GGUF without its projector can't.)
+            if model_can_see(models["vision"]):
+                log("vision", f"{models['vision']} reads pictures")
+                return
+            log("vision", f"{models['vision']} loaded without its vision projector, so it can't read pictures; switching to {VISION_FALLBACK}")
+            if subprocess.run(["ollama", "pull", VISION_FALLBACK], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0 and model_can_see(VISION_FALLBACK):
+                models["vision"] = VISION_FALLBACK
+                log("vision", f"{VISION_FALLBACK} reads pictures")
+            else:
+                models.pop("vision", None)
+                log("vision", "no model here can read pictures; the app's next option (Gemini) will")
+        pull_in_background(models["vision"], "Vision model", after=check_eyes)
     embed = use(args.embed_model)
     if embed:
         models["embed"] = embed

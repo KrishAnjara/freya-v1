@@ -11,7 +11,11 @@
  * calls. The rules that keep turns private live here, so they are tested in one place:
  *   - `cloud: false` (intimate turns, or cloudFallback off) keeps every cloud tier out;
  *   - `privacy: true` (Local-only) keeps only models on this machine;
- *   - `fallbackEnabled: false` means the first tier only.
+ *   - `fallbackEnabled: false` means the first tier only;
+ *   - `off` (freya.config.json's provider switches) leaves those providers out entirely.
+ *
+ * lib/llm walks the plan, and leaves her own server for the laptop or the cloud only when the
+ * server (and its fallback model) are genuinely down: see provider-health isDown.
  */
 
 export type ProviderName = "groq" | "gemini" | "ollama" | "server" | "grok";
@@ -40,7 +44,21 @@ export type ChainOptions = {
   /** Local-only mode: models on this machine only. */
   privacy?: boolean;
   ollamaModel?: string;
+  /** Providers switched off in freya.config.json: "server", "serverFallback", "laptop", "grok", "gemini", "groq". */
+  off?: readonly string[];
 };
+
+/** The provider switches, as freya.config.json names them. */
+export const PROVIDER_SWITCHES = ["server", "serverFallback", "laptop", "grok", "gemini", "groq"] as const;
+
+/** A tier on her own remote server (the Colab one): its main model, its fallback, or an OpenAI-style server. */
+export const onServer = (tier: Tier) => tier.own && !tier.local;
+
+/** Which switch a tier answers to. */
+export function switchOf(tier: Tier): (typeof PROVIDER_SWITCHES)[number] {
+  if (tier.kind === "ollama") return tier.label === "server-fallback" ? "serverFallback" : tier.local ? "laptop" : "server";
+  return tier.kind === "server" ? "server" : tier.kind;
+}
 
 type Env = Record<string, string | undefined>;
 
@@ -120,6 +138,16 @@ export function resolvePair(options: ChainOptions, env: Env): { primary: Provide
  * (or, in Local-only mode with a remote voice, the laptop if it is set up).
  */
 export function planVoiceChain(options: ChainOptions = {}, env: Env = process.env, hasGrok = Boolean(env.XAI_API_KEY?.trim())): Tier[] {
+  const tiers = planAll(options, env, hasGrok);
+  if (!options.off?.length) return tiers;
+  const on = tiers.filter((tier) => !options.off!.includes(switchOf(tier)));
+  if (!on.length) {
+    throw new ChainConfigError(`Every voice that could answer is switched off in freya.config.json (${[...new Set(tiers.map(switchOf))].join(", ")}). Turn one on, e.g. \`freya on server\`.`);
+  }
+  return on;
+}
+
+function planAll(options: ChainOptions, env: Env, hasGrok: boolean): Tier[] {
   const { primary: primaryName } = resolvePair(options, env);
   const configured = (options.provider || env.AI_PROVIDER || "groq").toLowerCase();
   const primary: Tier = primaryName === "ollama" ? primaryOllama(env, options.ollamaModel)

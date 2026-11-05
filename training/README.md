@@ -39,6 +39,22 @@ To hear the result, run it on Colab rather than your laptop:
 
 Then run `npm run bakeoff` and read the sheet before you look at the key. Keep it only if it wins.
 
+## Her voice through Puter (the Puter server)
+
+`training/freya_puter_server.ipynb` (built by `node scripts/build-puter-notebook.mjs` from
+`serve_puter.py`, `puter_bridge.mjs` and `serve_remote.py`) is a second Colab server, separate from
+the GPU one. Her voice goes through Puter.js: Qwen3.8 27B Uncensored, then uncensored fallbacks, so
+it needs no GPU and she keeps talking while a picture draws. The GPU draws: Qwen-Image 2.1
+uncensored, then SDXL redraws her face from her real photo. A small model on the CPU writes the
+picture prompts (rules when it's off). Each provider is a switch in the notebook's form.
+
+1. Add your Puter auth token as the Colab secret `PUTER_AUTH_TOKEN`.
+2. Upload the notebook, pick an L4 or A100 runtime (pictures), and run its cell.
+3. Run the line it prints on your laptop (`start.bat --remote ... --key ... --ctx 16384`).
+
+Finished pictures are kept on the server with a `.json` of their prompt (`pictures/` in the state
+folder; on Drive with "Keep on Google Drive"). Both servers do this.
+
 ## Your own conversations
 
 Put `.jsonl` files in `training/data/` (git-ignored, never committed). One conversation per line:

@@ -89,7 +89,7 @@ test("walks the chain until someone answers, and remembers who was down", async 
     const body = JSON.parse(String(init.body));
     seen.push(`${new URL(String(url)).host}:${body.model}`);
     if (String(url).includes("trycloudflare") && body.model === "freya") return new Response("tunnel gone", { status: 530 });
-    if (String(url).includes("trycloudflare")) return new Response(JSON.stringify({ error: "model requires more system memory" }), { status: 500 });
+    if (String(url).includes("trycloudflare")) return new Response(JSON.stringify({ error: "not found" }), { status: 404 });
     return new Response(ollamaLine("hey from the laptop") + ollamaLine("", true), { status: 200 });
   };
   const outcome = { truncated: false, parts: 1 };
@@ -156,4 +156,24 @@ test("with externalFiles off, a cloud tier gets the note, never the file", async
   await generateReply("s", [{ role: "user", content: "what's this", inline: [{ mime: "image/jpeg", data: "/9j/4AAQ" }] }], undefined, { cloudSeesFiles: false });
   assert.doesNotMatch(JSON.stringify(cloudBody), /9j\/4AAQ/);
   assert.match(cloudBody.messages.at(-1).content, /could not be passed to you/);
+});
+
+test("her server up but failing (busy, out of memory) is reported, never handed to the laptop or the cloud", async () => {
+  chainEnv();
+  const seen = [];
+  globalThis.fetch = async (url, init) => {
+    const body = JSON.parse(String(init.body));
+    seen.push(`${new URL(String(url)).host}:${body.model}`);
+    if (String(url).includes("trycloudflare")) return new Response(JSON.stringify({ error: "model requires more system memory" }), { status: 500 });
+    return new Response(ollamaLine("the laptop") + ollamaLine("", true), { status: 200 });
+  };
+  await assert.rejects(async () => { for await (const delta of streamReply("system", [{ role: "user", content: "hi" }])) void delta; }, /500|memory/);
+  assert.deepEqual(seen, ["abc.trycloudflare.com:freya", "abc.trycloudflare.com:freya-small"], "its own fallback model tried, nothing past the server");
+});
+
+test("every provider has its own switch in freya.config.json", () => {
+  const env = { ...COLAB, FREYA_FALLBACK_MODEL: "freya-small", LOCAL_OLLAMA_URL: "http://127.0.0.1:11434", AI_FALLBACK_PROVIDER: "grok,gemini,groq" };
+  assert.deepEqual(labels(planVoiceChain({ off: ["serverFallback", "grok"] }, env, true)), ["ollama", "laptop", "gemini", "groq"]);
+  assert.deepEqual(labels(planVoiceChain({ off: ["server", "laptop"] }, env, true)), ["server-fallback", "grok", "gemini", "groq"]);
+  assert.throws(() => planVoiceChain({ off: ["server", "serverFallback", "laptop", "grok", "gemini", "groq"] }, env, true), /switched off/);
 });

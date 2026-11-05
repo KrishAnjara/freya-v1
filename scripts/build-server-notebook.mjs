@@ -14,10 +14,10 @@ const settings = `#@title Start FREYA's server
 #@markdown **Her voice.** Empty = SexyGPT v3 Thinking (Qwen3.8 27B roleplay fine-tune, 16.8 GB: whole on an L4/A100, partly on the CPU on a T4). Or e.g. \`hf.co/DavidAU/Dark-Forest-V1-Ultra-Quality-20b-GGUF:Q3_K_L\` (the old default, fits a T4), or your fine-tune: \`hf:YOU/REPO/file.gguf\`.
 MODEL = ""  #@param {type:"string"}
 #@markdown **Helper model**: her fallback voice, her eyes for images and the picture prompt maker ("none" to skip).
-FALLBACK_MODEL = "huihui_ai/qwen3.5-abliterated:4B"  #@param {type:"string"}
+FALLBACK_MODEL = "hf.co/mradermacher/gemma-3-4b-it-heretic-uncensored-abliterated-Extreme-GGUF:Q4_K_M"  #@param {type:"string"}
 #@markdown **Memory by meaning**: a small embedding model ("none" to skip).
 EMBED_MODEL = "nomic-embed-text"  #@param {type:"string"}
-#@markdown **Pictures**: normal ones with RealVisXL + IP-Adapter Face (takes her face from her portrait), spicy ones with MOSS-Image + NSFW LoRA; if one fails the other tries. ~36 GB download in the background. On a T4 or L4 her voice pauses while a picture draws (a few minutes each).
+#@markdown **Pictures**: RealVisXL + IP-Adapter Face (takes her face from her portrait). ~8 GB download in the background. On a T4 or L4 her voice pauses while a picture draws (a few minutes each).
 IMAGES = True  #@param {type:"boolean"}
 IMAGE_STEPS = 28  #@param {type:"slider", min:8, max:50, step:1}
 #@markdown **Key**: empty = the key saved from the last run (the same one every time, so your laptop line only needs the new address). Or type one.

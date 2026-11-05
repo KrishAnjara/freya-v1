@@ -12,6 +12,8 @@
 const cooldowns = new Map<string, number>();
 /** Why each upstream last failed, so "cooling down" can say what it is cooling down from. */
 const reasons = new Map<string, string>();
+/** Upstreams whose last failure meant they were gone (see isDown), not just unhappy with a request. */
+const gone = new Set<string>();
 
 /** Cooldown after an upstream rejects for load (429) when it gives no Retry-After. */
 const RATE_LIMIT_COOLDOWN_MS = 20_000;
@@ -46,6 +48,7 @@ export function markFailure(key: string, status?: number, retryAfterSeconds?: nu
  */
 export function recordFailure(key: string, error: unknown, now = Date.now()) {
   reasons.set(key, describeFailure(error));
+  if (isDown(error)) gone.add(key); else gone.delete(key);
   if (error instanceof ProviderHttpError) markFailure(key, error.auth ? 401 : error.status, error.retryAfterSeconds, now);
   else markFailure(key, undefined, undefined, now);
 }
@@ -69,12 +72,41 @@ export function healthOf(key: string, now = Date.now()): { coolingForSeconds: nu
 export function markSuccess(key: string) {
   cooldowns.delete(key);
   reasons.delete(key);
+  gone.delete(key);
+}
+
+/** Thrown at once while an upstream is in cooldown; it is "down" if what started the cooldown was. */
+export class CoolingDownError extends Error {
+  constructor(readonly key: string) {
+    super(`${key} is ${coolingDownMessage(key)}.`);
+  }
+}
+
+/** HTTP answers that mean nobody is there: the tunnel or the server behind it is gone. */
+const GONE_STATUS = new Set([404, 502, 521, 522, 523, 530]);
+const GONE_CODES = /ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ECONNRESET|EHOSTUNREACH|ENETUNREACH|UND_ERR_CONNECT_TIMEOUT|UND_ERR_SOCKET/;
+
+/**
+ * Is the server genuinely down, rather than up and failing this one request? Down: a dead tunnel
+ * (404, 502, 52x, 530), a refused or reset connection, no answer at all in time. Not down: busy
+ * (503, 524), a model error, out of memory, a refused key. Only "down" lets the voice chain leave
+ * her own server for the laptop or the cloud.
+ */
+export function isDown(error: unknown): boolean {
+  if (error instanceof CoolingDownError) return gone.has(error.key);
+  if (error instanceof ProviderHttpError) return GONE_STATUS.has(error.status);
+  if (!(error instanceof Error)) return false;
+  if (error.name === "TimeoutError") return true;
+  const cause = (error as { cause?: { code?: unknown; message?: unknown } }).cause;
+  const text = `${String(cause?.code ?? "")} ${String(cause?.message ?? "")} ${error.message}`;
+  return GONE_CODES.test(text) || (error instanceof TypeError && /fetch failed|network/i.test(error.message));
 }
 
 /** For deterministic tests. */
 export function resetProviderHealthForTests() {
   cooldowns.clear();
   reasons.clear();
+  gone.clear();
 }
 
 /** Messages that mean the key itself was refused, whatever HTTP status carried them. */

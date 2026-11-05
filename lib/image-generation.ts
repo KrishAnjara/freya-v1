@@ -1,10 +1,10 @@
 /**
  * Pictures in the chat, from the first of these that can make one:
- *   1. her own image server: the Colab gateway's /v1/images (MOSS-Image with an NSFW uncensored
- *      LoRA; see training/serve_remote.py), at FREYA_IMAGE_URL or, by default, the same address as
- *      her remote voice model. A picture of her carries her expression (asked for, or her mood's:
- *      lib/freya-face) and her portrait; the server describes her look, since that model draws from
- *      words. A helper model there writes the full prompt first. Pictures run as jobs, polled.
+ *   1. her own image server: the Colab gateway's /v1/images (training/serve_puter.py: Qwen-Image
+ *      draws, SDXL puts her face right; or training/serve_remote.py: RealVisXL + IP-Adapter Face), at
+ *      FREYA_IMAGE_URL or, by default, the same address as her remote voice model. A picture of her
+ *      carries her expression (asked for, or her mood's: lib/freya-face) and her portrait photo. A
+ *      prompt maker there writes the full prompt first. Pictures run as jobs, polled.
  *   2. Gemini's image models (generateContent with IMAGE in responseModalities). On a free-tier
  *      key they often have no quota (429); that is reported as the reason, never hidden.
  *   3. an SVG drawing by a text model, labelled as such by the browser.
@@ -49,6 +49,15 @@ export type ImageRequest = {
 };
 
 const SEXUAL = /\b(nude|naked|nsfw|porn\w*|sex\w*|explicit|lingerie|topless|genitals?|erotic)\b/i;
+
+/**
+ * What every picture avoids: the usual photo faults, and the ones that give a generated picture of
+ * her away (a second copy of her face, extra people nobody asked for, a plastic look).
+ */
+export const NEGATIVE_PROMPT = "duplicate face, two faces, cloned face, multiple heads, extra people, twins, deformed face, asymmetric eyes, cross-eyed, "
+  + "extra limbs, extra fingers, missing fingers, fused fingers, bad hands, bad anatomy, distorted body, "
+  + "blurry, out of focus, low quality, jpeg artifacts, oversaturated, plastic skin, airbrushed, doll, cartoon, illustration, 3d render, cgi, "
+  + "text, caption, watermark, logo, signature, frame, border";
 
 /** Requests no provider is asked to draw. */
 export function imageRequestBlocked(prompt: string) {
@@ -112,7 +121,7 @@ async function ownImage(request: ImageRequest, signal?: AbortSignal): Promise<Im
       body: JSON.stringify({
         prompt: promptText(request),
         ...(reference && expression ? { reference, expression } : {}),
-        negative_prompt: request.style ? IMAGE_STYLES[request.style].negative : "text, watermark, deformed, blurry",
+        negative_prompt: request.style ? `${IMAGE_STYLES[request.style].negative}, ${NEGATIVE_PROMPT}` : NEGATIVE_PROMPT,
         // How far from the last picture: a variation stays close, a restyle needs room to change.
         ...(edit ? { image: request.previous!.data, instruction: editInstruction(request), strength: request.variation ? (request.style ? 0.7 : 0.45) : 0.65 } : {}),
       }),

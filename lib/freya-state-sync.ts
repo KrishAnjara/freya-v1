@@ -47,11 +47,16 @@ export async function pushState(client: SupabaseClient, userId: string, state: S
   return !error;
 }
 
-/** The newer of two copies of each part: the cloud's only where it was saved after this browser's. */
+/**
+ * Which copy of each part to keep. More history wins first: a copy that has been through more
+ * messages is the real one, and a fresh, never-used copy (a new browser, a new sign-in, the first
+ * load after a restart) never replaces it, however new its timestamp. Same history: the newer.
+ * That fresh copy winning is what sent her back to "stranger" on every new login.
+ */
 export function newerState(local: SharedState, remote: SharedState): Partial<SharedState> {
   const out: Partial<SharedState> = {};
-  if (remote.bond && (!local.bond || remote.bond.updatedAt > local.bond.updatedAt)) out.bond = remote.bond;
-  if (remote.mood && (!local.mood || remote.mood.lastUserAt > local.mood.lastUserAt)) out.mood = remote.mood;
+  if (remote.bond && (!local.bond || remote.bond.messages > local.bond.messages || (remote.bond.messages === local.bond.messages && remote.bond.updatedAt > local.bond.updatedAt))) out.bond = remote.bond;
+  if (remote.mood && (!local.mood || remote.mood.talked > local.mood.talked || (remote.mood.talked === local.mood.talked && remote.mood.lastUserAt > local.mood.lastUserAt))) out.mood = remote.mood;
   if (remote.userMood && (!local.userMood || remote.userMood.since > local.userMood.since)) out.userMood = remote.userMood;
   return out;
 }

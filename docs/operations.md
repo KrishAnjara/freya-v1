@@ -71,6 +71,12 @@ it to Auto, Always or Off in Settings.
    To keep her mood, her read on you and your relationship with your account (instead of only in
    one browser), also run `supabase/freya-state.sql`. Until it's run, the app says so once in the
    browser console and keeps that state in the browser.
+   The chat lives in Supabase only, never in the browser: run `supabase/freya-messages.sql` and
+   `supabase/freya-deleted-messages.sql`. The second adds `freya_deleted_messages` (messages
+   deleted "for me", and everything from "clear chat": gone from every device, still read by her)
+   and the private `freya-files` storage bucket, where pictures (full quality) and files go so they
+   show on any device. "Delete for everyone" removes a message outright. Until the tables exist the
+   chat falls back to this browser, so nothing is lost.
 3. Set `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_ANON_KEY` from the project API
    settings. Never use the service-role key; the server uses the anon key with the caller's
    verified bearer token.
@@ -79,7 +85,9 @@ it to Auto, Always or Off in Settings.
 5. Two-account isolation test: in two private browser profiles with disposable accounts A and B,
    verify A's memories and personality revisions are absent for B.
 
-Without Supabase, memories and the character dossier stay in the browser.
+There is no guest mode: without Supabase set up, the app shows a notice and nothing else. The
+sign-in page appears only on a browser that isn't signed in (app/components/AuthGate.tsx); a
+browser that FREYA moved away from keeps its sign-in and offers "Use here".
 
 ## Python orchestration service (retired)
 
