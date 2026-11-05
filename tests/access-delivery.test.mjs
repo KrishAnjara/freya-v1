@@ -68,7 +68,9 @@ test("ticks: sent, delivered, seen; and editing locks once she's seen it", () =>
     { role: "user", failed: true },
   ];
   assert.deepEqual(thread.map((message, index) => deliveryOf(message, index, thread)), ["seen", "seen", "sent", "delivered", "failed"].map((value, index) => index === 1 ? deliveryOf(thread[1], 1, thread) : value));
-  assert.equal(canEdit(thread[0], 0, thread), false, "seen: locked");
+  assert.equal(canEdit(thread[0], 0, thread), true, "even seen, their own message can be corrected (she just doesn't answer the edit)");
+  assert.equal(canEdit(thread[1], 1, thread), false, "never hers");
+  assert.equal(canEdit({ role: "user", deleted: true }, 0, []), false, "nor one deleted for everyone");
   assert.equal(canEdit(thread[2], 2, thread), true, "not yet seen: can still be fixed");
   assert.equal(canEdit(thread[3], 3, thread), true);
   const old = [{ role: "user" }, { role: "assistant" }];

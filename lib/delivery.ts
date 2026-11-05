@@ -1,8 +1,8 @@
 /**
  * WhatsApp-style ticks on their messages: ✓ sent, ✓✓ delivered, ✓✓ blue once she's seen it, which
- * is the moment her typing dots appear (app/page runReply sets seenAt there). Editing locks a little
- * earlier, when she opens the message to start reading (openedAt): before that, a message waiting
- * for her can still be corrected, and she answers the corrected version. Pure.
+ * is the moment her typing dots appear (app/page runReply sets seenAt there). Any of their messages
+ * can be edited at any time: she reads the corrected version from then on, but never answers an
+ * edit. Pure.
  */
 export type Delivery = "failed" | "sent" | "delivered" | "seen";
 
