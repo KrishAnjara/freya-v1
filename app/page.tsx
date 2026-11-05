@@ -13,14 +13,9 @@ import {
 } from "react";
 import type { User } from "@supabase/supabase-js";
 import { getSupabaseBrowserClient } from "@/lib/supabase-browser";
-import {
-  checkSession,
-  claimSession,
-  forgetLocalSession,
-  installApiAuth,
-  setApiToken,
-  type AccessCode,
-} from "@/lib/api-auth";
+import TabGate from "@/app/components/TabGate";
+import { answerRequest, askForSession, decide, deviceLabel, heartbeat, HEARTBEAT_MS, pendingRequest, readSession, takeSession, withdrawRequest } from "@/lib/device-session";
+import { adoptSessionId, forgetLocalSession, installApiAuth, localSessionId, newSessionId, setApiToken, type AccessCode } from "@/lib/api-auth";
 import { stopSpeaking } from "@/lib/mouth-drive";
 import { cancelSpeech, primeVoices, speak } from "@/lib/speech";
 import { reportError } from "@/lib/report-error";
@@ -909,7 +904,16 @@ function conversationToMarkdown(conversation: Conversation) {
   return lines.join("\n");
 }
 
+/** One tab at a time (app/components/TabGate); the app itself loads only in the tab that has her. */
 export default function Home() {
+  return (
+    <TabGate>
+      <FreyaApp />
+    </TabGate>
+  );
+}
+
+function FreyaApp() {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeId, setActiveId] = useState("");
   const [conversationFilter, setConversationFilter] = useState("");
@@ -1082,6 +1086,10 @@ export default function Home() {
   const [authEmail, setAuthEmail] = useState("");
   /** Why the site is locked (lib/access): not signed in, not the owner, or signed in elsewhere. */
   const [accessIssue, setAccessIssue] = useState<AccessCode | "">("");
+  const accessIssueRef = useRef<AccessCode | "">("");
+  useEffect(() => { accessIssueRef.current = accessIssue; }, [accessIssue]);
+  /** The other-device request already put to them, so it's asked once. */
+  const askedRequestRef = useRef("");
   const [authPassword, setAuthPassword] = useState("");
   const [authBusy, setAuthBusy] = useState(false);
 
@@ -1234,6 +1242,8 @@ export default function Home() {
   useEffect(() => {
     const onAccess = (event: Event) => {
       const code = (event as CustomEvent<AccessCode>).detail;
+      // Waiting for the other device to allow this one, every request is refused: that's expected.
+      if (accessIssueRef.current === "awaiting-approval") return;
       if (code === "session-replaced" && user) void signOutReplaced(user.id);
       else setAccessIssue(code);
     };
@@ -1241,25 +1251,59 @@ export default function Home() {
     return () => window.removeEventListener("freya:access", onAccess);
     // signOutReplaced only reads refs and setters, so the listener follows the user alone.
   }, [user]);
-  // One browser per account: checked every minute and whenever the tab comes back.
+  // One device per account (lib/device-session), checked every few seconds while the tab is open:
+  // the device in use keeps a heartbeat and answers requests from other devices; a device that asked
+  // waits for the answer.
   useEffect(() => {
     if (!supabase || !user || switches.oneSession === false) return;
-    const check = () => {
-      void checkSession(supabase, user.id)
-        .then((state) => {
-          if (state === "replaced") void signOutReplaced(user.id);
-        })
-        .catch(() => undefined);
+    let lastBeat = 0;
+    let busy = false;
+    const check = async () => {
+      if (busy || document.hidden) return;
+      busy = true;
+      try {
+        const localId = localSessionId(user.id);
+        const row = await readSession(supabase, user.id);
+        const state = decide(row, localId);
+        if (state === "current") {
+          if (accessIssueRef.current === "awaiting-approval") { setAccessIssue(""); notify("You're in: your other device let this one take over."); }
+          if (Date.now() - lastBeat > HEARTBEAT_MS) { lastBeat = Date.now(); void heartbeat(supabase, user.id, localId); }
+          const request = pendingRequest(row, localId);
+          if (request && askedRequestRef.current !== request.id) {
+            askedRequestRef.current = request.id;
+            const allow = await askFor({
+              title: "Use FREYA on another device?",
+              body: `Someone signed in to your account on ${request.label} and wants to use FREYA there. If you allow it, she moves there and this device is signed out.`,
+              confirmLabel: "Allow",
+              cancelLabel: "Don't allow",
+            });
+            await answerRequest(supabase, user.id, request.id, allow === true);
+            if (allow === true) await signOutReplaced(user.id);
+          }
+        } else if (state === "stale" || state === "unclaimed") {
+          // The device that had it went quiet (or nobody had it): this one carries on.
+          await takeSession(supabase, user.id, localId || newSessionId());
+          if (accessIssueRef.current === "awaiting-approval") setAccessIssue("");
+        } else if (state === "denied" || state === "expired") {
+          await withdrawRequest(supabase, user.id, localId);
+          await signOutReplaced(user.id, state === "denied" ? "switch-denied" : "switch-expired");
+        } else if (state === "replaced") {
+          await signOutReplaced(user.id);
+        }
+      } catch { /* checked again in a moment */ } finally {
+        busy = false;
+      }
     };
-    const timer = window.setInterval(check, 60_000);
-    const onVisible = () => {
-      if (!document.hidden) check();
-    };
+    void check();
+    const timer = window.setInterval(() => void check(), 4000);
+    const onVisible = () => { if (!document.hidden) void check(); };
     document.addEventListener("visibilitychange", onVisible);
     return () => {
       window.clearInterval(timer);
       document.removeEventListener("visibilitychange", onVisible);
     };
+    // signOutReplaced and askFor read refs and setters only.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user, switches.oneSession]);
   // Signed in: her state follows the account (Supabase freya_state). The newer copy wins on
   // arrival; changes are written back a few seconds after they settle.
@@ -1809,16 +1853,10 @@ export default function Home() {
         );
       setApiToken(data.session?.access_token);
       if (data.session?.user) {
-        // Still this account's browser? Signing in elsewhere signs this one out.
-        const state = await checkSession(supabase, data.session.user.id).catch(
-          () => "current" as const,
-        );
-        if (state === "replaced") {
-          await signOutReplaced(data.session.user.id);
-          return;
-        }
-        if (state === "unclaimed")
-          await claimSession(supabase, data.session.user.id);
+        // Still this account's device (lib/device-session)? Waiting for permission, refused, or
+        // taken over elsewhere, it says so; nobody else using it, it carries on.
+        const ended = await settleDevice(data.session.user.id);
+        if (ended) return;
       }
       setUser(data.session?.user ?? null);
       setCloudProfileReady(!data.session?.user);
@@ -1926,10 +1964,10 @@ export default function Home() {
         password: authPassword,
       });
       if (result.error) throw result.error;
-      // A fresh sign-in: this browser becomes the account's one session (lib/api-auth).
-      if (result.data.user) await claimSession(supabase, result.data.user.id);
-      setAccessIssue("");
-      notify("Signed in.");
+      // A fresh sign-in: this device takes the account if nobody else is using it, and asks the
+      // device that is, otherwise (lib/device-session).
+      if (result.data.user) await beginDevice(result.data.user.id);
+      else setAccessIssue("");
       setAuthPassword("");
     } catch (error) {
       notify(reportError("auth", error), "error");
@@ -1938,15 +1976,62 @@ export default function Home() {
     }
   }
 
+  /**
+   * A new sign-in on this device: take the account's session if nobody is using it (or the device
+   * that was has gone quiet); otherwise ask that device, and wait for its answer.
+   */
+  async function beginDevice(userId: string) {
+    if (!supabase) return;
+    const id = newSessionId();
+    adoptSessionId(userId, id);
+    if (switches.oneSession === false) { await takeSession(supabase, userId, id); setAccessIssue(""); return; }
+    const row = await readSession(supabase, userId).catch(() => null);
+    const state = decide(row, id);
+    if (state === "unclaimed" || state === "stale") {
+      await takeSession(supabase, userId, id);
+      setAccessIssue("");
+      notify("Signed in.");
+      return;
+    }
+    await askForSession(supabase, userId, id, deviceLabel(navigator.userAgent));
+    setAccessIssue("awaiting-approval");
+  }
+
+  /**
+   * Where this device stands on opening (or while it waits): true when it can't go on (signed out,
+   * or waiting for permission), false when it's the account's session.
+   */
+  async function settleDevice(userId: string): Promise<boolean> {
+    if (!supabase || switches.oneSession === false) return false;
+    const localId = localSessionId(userId);
+    const row = await readSession(supabase, userId).catch(() => null);
+    const state = decide(row, localId);
+    if (state === "current") { adoptSessionId(userId, localId); return false; }
+    if (state === "unclaimed" || state === "stale") {
+      const id = localId || newSessionId();
+      adoptSessionId(userId, id);
+      await takeSession(supabase, userId, id);
+      return false;
+    }
+    if (state === "waiting") { adoptSessionId(userId, localId); setAccessIssue("awaiting-approval"); return false; }
+    if (state === "denied" || state === "expired") {
+      await withdrawRequest(supabase, userId, localId).catch(() => undefined);
+      await signOutReplaced(userId, state === "denied" ? "switch-denied" : "switch-expired");
+      return true;
+    }
+    await signOutReplaced(userId);
+    return true;
+  }
+
   /** Another browser signed in to this account: this one signs out, and says why. */
-  async function signOutReplaced(userId: string) {
+  async function signOutReplaced(userId: string, why: AccessCode = "session-replaced") {
     if (!supabase) return;
     forgetLocalSession(userId);
     // Only this browser's sign-in ends; the other browser's stays valid.
     await supabase.auth.signOut({ scope: "local" }).catch(() => undefined);
     setApiToken("");
     setUser(null);
-    setAccessIssue("session-replaced");
+    setAccessIssue(why);
   }
 
   async function signOut() {
@@ -3855,14 +3940,26 @@ export default function Home() {
           ? { subject: intent.subject, ofHer: intent.ofHer, at: Date.now() }
           : offer;
     }
-    const message: Message = {
+    // Each file or picture is its own message (reply to it, react to it, delete it on its own), as
+    // on a phone; what they typed follows as one more. She answers them all together.
+    const sentAt = Date.now();
+    const fileMessages: Message[] = pendingFiles.map((file, position) => ({
       id: id(),
       role: "user",
-      content: text,
-      at: new Date().toISOString(),
-      ...(pendingFiles.length ? { attachments: pendingFiles } : {}),
-      ...(replyingToId ? { replyTo: replyingToId } : {}),
-    };
+      content: "",
+      at: new Date(sentAt + position).toISOString(),
+      attachments: [file],
+      ...(replyingToId && position === 0 ? { replyTo: replyingToId } : {}),
+    }));
+    const message: Message = text
+      ? {
+          id: id(),
+          role: "user",
+          content: text,
+          at: new Date(sentAt + fileMessages.length).toISOString(),
+          ...(replyingToId && !fileMessages.length ? { replyTo: replyingToId } : {}),
+        }
+      : fileMessages.pop()!;
     if (pictureOfferRef.current && !pictureOfferRef.current.messageId)
       pictureOfferRef.current.messageId = message.id;
     // The picture they asked for: tied to this message, and started in the background now.
@@ -3871,7 +3968,7 @@ export default function Home() {
       pictureAskRef.current = ask;
       void runPicture(ask.prompt, text, { quiet: true, askedBy: message.id, ...(ask.from ? { from: ask.from } : {}) });
     }
-    updateActiveMessages((previous) => [...previous, message]);
+    updateActiveMessages((previous) => [...previous, ...fileMessages, message]);
     feel(text);
     const asked = requestedExpression(text);
     if (asked)
@@ -4263,6 +4360,7 @@ export default function Home() {
    */
   function removeMessage(message: Message, scope: "me" | "everyone") {
     setDeletingId("");
+    if (message.role !== "user") scope = "me";
     const conversationId = activeIdRef.current;
     if (scope === "everyone") {
       const files = [...(message.attachments ?? []).map((item) => item.id), ...(message.voice ? [message.voice.id] : [])];
@@ -4338,35 +4436,15 @@ export default function Home() {
     setEditingId("");
     if (!text || text === message.content) return;
     const conversationId = activeIdRef.current;
-    const current = conversationsRef.current.find((item) => item.id === conversationId)?.messages ?? messages;
-    const index = current.findIndex((item) => item.id === message.id);
-    if (index < 0) return;
-    if (!canEdit(current[index], index, current)) {
-      notify("She's already seen it, so it can't be changed now.", "info");
-      return;
-    }
+    // Any of their messages can be corrected, and she reads the corrected version from now on, but
+    // an edit is never something she answers: no new reply, nothing she said is undone.
     patchConversation(conversationId, (items) =>
       items.map((item) =>
-        item.id === message.id
-          ? { ...item, content: text, edited: true, failed: false }
+        item.id === message.id && item.role === "user"
+          ? { ...item, content: text, edited: true }
           : item,
       ),
     );
-    // A chat named after this message follows the change.
-    setConversations((previous) =>
-      previous.map((conversation) =>
-        conversation.id === conversationId &&
-        conversation.title === deriveTitle(message.content)
-          ? { ...conversation, title: deriveTitle(text) }
-          : conversation,
-      ),
-    );
-    const active = activeJobRef.current;
-    if (active && active.conversationId === conversationId && activePostedRef.current === 0) {
-      activeChatRequest.current?.abort();
-      // After the edit has reached the saved conversation, which the next reply reads.
-      window.setTimeout(() => enqueueReply({ conversationId, targetId: active.targetId }), 120);
-    }
   }
 
   async function addFiles(list: FileList | File[] | null) {
@@ -4823,8 +4901,14 @@ export default function Home() {
     const why =
       accessIssue === "not-allowed"
         ? "This account doesn't have access to FREYA."
+        : accessIssue === "awaiting-approval"
+          ? "FREYA is in use on another device. Asking it to let you switch here… Allow it there."
+        : accessIssue === "switch-denied"
+          ? "Your other device didn't allow the switch, so FREYA stays there."
+        : accessIssue === "switch-expired"
+          ? "Your other device didn't answer. Sign in again to ask once more."
         : accessIssue === "session-replaced"
-          ? "You signed in on another browser, so this one was signed out."
+          ? "FREYA moved to your other device, so this one was signed out."
           : accessIssue === "unavailable"
             ? "Sign-in couldn't be checked just now. Try again in a moment."
             : "FREYA is private. Sign in to continue.";
@@ -6221,7 +6305,8 @@ export default function Home() {
                                   {deletingId === message.id && (
                                     <div className="delete-picker" role="group" aria-label="Delete this message">
                                       <button type="button" onClick={() => removeMessage(message, "me")}>Delete for me</button>
-                                      <button type="button" onClick={() => removeMessage(message, "everyone")}>Delete for everyone</button>
+                                      {/* Her messages can only be hidden on this side: what she said, she said. */}
+                                      {message.role === "user" && <button type="button" onClick={() => removeMessage(message, "everyone")}>Delete for everyone</button>}
                                       <button type="button" onClick={() => setDeletingId("")}>Cancel</button>
                                     </div>
                                   )}
@@ -6276,20 +6361,6 @@ export default function Home() {
                                         title="Edit"
                                       >
                                         ✎
-                                      </button>
-                                    )}
-                                  {message.role === "assistant" &&
-                                    index === messages.length - 1 &&
-                                    !message.initiative &&
-                                    !replyingHere &&
-                                    message.content.trim() && (
-                                      <button
-                                        type="button"
-                                        onClick={() => regenerateReply(message)}
-                                        aria-label={`Another take on: ${messagePreview(message, 60)}`}
-                                        title="Another take"
-                                      >
-                                        ↻
                                       </button>
                                     )}
                                   {message.role === "assistant" &&

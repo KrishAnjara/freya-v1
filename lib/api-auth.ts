@@ -10,7 +10,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 export const SESSION_HEADER = "x-freya-session";
-export type AccessCode = "sign-in" | "not-allowed" | "session-replaced" | "unavailable";
+export type AccessCode = "sign-in" | "not-allowed" | "session-replaced" | "unavailable" | "awaiting-approval" | "switch-denied" | "switch-expired";
 
 let token = "";
 let installed = false;
@@ -79,4 +79,14 @@ export async function checkSession(client: SupabaseClient, userId: string): Prom
 export function forgetLocalSession(userId: string) {
   sessionId = "";
   try { localStorage.removeItem(sessionKey(userId)); } catch { /* nothing kept */ }
+}
+
+/** This browser's session id from now on (lib/device-session decides whether it's the account's). */
+export function adoptSessionId(userId: string, id: string) {
+  try { localStorage.setItem(sessionKey(userId), id); } catch { /* still used for this page */ }
+  sessionId = id;
+}
+
+export function newSessionId() {
+  return crypto.randomUUID().replace(/-/g, "");
 }

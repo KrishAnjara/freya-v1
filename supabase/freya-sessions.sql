@@ -30,3 +30,11 @@ grant select, insert, update on public.freya_sessions to authenticated;
 
 -- Sign-ups: turn them off in Supabase too (Authentication > Sign In / Providers > "Allow new users
 -- to sign up" off), so nobody can create an account even outside the app.
+
+-- Switching devices with permission (lib/device-session): the device in use keeps a heartbeat, and
+-- a sign-in elsewhere asks it first. Safe to run again.
+alter table public.freya_sessions add column if not exists last_seen timestamptz;
+alter table public.freya_sessions add column if not exists pending_id text;
+alter table public.freya_sessions add column if not exists pending_label text;
+alter table public.freya_sessions add column if not exists pending_at timestamptz;
+alter table public.freya_sessions add column if not exists decision text check (decision is null or decision in ('denied'));

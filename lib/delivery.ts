@@ -6,7 +6,7 @@
  */
 export type Delivery = "failed" | "sent" | "delivered" | "seen";
 
-type Tracked = { role: string; failed?: boolean; delivered?: boolean; openedAt?: string; seenAt?: string; command?: string; herReaction?: string };
+type Tracked = { role: string; deleted?: boolean; failed?: boolean; delivered?: boolean; openedAt?: string; seenAt?: string; command?: string; herReaction?: string };
 
 export function deliveryOf(message: Tracked, index: number, all: Tracked[]): Delivery {
   if (message.failed) return "failed";
@@ -16,9 +16,9 @@ export function deliveryOf(message: Tracked, index: number, all: Tracked[]): Del
   return message.delivered ? "delivered" : "sent";
 }
 
-/** Editable only until she's opened it to answer. */
-export function canEdit(message: Tracked, index: number, all: Tracked[]) {
-  return message.role === "user" && !message.openedAt && deliveryOf(message, index, all) !== "seen";
+/** Any of their messages can be edited; an edit is a correction she reads, never one she answers. */
+export function canEdit(message: Tracked, _index?: number, _all?: Tracked[]) {
+  return message.role === "user" && !message.deleted;
 }
 
 /** Something a person would stop and think about before answering. */
