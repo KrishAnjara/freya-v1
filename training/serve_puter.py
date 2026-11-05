@@ -89,6 +89,29 @@ COMFY_FILES = {
 #: Turbo's own eight-step schedule (nine sigmas), as the model card and the official template use it.
 TURBO_SIGMAS = "1.0, 0.978453, 0.95418, 0.926626, 0.89508, 0.845148, 0.704534, 0.414568, 0"
 TURBO_STEPS = 8
+#: The test picture at setup may take this long (MLX loads and compiles on its first run); a real
+#: picture, this long, before its runtime is given up on for that picture.
+WARM_UP_S = 900
+PICTURE_S = 420
+#: MLX's preparation loads the official text encoder in bf16 (~17 GB) into system memory: on a
+#: runtime with less RAM than this (a standard T4 has ~13 GB) it runs Colab out of memory and takes the
+#: whole server down, so ComfyUI (an int8 text encoder) is used there instead.
+MLX_MIN_RAM_GB = 40
+
+
+def ram_gigabytes():
+    try:
+        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / 1e9
+    except (ValueError, OSError, AttributeError):
+        return 0.0
+
+
+def expendable():
+    """For the drawing processes: if memory runs out, the system stops them first, never this
+    server (which would take her voice and the tunnel down with it)."""
+    with contextlib.suppress(OSError):
+        with open("/proc/self/oom_score_adj", "w") as handle:
+            handle.write("1000")
 IMAGE_MODEL_NAME = "Qwen-Image 2.1 Turbo"
 FACE_FIX_NAME = "SDXL face (RealVisXL + IP-Adapter Face)"
 COMFY_DIR = os.environ.get("FREYA_COMFY_DIR", "/content/ComfyUI")
@@ -266,22 +289,54 @@ class PuterImages:
     def prepare(self):
         """Sets up the Turbo model (MLX, else ComfyUI) and SDXL's face pass, in the background."""
         try:
+            log("pictures", f"this runtime: {ram_gigabytes():.0f} GB RAM, {base.gpu_gigabytes():.0f} GB GPU")
             log("pictures", "installing huggingface_hub[hf_xet] for the downloads")
             subprocess.run([sys.executable, "-m", "pip", "install", "-q", "huggingface_hub[hf_xet]"], check=True)
-            if not self.prepare_mlx():
+            # Each runtime proves itself with one real picture before any request waits on it: the
+            # first MLX run loads and compiles for minutes, and a runtime that hangs or runs out of
+            # memory there must not hold up the queue.
+            if not (self.prepare_mlx() and self.warm_up("mlx")):
+                with self.lock:
+                    self.runtimes = [runtime for runtime in self.runtimes if runtime != "mlx"]
                 self.prepare_comfy()
+                if not self.warm_up("comfy"):
+                    raise RuntimeError("neither MLX nor ComfyUI could draw a test picture")
             if self.face_fix:
                 self.prepare_face()
             self.ready.set()
+            log("pictures", f"ready: about {self.draw_seconds:.0f} s a picture on {self.runtimes[0]}")
         except Exception as error:  # noqa: BLE001 - reported in /v1/health and to the app
             self.error = f"{type(error).__name__}: {str(error)[:240]}"
             log("pictures", f"unavailable: {self.error}")
+
+    def warm_up(self, runtime):
+        """One test picture at the real size: loads (and for MLX compiles) the model, and measures."""
+        request = {"seed": 1, "width": 832, "height": 1216}
+        started = time.time()
+        try:
+            with base.GPU.picture():
+                if runtime == "mlx":
+                    self.draw_mlx(request, "a red ceramic cup on a wooden table, phone photo", timeout=WARM_UP_S)
+                else:
+                    self.draw_comfy(request, "a red ceramic cup on a wooden table, phone photo", "")
+            self.draw_seconds = max(10.0, time.time() - started)
+            log("pictures", f"test picture on {runtime} in {self.draw_seconds:.0f} s")
+            return True
+        except Exception as error:  # noqa: BLE001 - the next runtime takes over
+            log("pictures", f"test picture on {runtime} failed after {time.time() - started:.0f} s: {str(error)[:200]}")
+            return False
+        finally:
+            base.free_memory()
 
     def prepare_mlx(self):
         """MFLUX in its own environment (so it never fights ComfyUI's or SDXL's packages), a GPU check,
         the 4-bit MLX file and the card's preparation. False, with the reason logged, if any step fails."""
         try:
             started = time.time()
+            ram = ram_gigabytes()
+            if ram and ram < MLX_MIN_RAM_GB:
+                raise RuntimeError(f"this runtime has {ram:.0f} GB of RAM and MLX's setup needs ~{MLX_MIN_RAM_GB} GB "
+                                   "(Runtime > Change runtime type > High-RAM, or an A100)")
             python = os.path.join(MFLUX_VENV, "bin", "python")
             if not os.path.exists(python):
                 log("pictures", f"MLX: installing MFLUX {MFLUX_VERSION} in its own environment")
@@ -304,7 +359,7 @@ class PuterImages:
                 source = hf_download([MLX_FILE], self.files_dir)[0]
                 log("pictures", f"MLX: preparing it, with the text encoder and VAE from {MLX_OFFICIAL} (~17 GB)...")
                 prepared = subprocess.run([python, "-c", MLX_PREPARE, source, self.mlx_dir, str(MLX_BITS)], capture_output=True, text=True,
-                                          env=dict(os.environ, **({"HF_TOKEN": self.token} if self.token else {})))
+                                          env=dict(os.environ, **({"HF_TOKEN": self.token} if self.token else {})), preexec_fn=expendable)
                 if prepared.returncode != 0:
                     raise RuntimeError(f"preparing the MLX model failed: {prepared.stderr.strip()[-200:]}")
             with self.lock:
@@ -337,7 +392,7 @@ class PuterImages:
             if not os.path.exists(target):
                 os.symlink(path, target)
         self.process = subprocess.Popen([sys.executable, "main.py", "--listen", "127.0.0.1", "--port", "8188", "--lowvram"], cwd=COMFY_DIR,
-                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, preexec_fn=expendable)
         for _ in range(180):
             try:
                 comfy("/system_stats", timeout=3)
@@ -398,10 +453,10 @@ class PuterImages:
                             failures.append(f"comfy: {str(backup)[:200]}")
         raise RuntimeError("; ".join(failures) or "no picture runtime is ready")
 
-    def draw_mlx(self, request, prompt):
+    def draw_mlx(self, request, prompt, timeout=PICTURE_S):
         output = os.path.join("/tmp", f"freya-{request['seed']}.png")
         command = mflux_command(self.mlx_dir, prompt, request["width"], request["height"], request["seed"], output)
-        result = subprocess.run(command, capture_output=True, text=True, timeout=900)
+        result = subprocess.run(command, capture_output=True, text=True, timeout=timeout, preexec_fn=expendable)
         if result.returncode != 0 or not os.path.exists(output):
             raise RuntimeError(f"MFLUX: {(result.stderr or result.stdout).strip()[-240:]}")
         with open(output, "rb") as handle:
@@ -410,6 +465,15 @@ class PuterImages:
         return png
 
     def draw_comfy(self, request, prompt, negative):
+        if self.process and self.process.poll() is not None:
+            log("picture", f"ComfyUI had stopped (exit {self.process.returncode}; out of memory?); starting it again")
+            self.process = subprocess.Popen([sys.executable, "main.py", "--listen", "127.0.0.1", "--port", "8188", "--lowvram"], cwd=COMFY_DIR,
+                                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, preexec_fn=expendable)
+            for _ in range(90):
+                with contextlib.suppress(OSError):
+                    comfy("/system_stats", timeout=3)
+                    break
+                time.sleep(2)
         try:
             try:
                 queued = comfy("/prompt", {"prompt": comfy_workflow(request, prompt, negative), "client_id": "freya"})
@@ -420,7 +484,8 @@ class PuterImages:
             with contextlib.suppress(OSError):
                 comfy("/free", {"unload_models": True, "free_memory": True})
 
-    def wait_for(self, prompt_id, limit_s=900):
+    def wait_for(self, prompt_id, limit_s=None):
+        limit_s = limit_s or PICTURE_S
         """Polls ComfyUI until the picture is saved; raises its own error message if it fails."""
         deadline = time.time() + limit_s
         while time.time() < deadline:
@@ -566,6 +631,9 @@ class PuterLogin(base.Login):
         body = self.rfile.read(length) if length else None
         if path == "/v1/health":
             payload = base.health_payload(self.models, self.images, self.capabilities(), self.started_at)
+            if self.images:
+                payload["images"].update({"runtime": (self.images.runtimes or ["none"])[0], "seconds_per_picture": int(self.images.draw_seconds),
+                                          "queued": self.jobs.waiting() if self.jobs else 0})
             return self.reply_json(200, {**payload, "puter": bridge_state()})
         if job:
             return self.picture_status(job.group(1))

@@ -729,6 +729,11 @@ class PictureJobs:
     def estimate(self):
         return self.REFINE_SECONDS + self.engine.draw_seconds
 
+    def waiting(self):
+        """Pictures not finished yet (queued or in progress)."""
+        with self.lock:
+            return sum(1 for job in self.jobs.values() if job["stage"] not in ("done", "error"))
+
     def status(self, job_id):
         with self.lock:
             job = self.jobs.get(job_id)

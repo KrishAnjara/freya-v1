@@ -100,7 +100,50 @@ export function imageServer(): { url: string; key?: string } | null {
 
 const IMAGE_SERVER_HEALTH = "image-server";
 
-async function ownImage(request: ImageRequest, signal?: AbortSignal): Promise<ImageResult | Failure> {
+/** The finished picture from the image server's answer. */
+function pictureResult(payload: Record<string, unknown>): ImageResult {
+  if (typeof payload?.image !== "string" || !/^[A-Za-z0-9+/]+=*$/.test(payload.image)) throw new Error("The image server returned no image.");
+  markSuccess(IMAGE_SERVER_HEALTH);
+  const mime = typeof payload.mime === "string" && /^image\/(png|jpeg|webp)$/.test(payload.mime) ? payload.mime : "image/png";
+  return {
+    kind: "generated", mime, data: payload.image, model: typeof payload.model === "string" ? payload.model : "own image server",
+    ...(Number.isFinite(payload.seed) ? { seed: payload.seed as number } : {}),
+    ...(typeof payload.refined === "string" && payload.refined.trim() ? { refined: payload.refined.trim().slice(0, 1500) } : {}),
+  };
+}
+
+/**
+ * Starts a picture on her own image server and returns its job at once, for the browser to check on
+ * (pictureStatus) however long it takes, even across a refresh. A failure to start is a Failure,
+ * so the caller can still go on to Gemini.
+ */
+export async function startPicture(request: ImageRequest, signal?: AbortSignal): Promise<{ job: string; eta?: number } | Failure> {
+  const started = await ownImage(request, signal, true);
+  return started;
+}
+
+/** How a started picture is going: still working (with an estimate), done, or failed. */
+export async function pictureStatus(job: string, signal?: AbortSignal): Promise<{ status: "working"; progress?: number; eta?: number } | ImageResult | { status: "error"; error: string; refused?: boolean }> {
+  const server = imageServer();
+  if (!server || !/^[a-f0-9]{16}$/.test(job)) return { status: "error", error: "no such picture" };
+  const headers = server.key ? { Authorization: `Bearer ${server.key}` } : undefined;
+  const response = await fetch(`${server.url}/v1/images/${job}`, { headers, cache: "no-store", signal: AbortSignal.any([AbortSignal.timeout(30_000), ...(signal ? [signal] : [])]) }).catch(() => null);
+  // The server didn't answer this time (a dropped poll, a tunnel blip): still working, as far as anyone knows.
+  if (!response) return { status: "working" };
+  if (response.status === 404) return { status: "error", error: "The image server lost the picture (it may have restarted)." };
+  if (!response.ok) return { status: "working" };
+  const payload = await response.json().catch(() => null) as Record<string, unknown> | null;
+  if (payload?.status === "done") return pictureResult(payload);
+  if (payload?.status === "error") {
+    const reason = String(payload.error || "");
+    return { status: "error", error: reason.slice(0, 200), ...(/not something I'll draw/i.test(reason) ? { refused: true } : {}) };
+  }
+  return { status: "working", ...(typeof payload?.progress === "number" ? { progress: payload.progress } : {}), ...(typeof payload?.eta_s === "number" ? { eta: payload.eta_s } : {}) };
+}
+
+async function ownImage(request: ImageRequest, signal?: AbortSignal): Promise<ImageResult | Failure>;
+async function ownImage(request: ImageRequest, signal: AbortSignal | undefined, startOnly: true): Promise<{ job: string; eta?: number } | Failure>;
+async function ownImage(request: ImageRequest, signal?: AbortSignal, startOnly = false): Promise<ImageResult | { job: string; eta?: number } | Failure> {
   const server = imageServer();
   if (!server) return { failed: "not-configured" };
   if (isCoolingDown(IMAGE_SERVER_HEALTH)) {
@@ -139,15 +182,11 @@ async function ownImage(request: ImageRequest, signal?: AbortSignal): Promise<Im
     }
     if (!response.ok) throw new ProviderHttpError(`Image server failed (${response.status}).`, response.status, undefined, providerErrorDetail(payload));
     // A picture is a background job (it takes minutes; a quick tunnel cuts requests at ~100 s).
-    if (response.status === 202 && typeof payload?.job === "string") payload = await waitForPicture(server, headers, payload.job, signal);
-    if (typeof payload?.image !== "string" || !/^[A-Za-z0-9+/]+=*$/.test(payload.image)) throw new Error("The image server returned no image.");
-    markSuccess(IMAGE_SERVER_HEALTH);
-    const mime = typeof payload.mime === "string" && /^image\/(png|jpeg|webp)$/.test(payload.mime) ? payload.mime : "image/png";
-    return {
-      kind: "generated", mime, data: payload.image, model: typeof payload.model === "string" ? payload.model : "own image server",
-      ...(Number.isFinite(payload.seed) ? { seed: payload.seed } : {}),
-      ...(typeof payload.refined === "string" && payload.refined.trim() ? { refined: payload.refined.trim().slice(0, 1500) } : {}),
-    };
+    if (response.status === 202 && typeof payload?.job === "string") {
+      if (startOnly) return { job: payload.job, ...(Number.isFinite(payload.eta_s) ? { eta: payload.eta_s } : {}) };
+      payload = await waitForPicture(server, headers, payload.job, signal);
+    }
+    return pictureResult(payload);
   } catch (error) {
     if (signal?.aborted) throw error;
     // The hard limit, checked again on what the prompt maker wrote: final, never routed elsewhere.
@@ -246,8 +285,12 @@ async function svgDrawing(request: ImageRequest, signal?: AbortSignal) {
   return null;
 }
 
-export async function makeImage(request: ImageRequest, signal?: AbortSignal): Promise<ImageResult | null> {
-  const own = await ownImage(request, signal);
+/**
+ * A picture from the first provider that can make one. `ownFailed`: her own server was already
+ * tried (startPicture) and couldn't, so it starts at Gemini.
+ */
+export async function makeImage(request: ImageRequest, signal?: AbortSignal, ownFailed?: Failure): Promise<ImageResult | null> {
+  const own = ownFailed ?? await ownImage(request, signal);
   if ("kind" in own) return own;
   if (own.failed === "blocked") return null;
   const generated = await geminiImage(request, signal);

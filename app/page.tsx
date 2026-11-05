@@ -678,6 +678,26 @@ function describeVoice(voice: RecordedAudio, transcript: string) {
   return `(voice message, ${length}) ${transcript}`;
 }
 
+/** A picture being made on her image server, remembered (no message content) so a refresh picks it up. */
+type PendingPicture = { job?: string; conversationId: string; cardId: string; quiet: boolean; askedBy?: string; fullPrompt: string; at: number };
+const PENDING_PICTURES_KEY = "freya.v1.pending-pictures";
+/** How long a picture is waited for: a queue of pictures on a small GPU can take this long. */
+const PICTURE_WAIT_MS = 60 * 60_000;
+function loadPendingPictures(): PendingPicture[] {
+  try {
+    const saved = JSON.parse(localStorage.getItem(PENDING_PICTURES_KEY) || "[]");
+    return Array.isArray(saved) ? saved.filter((item) => item && typeof item.job === "string" && Date.now() - Number(item.at) < PICTURE_WAIT_MS) : [];
+  } catch {
+    return [];
+  }
+}
+function savePendingPicture(ticket: PendingPicture) {
+  try { localStorage.setItem(PENDING_PICTURES_KEY, JSON.stringify([...loadPendingPictures().filter((item) => item.job !== ticket.job), ticket])); } catch { /* picked up only while this page stays open */ }
+}
+function forgetPendingPicture(job: string) {
+  try { localStorage.setItem(PENDING_PICTURES_KEY, JSON.stringify(loadPendingPictures().filter((item) => item.job !== job))); } catch { /* nothing kept */ }
+}
+
 const delay = (ms: number) =>
   new Promise<void>((resolve) => {
     window.setTimeout(resolve, ms);
@@ -1241,6 +1261,13 @@ function FreyaApp() {
     }, 3000);
     return () => window.clearTimeout(timer);
   }, [conversations, activeId, user]);
+  // After a refresh: pictures still being made land in the chat when they're done.
+  useEffect(() => {
+    if (!hydrated || chatStore === "pending") return;
+    for (const ticket of loadPendingPictures()) void completePicture(ticket, () => pollPicture(ticket.job!));
+    // Once per page load; completePicture reads everything through refs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hydrated, chatStore === "pending"]);
   // After a refresh: pick up the replies she owed (lib/resume), once the chat is in from Supabase.
   useEffect(() => {
     if (!hydrated || chatStore === "pending") return;
@@ -4249,20 +4276,17 @@ function FreyaApp() {
               : fullPrompt,
           },
         });
-    /** Puts the finished picture in the chat: in place of the card, or (quietly) as her next message, after she's done talking. */
-    const place = async (patch: Partial<Message>) => {
-      if (!quiet) return patchMessage(conversationId, cardId, patch);
-      while (activeJobRef.current?.conversationId === conversationId || jobsRef.current.some((job) => job.conversationId === conversationId && job.targetId === askedBy)) await delay(600);
-      patchConversation(conversationId, (messages) => [...messages, { id: cardId, role: "assistant", content: "", at: new Date().toISOString(), ...(askedBy ? { replyTo: askedBy } : {}), ...patch } as Message]);
-      if (conversationId === activeIdRef.current) setBubbleBeat((count) => count + 1);
-    };
-    try {
+    const ticket: PendingPicture = { conversationId, cardId, quiet, ...(askedBy ? { askedBy } : {}), fullPrompt, at: Date.now() };
+    await completePicture(ticket, async () => {
+      // Started as a job on her image server (it can take minutes): checked on until it's done, and
+      // remembered, so a refresh picks it up again (resumePictures).
       const response = await fetch("/api/image", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           prompt,
           mood: moodRef.current.name,
+          async: true,
           ...(previous ? { previous } : {}),
           ...(style ? { style } : {}),
           ...(variation ? { variation: true } : {}),
@@ -4275,11 +4299,49 @@ function FreyaApp() {
             ? payload.error
             : "That picture couldn't be made.",
         );
+      if (typeof payload?.pending !== "string") return payload;
+      ticket.job = payload.pending;
+      savePendingPicture(ticket);
+      return pollPicture(payload.pending);
+    });
+  }
+
+  /** Asks how a started picture is going until it's done or failed (pictures can take many minutes). */
+  async function pollPicture(job: string): Promise<Record<string, unknown>> {
+    const deadline = Date.now() + PICTURE_WAIT_MS;
+    while (Date.now() < deadline) {
+      await delay(5000);
+      const payload = await fetch(`/api/image?job=${job}`, { cache: "no-store" })
+        .then((response) => (response.ok ? response.json() : null))
+        .catch(() => null);
+      // A dropped check (the server or the tunnel blinked): the picture carries on; ask again.
+      if (!payload) continue;
+      if (payload.failed) throw new Error(typeof payload.error === "string" ? payload.error : "That picture couldn't be made.");
+      if (payload.kind) return payload;
+    }
+    throw new Error("The picture took too long.");
+  }
+
+  /**
+   * Puts a finished picture in the chat: in place of its card, or (quietly) as her next message once
+   * she's done talking; or, if it failed, says so. `get` returns the picture's payload.
+   */
+  async function completePicture(ticket: PendingPicture, get: () => Promise<Record<string, unknown>>) {
+    const { conversationId, cardId, quiet, askedBy, fullPrompt } = ticket;
+    const place = async (patch: Partial<Message>) => {
+      if (!quiet) return patchMessage(conversationId, cardId, patch);
+      while (activeJobRef.current?.conversationId === conversationId || jobsRef.current.some((job) => job.conversationId === conversationId && job.targetId === askedBy)) await delay(600);
+      patchConversation(conversationId, (messages) => messages.some((message) => message.id === cardId) ? messages : [...messages, { id: cardId, role: "assistant", content: "", at: new Date().toISOString(), ...(askedBy ? { replyTo: askedBy } : {}), ...patch } as Message]);
+      if (conversationId === activeIdRef.current) setBubbleBeat((count) => count + 1);
+    };
+    try {
+      const payload = await get();
       if (
         payload.kind === "generated" &&
         typeof payload.data === "string" &&
         typeof payload.mime === "string"
       ) {
+        const mime = payload.mime;
         const bytes = Uint8Array.from(atob(payload.data), (character) =>
           character.charCodeAt(0),
         );
@@ -4287,8 +4349,8 @@ function FreyaApp() {
         const prepared = await prepareAttachment(
           new File(
             [bytes],
-            `freya-picture.${payload.mime.split("/")[1] || "png"}`,
-            { type: payload.mime },
+            `freya-picture.${mime.split("/")[1] || "png"}`,
+            { type: mime },
           ),
           attachmentId,
         );
@@ -4339,7 +4401,8 @@ function FreyaApp() {
         });
       }
     } finally {
-      if (pictureAskRef.current?.messageId === askedBy) pictureAskRef.current = null;
+      if (ticket.job) forgetPendingPicture(ticket.job);
+      if (askedBy && pictureAskRef.current?.messageId === askedBy) pictureAskRef.current = null;
     }
   }
 

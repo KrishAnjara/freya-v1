@@ -1,12 +1,16 @@
 import { NextResponse } from "next/server";
 import { guardRequest, hostedProvidersAllowed } from "@/lib/route-guard";
-import { imageRequestBlocked, isImageStyle, makeImage } from "@/lib/image-generation";
+import { imageRequestBlocked, isImageStyle, makeImage, pictureStatus, startPicture } from "@/lib/image-generation";
 import { describeFailure } from "@/lib/provider-health";
 import { isMoodName } from "@/lib/mood";
 
 /**
  * Pictures in the chat (/image, or asking FREYA to draw something). Returns a generated image
  * or a labelled SVG drawing; never claims one is the other. Nothing is stored server-side.
+ *
+ * With `async: true`, a picture on her own image server comes back at once as `{ pending: job }`,
+ * and GET /api/image?job=<job> says how it's going until it returns the picture: the browser keeps
+ * the job, so a picture that takes many minutes, or outlasts a refresh, still lands in the chat.
  */
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -38,6 +42,14 @@ export async function POST(request: Request) {
   const mood = isMoodName(body.mood) ? body.mood : undefined;
 
   try {
+    if (body.async === true) {
+      const started = await startPicture({ prompt, previous, style, variation, mood }, request.signal);
+      if ("job" in started) return NextResponse.json({ pending: started.job, ...(started.eta ? { eta: started.eta } : {}) }, { headers: { "Cache-Control": "no-store" } });
+      if (started.failed === "blocked") return NextResponse.json({ error: "That's not something I'll draw." }, { status: 400 });
+      const result = await makeImage({ prompt, previous, style, variation, mood }, request.signal, started);
+      if (!result) return NextResponse.json({ error: "That picture couldn't be made. Try describing it differently." }, { status: 422 });
+      return NextResponse.json(result, { headers: { "Cache-Control": "no-store" } });
+    }
     const result = await makeImage({ prompt, previous, style, variation, mood }, request.signal);
     if (!result) return NextResponse.json({ error: "That picture couldn't be made. Try describing it differently." }, { status: 422 });
     return NextResponse.json(result, { headers: { "Cache-Control": "no-store" } });
@@ -46,4 +58,16 @@ export async function POST(request: Request) {
     console.warn(`FREYA image failed (${describeFailure(error)}).`);
     return NextResponse.json({ error: "Pictures aren't working right now. Try again in a moment." }, { status: 503 });
   }
+}
+
+/** How a picture started with `async: true` is going (see above). */
+export async function GET(request: Request) {
+  // Checked every few seconds, so not counted against the chat's rate limit; the sign-in and
+  // owner checks (middleware.ts) still apply.
+  const job = new URL(request.url).searchParams.get("job") ?? "";
+  if (!/^[a-f0-9]{16}$/.test(job)) return NextResponse.json({ error: "No such picture." }, { status: 400 });
+  const status = await pictureStatus(job, request.signal);
+  if ("kind" in status) return NextResponse.json(status, { headers: { "Cache-Control": "no-store" } });
+  if (status.status === "error") return NextResponse.json({ error: status.refused ? "That's not something I'll draw." : status.error, failed: true }, { status: 200, headers: { "Cache-Control": "no-store" } });
+  return NextResponse.json(status, { headers: { "Cache-Control": "no-store" } });
 }
