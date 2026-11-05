@@ -10,10 +10,11 @@ login, tunnel, picture jobs and logging, so the laptop connects to it the same w
     fallback models in order; optionally a model on this machine's Ollama last. Chats go to
     Puter's cloud, never to this GPU, so she keeps talking while a picture draws.
   - her eyes (what they send): a Puter model that can see, then optionally Gemma 3 4B here.
-  - pictures: Qwen-Image 2.1 uncensored (Q4_K_M, a headless ComfyUI) draws the phone photo; where
-    her face shows, SDXL (RealVisXL + IP-Adapter Face) redraws just her face from her real photo
-    for her mood, so it is her (positive and negative prompts for both). A picture with a doubled
-    face is drawn again once. Every finished picture is kept here with its prompt.
+  - pictures: Qwen-Image 2.1 Turbo, quantized (abenzerps/Qwen-Image-2.1-Turbo-Quantized, 8 steps),
+    draws the phone photo: on MLX (MFLUX, 4-bit) first; if MLX can't use this GPU (it needs CUDA 13
+    on Linux), the same model as GGUF Q4_K_M in a headless ComfyUI. Where her face shows, SDXL
+    (RealVisXL + IP-Adapter Face) redraws just her face from her real photo for her mood, so it is
+    her. A picture with a doubled face is drawn again once. Every picture is kept here with its prompt.
   - the prompt maker: a small uncensored model on the CPU (Ollama, never the GPU) plans the shot
     and expands the request; if it's off or fails, rules do it. Memory embeddings run on the CPU too.
 
@@ -29,7 +30,7 @@ Sexual content involving anyone under 18 is refused, before and after the prompt
   --embed-model NAME       memory embeddings ("none": off)
   --images                 pictures on
   --no-face-fix            pictures without SDXL's face pass
-  --image-steps N          Qwen-Image steps
+  --image-steps N          steps for SDXL's face pass (Qwen-Image Turbo always takes 8)
   --token KEY              the login key (default: the one saved from the last run)
   --state-dir PATH         where the key, kept pictures and (with --cache-on-drive) downloads live
 """
@@ -71,18 +72,30 @@ BRIDGE = f"http://127.0.0.1:{BRIDGE_PORT}"
 BRIDGE_DIR = os.environ.get("FREYA_BRIDGE_DIR", "/content/freya-puter")
 PUTER_NAMES = {"freya", "freya-fallback", "freya-vision"}
 
-#: Qwen-Image 2.1, uncensored quantisation, and its companions (all in one repository).
-IMAGE_REPO = "abenzerps/Qwen-Image-2.1-Uncensored-Quantized"
-IMAGE_FILES = {
-    "diffusion_models": "qwen-image-2.1-UC-Q4_K_M.gguf",
+#: Qwen-Image 2.1 Turbo, quantized, and its companions (all in one repository; only the files used are
+#: downloaded, not the whole ~90 GB repository).
+IMAGE_REPO = "abenzerps/Qwen-Image-2.1-Turbo-Quantized"
+#: MLX (MFLUX): this 4-bit transformer, with the text encoder, VAE and configs from the official repo.
+MLX_BITS = 4
+MLX_FILE = f"qwen-image-2.1-turbo-MLX-{MLX_BITS}bit.safetensors"
+MLX_OFFICIAL = "Qwen/Qwen-Image-2.1-Turbo"
+MFLUX_VERSION = "0.24.0"
+#: ComfyUI, the backup: the same model as GGUF.
+COMFY_FILES = {
+    "diffusion_models": "qwen-image-2.1-turbo-Q4_K_M.gguf",
     "text_encoders": "text_encoders/qwen3vl_8b_int8_convrot.safetensors",
     "vae": "vae/qwen_image_2.1_vae_bf16.safetensors",
 }
-IMAGE_MODEL_NAME = "Qwen-Image 2.1 uncensored (Q4_K_M)"
+#: Turbo's own eight-step schedule (nine sigmas), as the model card and the official template use it.
+TURBO_SIGMAS = "1.0, 0.978453, 0.95418, 0.926626, 0.89508, 0.845148, 0.704534, 0.414568, 0"
+TURBO_STEPS = 8
+IMAGE_MODEL_NAME = "Qwen-Image 2.1 Turbo"
 FACE_FIX_NAME = "SDXL face (RealVisXL + IP-Adapter Face)"
 COMFY_DIR = os.environ.get("FREYA_COMFY_DIR", "/content/ComfyUI")
+MFLUX_VENV = os.environ.get("FREYA_MFLUX_VENV", "/content/mflux-venv")
 COMFY = "http://127.0.0.1:8188"
-#: What every picture avoids (the app sends its own list; this is for anything else with the key).
+#: What every picture avoids (the app sends its own list). Qwen-Image Turbo runs at CFG 1, where a
+#: negative prompt has no effect; SDXL's face pass does use it.
 NEGATIVE = ("duplicate face, two faces, cloned face, multiple heads, extra people, deformed face, asymmetric eyes, extra limbs, "
             "extra fingers, bad hands, bad anatomy, blurry, low quality, plastic skin, cartoon, illustration, 3d render, text, watermark, logo")
 #: How much of her real photo SDXL puts into her face, and how far it may redraw it.
@@ -127,30 +140,69 @@ def face_prompt(expression):
 # --- Qwen-Image through ComfyUI -----------------------------------------------------------------
 
 
-def comfy_workflow(request, prompt, steps, negative, source_name=None):
-    """ComfyUI's API graph for Qwen-Image 2.1, as in Comfy-Org's official templates (t2i and edit)."""
-    graph = {
-        "1": {"class_type": "UnetLoaderGGUF", "inputs": {"unet_name": os.path.basename(IMAGE_FILES["diffusion_models"])}},
+def comfy_workflow(request, prompt, negative):
+    """ComfyUI's API graph for Qwen-Image 2.1 Turbo, as in Comfy-Org's official Turbo template:
+    ManualSigmas (its eight-step schedule) into SamplerCustomAdvanced, CFG 1, Euler."""
+    return {
+        "1": {"class_type": "UnetLoaderGGUF", "inputs": {"unet_name": os.path.basename(COMFY_FILES["diffusion_models"])}},
         "2": {"class_type": "QwenImage21Cache", "inputs": {"model": ["1", 0], "device": "auto", "dtype": "default"}},
-        "3": {"class_type": "CLIPLoader", "inputs": {"clip_name": os.path.basename(IMAGE_FILES["text_encoders"]), "type": "qwen_image", "device": "default"}},
-        "4": {"class_type": "VAELoader", "inputs": {"vae_name": os.path.basename(IMAGE_FILES["vae"])}},
+        "3": {"class_type": "CLIPLoader", "inputs": {"clip_name": os.path.basename(COMFY_FILES["text_encoders"]), "type": "qwen_image", "device": "default"}},
+        "4": {"class_type": "VAELoader", "inputs": {"vae_name": os.path.basename(COMFY_FILES["vae"])}},
         "5": {"class_type": "TextEncodeQwenImage21", "inputs": {"clip": ["3", 0], "prompt": prompt, "negative_prompt": negative, "resolution": 1024}},
-        "7": {"class_type": "KSampler", "inputs": {
-            "model": ["2", 0], "positive": ["5", 0], "negative": ["5", 1], "seed": request["seed"], "steps": steps,
-            "cfg": 1, "sampler_name": "euler", "scheduler": "simple", "denoise": 1,
-        }},
-        "8": {"class_type": "VAEDecode", "inputs": {"samples": ["7", 0], "vae": ["4", 0]}},
-        "9": {"class_type": "SaveImage", "inputs": {"images": ["8", 0], "filename_prefix": "freya"}},
+        "6": {"class_type": "EmptyLatentImage", "inputs": {"width": request["width"], "height": request["height"], "batch_size": 1}},
+        "7": {"class_type": "RandomNoise", "inputs": {"noise_seed": request["seed"]}},
+        "8": {"class_type": "CFGGuider", "inputs": {"model": ["2", 0], "positive": ["5", 0], "negative": ["5", 1], "cfg": 1}},
+        "9": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "euler"}},
+        "10": {"class_type": "ManualSigmas", "inputs": {"sigmas": TURBO_SIGMAS}},
+        "11": {"class_type": "SamplerCustomAdvanced", "inputs": {"noise": ["7", 0], "guider": ["8", 0], "sampler": ["9", 0], "sigmas": ["10", 0], "latent_image": ["6", 0]}},
+        "12": {"class_type": "VAEDecode", "inputs": {"samples": ["11", 0], "vae": ["4", 0]}},
+        "13": {"class_type": "SaveImage", "inputs": {"images": ["12", 0], "filename_prefix": "freya"}},
     }
-    if source_name:
-        # A change to a picture she sent: it goes into the encoder, which also gives the latent at its size.
-        graph["10"] = {"class_type": "LoadImage", "inputs": {"image": source_name}}
-        graph["5"]["inputs"].update({"vae": ["4", 0], "images.image_1": ["10", 0]})
-        graph["7"]["inputs"]["latent_image"] = ["5", 2]
-    else:
-        graph["6"] = {"class_type": "EmptyLatentImage", "inputs": {"width": request["width"], "height": request["height"], "batch_size": 1}}
-        graph["7"]["inputs"]["latent_image"] = ["6", 0]
-    return graph
+
+
+#: The model card's preparation for MFLUX, run once in its own environment: the official text
+#: encoder, VAE and configs, and this repository's MLX transformer with its quantization level in the
+#: file header (the weights are not re-quantized).
+MLX_PREPARE = """
+import json, shutil, sys
+from pathlib import Path
+from huggingface_hub import snapshot_download
+source, root, bits = sys.argv[1], Path(sys.argv[2]), sys.argv[3]
+snapshot_download("%s", local_dir=root, allow_patterns=["model_index.json", "processor/**", "scheduler/*.json",
+                  "transformer/config.json", "text_encoder/**", "vae/**"])
+with open(source, "rb") as src:
+    header = json.loads(src.read(int.from_bytes(src.read(8), "little")))
+    header["__metadata__"] = {**header.get("__metadata__", {}), "quantization_level": bits}
+    raw = json.dumps(header, separators=(",", ":")).encode()
+    raw += b" " * (-len(raw) %% 8)
+    target = root / "transformer/model.safetensors"
+    temporary = target.with_suffix(".tmp")
+    with temporary.open("wb") as dst:
+        dst.write(len(raw).to_bytes(8, "little"))
+        dst.write(raw)
+        shutil.copyfileobj(src, dst, 16 * 1024 * 1024)
+    temporary.replace(target)
+print("ready")
+""" % MLX_OFFICIAL
+
+#: Does MLX reach the GPU here? (On Linux it needs its CUDA build and a driver for CUDA 13.)
+MLX_GPU_CHECK = "import mlx.core as mx; mx.set_default_device(mx.gpu); a = mx.ones((512, 512)); mx.eval(a @ a); print(mx.default_device())"
+
+
+def mflux_command(model_dir, prompt, width, height, seed, output):
+    """MFLUX's generation command for the prepared model, with Turbo's eight steps, as on the card."""
+    return [os.path.join(MFLUX_VENV, "bin", "mflux-generate-qwen-2.1"), "--model", model_dir, "--base-model", "qwen-image-2.1-turbo",
+            "--prompt", prompt, "--width", str(width // 16 * 16), "--height", str(height // 16 * 16), "--steps", str(TURBO_STEPS),
+            "--seed", str(seed), "--low-ram", "--output", output]
+
+
+def hf_download(files, local_dir):
+    """`hf download` (huggingface_hub[hf_xet]) for just these files of the image repository."""
+    cli = shutil.which("hf") or shutil.which("huggingface-cli")
+    if not cli:
+        raise RuntimeError("the Hugging Face command line isn't installed")
+    subprocess.run([cli, "download", IMAGE_REPO, *files, "--local-dir", local_dir], check=True, stdout=subprocess.DEVNULL)
+    return [os.path.join(local_dir, name) for name in files]
 
 
 def comfy(path, payload=None, timeout=30):
@@ -183,74 +235,131 @@ def face_box(face, size):
 
 class PuterImages:
     """
-    Qwen-Image 2.1 draws, then SDXL redraws her face from her real photo. One at a time on the GPU,
-    both set up in the background at start; each is let go of after every picture.
+    Qwen-Image 2.1 Turbo draws, then SDXL redraws her face from her real photo. Two ways to run the
+    Turbo model, tried in order: MLX (MFLUX), then the GGUF in ComfyUI if MLX can't use this GPU or
+    fails. One picture at a time on the GPU; everything is let go of after each.
     """
 
-    def __init__(self, enabled, token="", enhancer="", steps=20, face_fix=True):
+    def __init__(self, enabled, token="", enhancer="", steps=20, face_fix=True, files_dir="/content/Qwen-Image-2.1-Turbo-Quantized"):
         self.enabled = enabled
         self.token = token or None
         self.enhancer = enhancer
         self.steps = steps
         self.face_fix = face_fix
+        self.files_dir = files_dir
+        self.mlx_dir = os.path.join(os.path.dirname(files_dir), "qwen-turbo-mlx")
         self.ready = threading.Event()
         self.error = ""
         self.process = None
         self.face = None
         self.save_dir = ""
-        self.draw_seconds = 120.0 + 6.0 * steps
+        #: "mlx" and/or "comfy", in the order they're tried; filled in as each gets ready.
+        self.runtimes = []
+        self.comfy_started = False
+        self.lock = threading.Lock()
+        self.draw_seconds = 90.0
 
     @property
     def model_name(self):
-        return IMAGE_MODEL_NAME
+        return f"{IMAGE_MODEL_NAME} ({'MLX' if self.runtimes[:1] == ['mlx'] else 'GGUF, ComfyUI'})"
 
     def prepare(self):
-        """Installs ComfyUI with the GGUF loader, downloads Qwen-Image's three files and SDXL's, starts ComfyUI."""
+        """Sets up the Turbo model (MLX, else ComfyUI) and SDXL's face pass, in the background."""
         try:
-            if not os.path.isdir(COMFY_DIR):
-                subprocess.run(["git", "clone", "-q", "--depth", "1", "https://github.com/comfyanonymous/ComfyUI", COMFY_DIR], check=True)
-            nodes = os.path.join(COMFY_DIR, "custom_nodes", "ComfyUI-GGUF")
-            if not os.path.isdir(nodes):
-                # The fork with Qwen-Image 2.1 support, as the model's card says.
-                subprocess.run(["git", "clone", "-q", "--depth", "1", "https://github.com/leejet/ComfyUI-GGUF", nodes], check=True)
-            log("pictures", "installing ComfyUI's requirements, diffusers, OpenCV")
-            subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-r", os.path.join(COMFY_DIR, "requirements.txt"), "-r", os.path.join(nodes, "requirements.txt"),
-                            "diffusers>=0.38", "transformers", "accelerate", "safetensors", "opencv-python-headless"], check=True)
-            from huggingface_hub import hf_hub_download
-            for folder, name in IMAGE_FILES.items():
-                target = os.path.join(COMFY_DIR, "models", folder, os.path.basename(name))
-                if not os.path.exists(target):
-                    started = time.time()
-                    log("pictures", f"downloading {os.path.basename(name)}...")
-                    path = hf_hub_download(IMAGE_REPO, name, token=self.token)
-                    os.makedirs(os.path.dirname(target), exist_ok=True)
-                    shutil.copyfile(path, target)
-                    log("pictures", f"{os.path.basename(name)} in {time.time() - started:.0f} s")
-            # Low-VRAM mode keeps only what's drawing on the GPU.
-            self.process = subprocess.Popen([sys.executable, "main.py", "--listen", "127.0.0.1", "--port", "8188", "--lowvram"], cwd=COMFY_DIR,
-                                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            for _ in range(180):
-                try:
-                    comfy("/system_stats", timeout=3)
-                    break
-                except OSError:
-                    time.sleep(2)
-            else:
-                raise RuntimeError("ComfyUI didn't start")
-            log("pictures", f"{IMAGE_MODEL_NAME} ready")
+            log("pictures", "installing huggingface_hub[hf_xet] for the downloads")
+            subprocess.run([sys.executable, "-m", "pip", "install", "-q", "huggingface_hub[hf_xet]"], check=True)
+            if not self.prepare_mlx():
+                self.prepare_comfy()
             if self.face_fix:
-                try:
-                    face = base.FaceModel(self.token, max(20, self.steps), keep=False)
-                    log("pictures", f"downloading {FACE_FIX_NAME} (~8 GB)...")
-                    face.download()
-                    self.face = face
-                    log("pictures", f"{FACE_FIX_NAME} ready")
-                except Exception as error:  # noqa: BLE001 - pictures still work, without the face pass
-                    log("pictures", f"{FACE_FIX_NAME} unavailable ({type(error).__name__}: {str(error)[:160]}); pictures go without it")
+                self.prepare_face()
             self.ready.set()
         except Exception as error:  # noqa: BLE001 - reported in /v1/health and to the app
             self.error = f"{type(error).__name__}: {str(error)[:240]}"
             log("pictures", f"unavailable: {self.error}")
+
+    def prepare_mlx(self):
+        """MFLUX in its own environment (so it never fights ComfyUI's or SDXL's packages), a GPU check,
+        the 4-bit MLX file and the card's preparation. False, with the reason logged, if any step fails."""
+        try:
+            started = time.time()
+            python = os.path.join(MFLUX_VENV, "bin", "python")
+            if not os.path.exists(python):
+                log("pictures", f"MLX: installing MFLUX {MFLUX_VERSION} in its own environment")
+                subprocess.run([sys.executable, "-m", "pip", "install", "-q", "uv"], check=True)
+                subprocess.run([sys.executable, "-m", "uv", "venv", "-q", "--python", "3.12", MFLUX_VENV], check=True)
+            install = lambda *packages: subprocess.run([sys.executable, "-m", "uv", "pip", "install", "-q", "--python", python, *packages],
+                                                       capture_output=True, text=True)
+            result = install(f"mflux=={MFLUX_VERSION}", "huggingface_hub[hf_xet]")
+            if result.returncode != 0:
+                raise RuntimeError(f"MFLUX didn't install: {result.stderr.strip()[-200:]}")
+            # MLX's CUDA build (Linux): it needs a driver that supports CUDA 13.
+            if not any(install(extra).returncode == 0 for extra in ("mlx[cuda13]", "mlx[cuda]")):
+                raise RuntimeError("MLX's CUDA build didn't install")
+            check = subprocess.run([python, "-c", MLX_GPU_CHECK], capture_output=True, text=True, timeout=300)
+            if check.returncode != 0 or "gpu" not in check.stdout.lower():
+                raise RuntimeError(f"MLX can't use this GPU ({(check.stderr or check.stdout).strip()[-160:] or 'no GPU device'}); "
+                                   "it needs a driver that supports CUDA 13")
+            if not os.path.exists(os.path.join(self.mlx_dir, "transformer", "model.safetensors")):
+                log("pictures", f"MLX: downloading {MLX_FILE} (~4 GB)...")
+                source = hf_download([MLX_FILE], self.files_dir)[0]
+                log("pictures", f"MLX: preparing it, with the text encoder and VAE from {MLX_OFFICIAL} (~17 GB)...")
+                prepared = subprocess.run([python, "-c", MLX_PREPARE, source, self.mlx_dir, str(MLX_BITS)], capture_output=True, text=True,
+                                          env=dict(os.environ, **({"HF_TOKEN": self.token} if self.token else {})))
+                if prepared.returncode != 0:
+                    raise RuntimeError(f"preparing the MLX model failed: {prepared.stderr.strip()[-200:]}")
+            with self.lock:
+                self.runtimes.insert(0, "mlx")
+            log("pictures", f"{IMAGE_MODEL_NAME} ready on MLX ({MLX_BITS}-bit) in {time.time() - started:.0f} s")
+            return True
+        except Exception as error:  # noqa: BLE001 - ComfyUI takes over
+            log("pictures", f"MLX unavailable: {str(error)[:240]}; using the GGUF in ComfyUI instead")
+            return False
+
+    def prepare_comfy(self):
+        """ComfyUI with the GGUF loader, and the Turbo model's three files, then starts it."""
+        with self.lock:
+            if self.comfy_started:
+                return
+            self.comfy_started = True
+        started = time.time()
+        if not os.path.isdir(COMFY_DIR):
+            subprocess.run(["git", "clone", "-q", "--depth", "1", "https://github.com/comfyanonymous/ComfyUI", COMFY_DIR], check=True)
+        nodes = os.path.join(COMFY_DIR, "custom_nodes", "ComfyUI-GGUF")
+        if not os.path.isdir(nodes):
+            subprocess.run(["git", "clone", "-q", "--depth", "1", "https://github.com/leejet/ComfyUI-GGUF", nodes], check=True)
+        log("pictures", "ComfyUI: installing its requirements")
+        subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-r", os.path.join(COMFY_DIR, "requirements.txt"), "-r", os.path.join(nodes, "requirements.txt")], check=True)
+        log("pictures", "ComfyUI: downloading the Turbo GGUF, text encoder and VAE (~14 GB)...")
+        paths = hf_download(list(COMFY_FILES.values()), self.files_dir)
+        for folder, path in zip(COMFY_FILES, paths):
+            target = os.path.join(COMFY_DIR, "models", folder, os.path.basename(path))
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            if not os.path.exists(target):
+                os.symlink(path, target)
+        self.process = subprocess.Popen([sys.executable, "main.py", "--listen", "127.0.0.1", "--port", "8188", "--lowvram"], cwd=COMFY_DIR,
+                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        for _ in range(180):
+            try:
+                comfy("/system_stats", timeout=3)
+                break
+            except OSError:
+                time.sleep(2)
+        else:
+            raise RuntimeError("ComfyUI didn't start")
+        with self.lock:
+            self.runtimes.append("comfy")
+        log("pictures", f"{IMAGE_MODEL_NAME} ready in ComfyUI (GGUF Q4_K_M) in {time.time() - started:.0f} s")
+
+    def prepare_face(self):
+        try:
+            subprocess.run([sys.executable, "-m", "pip", "install", "-q", "diffusers>=0.38", "transformers", "accelerate", "safetensors", "opencv-python-headless"], check=True)
+            face = base.FaceModel(self.token, max(20, self.steps), keep=False)
+            log("pictures", f"downloading {FACE_FIX_NAME} (~8 GB)...")
+            face.download()
+            self.face = face
+            log("pictures", f"{FACE_FIX_NAME} ready")
+        except Exception as error:  # noqa: BLE001 - pictures still work, without the face pass
+            log("pictures", f"{FACE_FIX_NAME} unavailable ({type(error).__name__}: {str(error)[:160]}); pictures go without it")
 
     def plan(self, request):
         """The CPU prompt maker: what kind of phone photo, whether she's in it and her face shows, the full prompt."""
@@ -260,12 +369,56 @@ class PuterImages:
             plan = enhance_by_rules(plan, request["expression"])
         return plan
 
-    def draw(self, request, prompt, negative, source=None):
+    def draw(self, request, prompt, negative):
+        """One picture from the first runtime that manages it. A failed MLX run hands over to ComfyUI
+        (set up then, if it wasn't), and the log says so."""
+        failures = []
+        for runtime in list(self.runtimes):
+            try:
+                started = time.time()
+                png = self.draw_mlx(request, prompt) if runtime == "mlx" else self.draw_comfy(request, prompt, negative)
+                log("picture", f"{IMAGE_MODEL_NAME} drew it on {'MLX' if runtime == 'mlx' else 'ComfyUI'} in {time.time() - started:.0f} s")
+                return png, runtime
+            except Exception as error:  # noqa: BLE001 - the other runtime gets a go
+                failures.append(f"{runtime}: {str(error)[:200]}")
+                log("picture", f"{runtime} failed ({str(error)[:200]})")
+                if runtime == "mlx" and "comfy" not in self.runtimes:
+                    log("picture", "setting up ComfyUI as the backup (several minutes)...")
+                    try:
+                        self.prepare_comfy()
+                    except Exception as setup:  # noqa: BLE001 - reported with the picture's failure
+                        failures.append(f"comfy setup: {str(setup)[:160]}")
+                    if "comfy" in self.runtimes:
+                        try:
+                            started = time.time()
+                            png = self.draw_comfy(request, prompt, negative)
+                            log("picture", f"{IMAGE_MODEL_NAME} drew it on ComfyUI in {time.time() - started:.0f} s")
+                            return png, "comfy"
+                        except Exception as backup:  # noqa: BLE001 - reported with the picture's failure
+                            failures.append(f"comfy: {str(backup)[:200]}")
+        raise RuntimeError("; ".join(failures) or "no picture runtime is ready")
+
+    def draw_mlx(self, request, prompt):
+        output = os.path.join("/tmp", f"freya-{request['seed']}.png")
+        command = mflux_command(self.mlx_dir, prompt, request["width"], request["height"], request["seed"], output)
+        result = subprocess.run(command, capture_output=True, text=True, timeout=900)
+        if result.returncode != 0 or not os.path.exists(output):
+            raise RuntimeError(f"MFLUX: {(result.stderr or result.stdout).strip()[-240:]}")
+        with open(output, "rb") as handle:
+            png = handle.read()
+        os.remove(output)
+        return png
+
+    def draw_comfy(self, request, prompt, negative):
         try:
-            queued = comfy("/prompt", {"prompt": comfy_workflow(request, prompt, self.steps, negative, source), "client_id": "freya"})
-        except urllib.error.HTTPError as error:
-            raise RuntimeError(f"ComfyUI refused the workflow: {error.read().decode(errors='replace')[:300]}") from error
-        return self.wait_for(queued.get("prompt_id"))
+            try:
+                queued = comfy("/prompt", {"prompt": comfy_workflow(request, prompt, negative), "client_id": "freya"})
+            except urllib.error.HTTPError as error:
+                raise RuntimeError(f"ComfyUI refused the workflow: {error.read().decode(errors='replace')[:300]}") from error
+            return self.wait_for(queued.get("prompt_id"))
+        finally:
+            with contextlib.suppress(OSError):
+                comfy("/free", {"unload_models": True, "free_memory": True})
 
     def wait_for(self, prompt_id, limit_s=900):
         """Polls ComfyUI until the picture is saved; raises its own error message if it fails."""
@@ -326,16 +479,13 @@ class PuterImages:
         report("refining")
         started_plan = time.time()
         negative = request["negative_prompt"] or NEGATIVE
-        source = None
+        # Turbo draws from words only: a change to a picture she sent is drawn anew from the combined
+        # description (the app sends "<the last picture's prompt>. Change: <what to change>").
         if request["image"]:
-            asked = request["instruction"] or request["prompt"]
-            prompt, refined = base.refine_prompt(asked, self.enhancer, edit=True) if request["refine"] else (asked, False)
-            plan = {"shot": "edit", "her": False, "face": False, "prompt": prompt, "refined": refined}
-            drawn_prompt = prompt
-        else:
-            asked = request["prompt"]
-            plan = self.plan(request)
-            drawn_prompt = qwen_prompt(plan)
+            log("picture", "a change to her last picture: drawn again from the combined description")
+        asked = request["prompt"]
+        plan = self.plan(request)
+        drawn_prompt = qwen_prompt(plan)
         log("picture", f"planned in {time.time() - started_plan:.0f} s ({'prompt maker' if plan['refined'] else 'rules'}): {plan['shot']} · "
             f"{'her face (real photo, ' + (request['expression'] or 'neutral') + ')' if plan['face'] else 'her, no face' if plan['her'] else 'not her'} · {len(drawn_prompt)} chars")
         # The hard limit, once more on exactly what will be drawn.
@@ -347,27 +497,19 @@ class PuterImages:
         with base.GPU.picture():
             report("drawing")
             started = time.time()
-            try:
-                if request["image"]:
-                    source = f"freya-source-{request['seed']}.png"
-                    with open(os.path.join(COMFY_DIR, "input", source), "wb") as handle:
-                        handle.write(base64.b64decode(request["image"]))
-                png = self.draw(request, drawn_prompt, negative, source)
-                log("picture", f"{IMAGE_MODEL_NAME} drew it in {time.time() - started:.0f} s")
-                # One person in a selfie: a second face is the model's mistake, so it draws again once.
-                if plan["shot"] == "selfie" and len(faces_in(Image.open(BytesIO(png)))) > 1:
-                    log("picture", "two faces in a selfie; drawing it again with a new seed")
-                    request = {**request, "seed": (request["seed"] + 7919) % 2**31}
-                    png = self.draw(request, drawn_prompt, negative, source)
-            finally:
-                with contextlib.suppress(OSError):
-                    comfy("/free", {"unload_models": True, "free_memory": True})
-            model = IMAGE_MODEL_NAME
+            png, runtime = self.draw(request, drawn_prompt, negative)
+            # One person in a selfie: a second face is the model's mistake, so it draws again once.
+            if plan["shot"] == "selfie" and len(faces_in(Image.open(BytesIO(png)))) > 1:
+                log("picture", "two faces in a selfie; drawing it again with a new seed")
+                request = {**request, "seed": (request["seed"] + 7919) % 2**31}
+                png, runtime = self.draw(request, drawn_prompt, negative)
+            base.free_memory()
+            model = f"{IMAGE_MODEL_NAME} ({'MLX' if runtime == 'mlx' else 'GGUF'})"
             if plan["face"] and request["reference"] and self.face:
                 try:
                     fixing = time.time()
                     png = self.fix_face(png, request["reference"], request["expression"], negative, request["seed"])
-                    model = f"{IMAGE_MODEL_NAME} + {FACE_FIX_NAME}"
+                    model = f"{model} + {FACE_FIX_NAME}"
                     log("picture", f"face redrawn from her photo in {time.time() - fixing:.0f} s · {base.gpu_memory()}")
                 except Exception as error:  # noqa: BLE001 - the drawn picture still goes out
                     log("picture", f"face pass failed ({type(error).__name__}: {str(error)[:160]}); sending it as drawn")
@@ -556,7 +698,8 @@ def main():
     else:
         log("puter", "Puter didn't accept the key (PUTER_AUTH_TOKEN): only local models will answer" if local_voice else "Puter didn't accept the key (PUTER_AUTH_TOKEN)")
 
-    images = PuterImages(args.images, hf_token, enhancer=enhancer, steps=max(4, min(50, args.image_steps)), face_fix=not args.no_face_fix)
+    files_dir = os.path.join(args.state_dir if args.cache_on_drive else "/content", "Qwen-Image-2.1-Turbo-Quantized")
+    images = PuterImages(args.images, hf_token, enhancer=enhancer, steps=max(4, min(50, args.image_steps)), face_fix=not args.no_face_fix, files_dir=files_dir)
     images.save_dir = os.path.join(args.state_dir, "pictures")
     if args.images:
         if not base.gpu_gigabytes():
@@ -576,7 +719,7 @@ def main():
         base.pull_in_background(embed, "Memory embeddings")
 
     base.step("3/5 Pictures")
-    print(f"  {'Qwen-Image 2.1 uncensored' + (' + SDXL face pass' if not args.no_face_fix else '') + ', downloading in the background (~30 GB)' if images.enabled else 'off'}", flush=True)
+    print(f"  {'Qwen-Image 2.1 Turbo (MLX first, ComfyUI GGUF if MLX cannot use this GPU)' + (' + SDXL face pass' if not args.no_face_fix else '') + ', set up in the background' if images.enabled else 'off'}", flush=True)
 
     base.step("4/5 Test")
     ok, detail = test_voice()

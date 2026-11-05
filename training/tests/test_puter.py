@@ -32,13 +32,39 @@ def test_the_prompt_maker_without_a_model_still_writes_a_full_phone_photo():
     assert "seen from behind" in away and "one face" not in away
 
 
-def test_qwen_image_gets_the_negative_prompt_and_an_edit_takes_the_picture_in():
+def test_the_turbo_model_comes_from_its_quantized_repo_with_its_own_eight_step_schedule():
+    assert serve_puter.IMAGE_REPO == "abenzerps/Qwen-Image-2.1-Turbo-Quantized"
     request = serve_remote.parse_image_request({"prompt": "a lighthouse", "seed": 5})
-    graph = serve_puter.comfy_workflow(request, "a lighthouse", 20, "two faces, blurry")
+    graph = serve_puter.comfy_workflow(request, "a lighthouse", "two faces, blurry")
+    assert graph["1"]["inputs"]["unet_name"] == "qwen-image-2.1-turbo-Q4_K_M.gguf"
+    assert graph["10"] == {"class_type": "ManualSigmas", "inputs": {"sigmas": "1.0, 0.978453, 0.95418, 0.926626, 0.89508, 0.845148, 0.704534, 0.414568, 0"}}
+    sampler = graph["11"]
+    assert sampler["class_type"] == "SamplerCustomAdvanced" and sampler["inputs"]["sigmas"] == ["10", 0]
+    assert graph["8"]["inputs"]["cfg"] == 1 and graph["9"]["inputs"]["sampler_name"] == "euler"
     assert graph["5"]["inputs"]["negative_prompt"] == "two faces, blurry"
-    assert graph["6"]["class_type"] == "EmptyLatentImage"
-    edit = serve_puter.comfy_workflow(request, "make it night", 20, "x", source_name="in.png")
-    assert edit["10"]["inputs"]["image"] == "in.png" and "6" not in edit
+    assert len(serve_puter.TURBO_SIGMAS.split(",")) == serve_puter.TURBO_STEPS + 1
+
+
+def test_mlx_runs_mflux_with_the_cards_command():
+    command = serve_puter.mflux_command("/m", "a cup", 832, 1216, 42, "/tmp/o.png")
+    assert command[0].endswith("mflux-generate-qwen-2.1")
+    joined = " ".join(command[1:])
+    assert "--model /m --base-model qwen-image-2.1-turbo" in joined and "--steps 8" in joined and "--low-ram" in joined
+    assert "--width 832 --height 1216" in joined and "--seed 42" in joined and "--output /tmp/o.png" in joined
+    assert '"quantization_level": bits' in serve_puter.MLX_PREPARE and "Qwen/Qwen-Image-2.1-Turbo" in serve_puter.MLX_PREPARE
+    compile(serve_puter.MLX_PREPARE, "prepare", "exec")
+
+
+def test_a_failed_mlx_picture_is_drawn_by_comfyui_instead(monkeypatch):
+    images = serve_puter.PuterImages(True)
+    images.runtimes = ["mlx"]
+    events = []
+    monkeypatch.setattr(serve_puter, "log", lambda area, message: events.append(message))
+    monkeypatch.setattr(images, "draw_mlx", lambda request, prompt: (_ for _ in ()).throw(RuntimeError("no CUDA 13")))
+    monkeypatch.setattr(images, "prepare_comfy", lambda: images.runtimes.append("comfy"))
+    monkeypatch.setattr(images, "draw_comfy", lambda request, prompt, negative: b"png")
+    assert images.draw({"seed": 1, "width": 832, "height": 1216}, "a cup", "") == (b"png", "comfy")
+    assert any("mlx failed" in event for event in events)
 
 
 def test_the_face_pass_works_on_a_square_inside_the_picture():
