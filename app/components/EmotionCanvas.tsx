@@ -133,13 +133,14 @@ attribute vec3 tint;
 varying vec3 vTint;
 varying float vFade;
 uniform float pixelRatio;
+uniform float viewScale;
 uniform float focus;
 void main() {
   vTint = tint;
   vec4 mv = modelViewMatrix * vec4(position, 1.0);
   // Depth fade around the body itself, so it stays bright wherever the camera has to sit.
   vFade = clamp(1.0 - (-mv.z - focus + 0.6) / 4.0, 0.35, 1.0);
-  gl_PointSize = size * pixelRatio * (240.0 / -mv.z);
+  gl_PointSize = size * pixelRatio * viewScale * (240.0 / -mv.z);
   gl_Position = projectionMatrix * mv;
 }`;
 
@@ -156,7 +157,7 @@ void main() {
 
 function pointMaterial(pixelRatio: number) {
   return new THREE.ShaderMaterial({
-    uniforms: { pixelRatio: { value: pixelRatio }, focus: { value: 4.5 } },
+    uniforms: { pixelRatio: { value: pixelRatio }, viewScale: { value: 1 }, focus: { value: 4.5 } },
     vertexShader: POINT_VERTEX,
     fragmentShader: POINT_FRAGMENT,
     transparent: true,
@@ -251,7 +252,7 @@ export default function EmotionCanvas({ signal, mood, form = null, onClearForm, 
       time: { value: 0 }, flow: { value: 0.09 }, radius: { value: RADIUS }, amplitude: { value: 0.04 }, detail: { value: 1 },
       squash: { value: 1 }, sink: { value: 0 }, lift: { value: 0 }, spin: { value: 0 }, speak: { value: 0 }, shiver: { value: 0 },
       brightness: { value: 1 }, tint: { value: new THREE.Vector3(0.76, 0.76, 0.74) }, lightDir: { value: new THREE.Vector3(-0.45, 0.6, 0.7) },
-      pixelRatio: { value: pixelRatio }, focus: { value: 4.5 },
+      pixelRatio: { value: pixelRatio }, viewScale: { value: 1 }, focus: { value: 4.5 },
       pulse: { value: 0 }, pulseAge: { value: 9 }, gaze: { value: new THREE.Vector3() },
     };
     const presenceMaterial = new THREE.ShaderMaterial({ uniforms, vertexShader: PRESENCE_VERTEX, fragmentShader: PRESENCE_FRAGMENT, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending });
@@ -320,6 +321,10 @@ export default function EmotionCanvas({ signal, mood, form = null, onClearForm, 
       camera.updateProjectionMatrix();
       uniforms.focus.value = camera.position.z;
       formMaterial.uniforms.focus.value = camera.position.z;
+      // Points keep the same size relative to the canvas: 520 px on the shorter side is the reference.
+      const viewScale = Math.max(0.5, Math.min(1.6, Math.min(width, height) / 520));
+      uniforms.viewScale.value = viewScale;
+      formMaterial.uniforms.viewScale.value = viewScale;
     };
     const resizeObserver = new ResizeObserver(resize);
     resizeObserver.observe(host);

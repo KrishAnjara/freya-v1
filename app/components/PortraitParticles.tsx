@@ -120,8 +120,6 @@ function meshSegments() {
 
 /** From this strength a face shows its own photo (mood faces are 0.2-0.4; Subtle scales them below). */
 const PHOTO_FROM_LEVEL = 0.18;
-/** Holding one face, she swaps to another photo of the same expression now and then, so she never freezes. */
-const HOLD_VARIATION_S: [number, number] = [35, 80];
 
 /** Smooth falloff, 1 at the centre of the region and 0 at its edge. */
 function falloff(distance: number) {
@@ -255,7 +253,6 @@ export default function PortraitParticles({ expression = "neutral", intensity = 
     let fadeTo: { image: HTMLImageElement; heights: Float32Array; url: string } | null = null;
     let fadeMix = 0;
     let lastExpression: Expression | null = null;
-    let nextVariationAt = Infinity;
     let wantedUrl = "base";
     let baseHeightCache: Float32Array | undefined;
     const baseHeights = () => (baseHeightCache ??= vertexHeights(reliefHeights(image, HEIGHT_SAMPLES)));
@@ -481,13 +478,6 @@ export default function PortraitParticles({ expression = "neutral", intensity = 
           if (next) chosen.set(current, next);
           if (next || !isGlance(current)) wantedUrl = next ?? "base";
           loadExpressionImage(wantedUrl);
-          nextVariationAt = time + HOLD_VARIATION_S[0] + Math.random() * (HOLD_VARIATION_S[1] - HOLD_VARIATION_S[0]);
-        } else if (time > nextVariationAt && !fadeTo && !isGlance(current)) {
-          // The same face for a long time: another photo of it, faded in like any change.
-          const options = imagesFor(current, expressionImages);
-          const next = options.length > 1 ? pickVariation(options, shownUrl) : null;
-          if (next) { chosen.set(current, next); wantedUrl = next; loadExpressionImage(next); }
-          nextVariationAt = time + HOLD_VARIATION_S[0] + Math.random() * (HOLD_VARIATION_S[1] - HOLD_VARIATION_S[0]);
         }
         if (wantedUrl !== shownUrl && !fadeTo && shownImage && shownHeights) {
           const target = wantedUrl === "base" ? { image, heights: baseHeights() } : loaded.get(wantedUrl);

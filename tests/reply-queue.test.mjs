@@ -5,19 +5,20 @@ import { jobKind, planEnqueue } from "../lib/reply-queue.ts";
 const msg = (targetId, conversationId = "c") => ({ conversationId, targetId });
 const thread = (...rows) => rows.map(([id, role]) => ({ id, role }));
 
-test("a new message while she's replying in that chat interrupts her, and she knows if she'd started", () => {
+test("a new message while she's replying never interrupts her: she finishes, then answers it", () => {
   const started = planEnqueue(msg("b"), { job: msg("a"), posted: 2 }, [], thread(["a", "user"], ["r1", "assistant"], ["b", "user"]));
-  assert.equal(started.abortActive, true);
-  assert.deepEqual(started.waiting, [{ ...msg("b"), interrupted: true }]);
+  assert.equal(started.abortActive, false);
+  assert.deepEqual(started.waiting, [msg("b")], "answered after, as its own reply");
   const notYet = planEnqueue(msg("b"), { job: msg("a"), posted: 0 }, [], thread(["a", "user"], ["b", "user"]));
-  assert.equal(notYet.abortActive, true, "nothing on screen yet: restarted for both messages");
-  assert.equal(notYet.waiting[0].interrupted, undefined, "she hadn't said anything, so there's nothing to have been cut off");
+  assert.equal(notYet.abortActive, false, "even before anything's on screen, what she's working on isn't thrown away");
 });
 
-test("interrupting jumps ahead of other chats and drops what she meant to text first here", () => {
-  const waiting = [msg("x", "other"), { ...msg("i"), initiative: true }, { ...msg("p"), extraPrompt: "continue" }];
-  const plan = planEnqueue(msg("b"), { job: msg("a"), posted: 1 }, waiting, []);
-  assert.deepEqual(plan.waiting.map((job) => job.targetId), ["b", "x", "p"]);
+test("several messages sent while she's replying are answered together afterwards", () => {
+  const first = planEnqueue(msg("b"), { job: msg("a"), posted: 1 }, [], thread(["a", "user"], ["b", "user"]));
+  const second = planEnqueue(msg("c"), { job: msg("a"), posted: 1 }, first.waiting, thread(["a", "user"], ["b", "user"], ["c", "user"]));
+  assert.deepEqual(second.waiting, [msg("c")], "one reply, to the latest, after she's done");
+  const plan = planEnqueue(msg("b"), { job: msg("a"), posted: 1 }, [msg("x", "other"), { ...msg("i"), initiative: true }], []);
+  assert.deepEqual(plan.waiting.map((job) => job.targetId), ["x", "b"], "what she meant to text first here is dropped; nothing jumps the queue");
 });
 
 test("messages she hasn't started on are answered together, until she has spoken in between", () => {

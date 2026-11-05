@@ -1364,3 +1364,38 @@ button.attachment-face:hover { border-color: rgba(176, 188, 186, .5); background
 
 /* Offline: her status goes grey, as on a phone. */
 .profile-state.is-offline { color: #6f7a79; }
+
+/* ===== One chat (lib/one-chat): no conversation sidebar ===========================================
+   Laptop screens (1200px and up): chat and canvas side by side, the canvas 30% of the width.
+   Tablets and phones: stacked, the canvas 30% of the screen's height. Written last, and scoped to
+   .single-chat, so it wins over the older layouts above. */
+.app-shell.single-chat .sidebar,
+.app-shell.single-chat .drawer-backdrop { display: none !important; }
+.app-shell.single-chat .workspace-grid { grid-template-columns: minmax(0, 1fr) minmax(185px, 19vw); }
+@media (max-width: 700px) {
+  .app-shell.single-chat .workspace-grid { grid-template-columns: minmax(0, 1fr); }
+}
+@media (min-width: 1200px) {
+  .app-shell.single-chat .main-panel { grid-template-columns: minmax(0, 7fr) minmax(0, 3fr); grid-template-rows: 34px minmax(0, 1fr) auto 20px; }
+  .app-shell.single-chat .center-status-bar { grid-row: 1; grid-column: 1 / -1; }
+  .app-shell.single-chat .conversation-shell { grid-row: 2; grid-column: 1; }
+  .app-shell.single-chat .composer-wrap { grid-row: 3; grid-column: 1; max-width: none; }
+  .app-shell.single-chat .emotion-canvas { grid-row: 2 / 4; grid-column: 2; min-height: 0; border-top: 0; border-bottom: 0; border-left: 1px solid var(--line); border-right: 0; }
+  .app-shell.single-chat .center-privacy-note { grid-row: 4; grid-column: 1 / -1; }
+}
+@media (max-width: 1199.98px) {
+  .app-shell.single-chat .main-panel { grid-template-columns: minmax(0, 1fr); grid-template-rows: 34px minmax(0, 1fr) auto 30dvh 18px; }
+  .app-shell.single-chat .center-status-bar { grid-row: 1; grid-column: 1; }
+  .app-shell.single-chat .conversation-shell { grid-row: 2; grid-column: 1; }
+  .app-shell.single-chat .composer-wrap { grid-row: 3; grid-column: 1; }
+  .app-shell.single-chat .emotion-canvas { grid-row: 4; grid-column: 1; min-height: 0; }
+  .app-shell.single-chat .center-privacy-note { grid-row: 5; grid-column: 1; }
+}
+
+/* Deleting a message: for me, or for everyone. */
+.delete-picker { position: absolute; z-index: 6; bottom: calc(100% + 4px); right: 0; display: grid; min-width: 160px; padding: 4px; border: 1px solid rgba(150, 162, 162, .25); border-radius: 6px; background: #0e1213; box-shadow: 0 10px 30px rgba(0, 0, 0, .5); }
+.delete-picker button { padding: 7px 10px; border: 0; border-radius: 4px; background: none; color: #d9dfdd; font: 10px var(--mono); text-align: left; cursor: pointer; }
+.delete-picker button:hover, .delete-picker button:focus-visible { background: rgba(196, 208, 206, .1); }
+.delete-picker button:nth-child(2) { color: #e3998d; }
+.message-deleted { margin: 0; color: #6f7a79; font-size: 12px; font-style: italic; }
+.message-deleted::before { content: "⊘ "; font-style: normal; }

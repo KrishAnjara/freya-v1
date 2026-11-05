@@ -145,6 +145,18 @@ function fullSearchContext(text: string, sources: SearchSource[]) {
 }
 
 /** For a reply to a message that arrived while she was still sending the last one. */
+/**
+ * They asked for a picture and it's being made (it takes a minute or two). Happy, playful or horny,
+ * she's up for it; in any other mood she makes them work for it a little first. Either way it comes,
+ * and she never describes it or claims it's already sent.
+ */
+const PICTURE_TAKING_NOTE = (note: { mode?: unknown; ofHer?: unknown }, mood: string) => {
+  const what = note.ofHer === true ? "a photo of you" : "a photo";
+  return note.mode === "send"
+    ? `\n\nA PHOTO THEY ASKED FOR\nThey asked for ${what}, and you're up for it: you're taking it now on your phone and it'll come through in a minute or two. Say so your way, in a few words, and keep talking like normal. Don't describe the photo and don't say it's already sent.`
+    : `\n\nA PHOTO THEY ASKED FOR\nThey asked for ${what}. You're ${mood}, not exactly in the mood for it: tease them, make them work for it a little, or ask what's in it for you, playfully, not a refusal. Then give in: it'll come through in a minute or two anyway. Don't describe the photo and don't say it's already sent.`;
+};
+
 const PICTURE_OFFER_NOTE = (ofHer: boolean) => `
 
 A PICTURE?
@@ -778,6 +790,8 @@ ${moodPrompt(sharedMood!)}` : "") +
 ${initiativePrompt(mood)}` : "") +
       (config.unhinged ? `\n\n${UNHINGED_PROMPT}` : "") +
       seenSection(seen, textingFirst) +
+      // A picture they asked for, being taken now: she answers in her mood, and keeps talking.
+      (requestData.pictureNote && typeof requestData.pictureNote === "object" && !textingFirst ? PICTURE_TAKING_NOTE(requestData.pictureNote as { mode?: unknown; ofHer?: unknown }, mood?.name ?? "neutral") : "") +
       // "can i see you?": she can really send a picture, so she offers one instead of describing it.
       (requestData.pictureOffer && typeof requestData.pictureOffer === "object" && !textingFirst ? PICTURE_OFFER_NOTE((requestData.pictureOffer as { ofHer?: unknown }).ofHer === true) : "") +
       // They wrote while she was mid-reply (lib/reply-queue): she stopped, like a person would.

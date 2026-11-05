@@ -116,6 +116,7 @@ import {
 import { herStatusLine } from "@/lib/her-day";
 import { canEdit, deliveryOf, thoughtful } from "@/lib/delivery";
 import { loadInflight, resumeJobs, saveInflight } from "@/lib/resume";
+import { chatDiff, clearCloudChat, deleteForEveryone, deleteForMe, forHer, mergeChats, mergeCloud, pullChat, pushChat } from "@/lib/one-chat";
 import {
   initialBond,
   initiativeFactor,
@@ -211,6 +212,7 @@ import {
   appraiseReply,
   EXPRESSION_INTENSITIES,
   isLongMessage,
+  reactionFace,
   type ExpressionIntensity,
 } from "@/lib/expression-director";
 import { useExpressionDirector } from "@/app/components/useExpressionDirector";
@@ -308,6 +310,10 @@ type Message = {
   command?: "visualize" | "refine" | "image";
   /** They started typing while she got to this, so it shows what it answers. */
   quoted?: boolean;
+  /** Deleted for me: hidden on this side, still in what she knows (lib/one-chat). */
+  hiddenForMe?: boolean;
+  /** Deleted for everyone: "This message was deleted", and she forgets it. */
+  deleted?: boolean;
   /** The user's reaction to this message. */
   reaction?: string;
   /** Her reaction to this message of theirs; it may be her whole answer. */
@@ -527,6 +533,8 @@ function sanitizeMessage(message: Message): Message {
       : {}),
     ...(message.edited === true ? { edited: true } : {}),
     ...(message.quoted === true ? { quoted: true } : {}),
+    ...(message.hiddenForMe === true ? { hiddenForMe: true } : {}),
+    ...(message.deleted === true ? { deleted: true } : {}),
     ...sanitizeMedia(message),
   };
 }
@@ -955,6 +963,8 @@ export default function Home() {
   const [refiningId, setRefiningId] = useState("");
   /** The message whose reaction picker is open, the one being edited, and the one just copied. */
   const [reactingToId, setReactingToId] = useState("");
+  /** The message whose delete choices are open (for me / for everyone). */
+  const [deletingId, setDeletingId] = useState("");
   /** A picture tagged to be changed by the next message (⋯ → Change it). */
   const [pictureEditId, setPictureEditId] = useState("");
   const [editingId, setEditingId] = useState("");
@@ -1098,9 +1108,14 @@ export default function Home() {
   const activePostedRef = useRef(0);
   /** Her last message in the running reply, for carrying on after a refresh (lib/resume). */
   const lastPostedIdRef = useRef("");
+  /** The chat's cloud copy (lib/one-chat): whether the table is there, and what was last written. */
+  const chatCloudRef = useRef(false);
+  const chatSyncedRef = useRef<Map<string, string>>(new Map());
   const moodRef = useRef<MoodState>(mood);
   const userMoodRef = useRef<UserMood | null>(null);
   const bondRef = useRef<Bond>(bond);
+  /** A picture they asked for, and how she answers it (her mood decides), tied to their message. */
+  const pictureAskRef = useRef<{ prompt: string; ofHer: boolean; mode: "send" | "negotiate"; from?: Message; messageId?: string } | null>(null);
   /** "can i see you?" was asked: she offers, and a yes makes the picture (lib/picture-intent). */
   const pictureOfferRef = useRef<{
     subject: string;
@@ -1169,6 +1184,36 @@ export default function Home() {
     const timer = window.setTimeout(() => setUnreadFrom(null), 6000);
     return () => window.clearTimeout(timer);
   }, [unreadFrom]);
+  // The one chat, kept with the account (lib/one-chat): fetched and merged when signed in, then
+  // written back a few seconds after it changes. Without the table it stays in this browser.
+  useEffect(() => {
+    if (!hydrated || !supabase || !user) { chatCloudRef.current = false; return; }
+    let cancelled = false;
+    void pullChat<Message>(supabase, user.id).then((cloud) => {
+      if (cancelled) return;
+      if (!cloud) {
+        console.info("FREYA: run supabase/freya-messages.sql to keep the chat with your account. Until then it stays in this browser.");
+        return;
+      }
+      chatCloudRef.current = true;
+      const conversationId = activeIdRef.current;
+      const local = conversationsRef.current.find((chat) => chat.id === conversationId)?.messages ?? [];
+      const merged = mergeCloud(local, cloud) as Message[];
+      chatSyncedRef.current = new Map(cloud.map((message) => [message.id, JSON.stringify(message)]));
+      patchConversation(conversationId, () => merged);
+    }).catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [hydrated, user]);
+  useEffect(() => {
+    if (!supabase || !user || !chatCloudRef.current) return;
+    const timer = window.setTimeout(() => {
+      const chat = conversations.find((conversation) => conversation.id === activeId)?.messages ?? [];
+      const { upsert, remove, current } = chatDiff(chatSyncedRef.current, chat);
+      if (!upsert.length && !remove.length) return;
+      void pushChat(supabase, user.id, chat, upsert, remove).then((ok) => { if (ok) chatSyncedRef.current = current; });
+    }, 3000);
+    return () => window.clearTimeout(timer);
+  }, [conversations, activeId, user]);
   // After a refresh: pick up the replies she owed (lib/resume), once the saved chats are loaded.
   useEffect(() => {
     if (!hydrated) return;
@@ -1708,6 +1753,10 @@ export default function Home() {
       }
     }
     if (!stored.length) stored = [createConversation()];
+    // One long chat (lib/one-chat): separate chats from before are merged into it, in time order.
+    if (stored.length > 1) {
+      stored = [{ ...stored[0], title: "FREYA", messages: mergeChats(stored) as Message[], unread: stored.reduce((total, chat) => total + (chat.unread ?? 0), 0) }];
+    }
     const savedActiveId = localStorage.getItem(ACTIVE_CONVERSATION_KEY);
     setConversations(stored);
     setActiveId(
@@ -2334,6 +2383,11 @@ export default function Home() {
   }
 
   const newConversation = useCallback(() => {
+    // One long chat: there's no new one to start, so this just goes to the composer.
+    if (conversationsRef.current.length) {
+      window.requestAnimationFrame(() => composerRef.current?.focus());
+      return;
+    }
     reflectRef.current(activeIdRef.current);
     // Decided outside the state updater: React may run an updater twice (it does in development),
     // and creating the conversation in there made two ids, leaving the active one pointing at a
@@ -3096,12 +3150,17 @@ export default function Home() {
         ? target.id
         : target.replyTo;
     const turn = job.turn ?? id();
-    const visible = conversation.messages.slice(0, targetIndex + 1);
+    // Everything up to what she's answering, plus her own replies posted after it to earlier
+    // messages (she finishes a reply before answering what came in meanwhile): modelHistory puts
+    // those back after what they answered, so she knows what she's already said.
+    const before = new Set(conversation.messages.slice(0, targetIndex + 1).map((message) => message.id));
+    const visible = conversation.messages.filter((message, index) =>
+      index <= targetIndex || (message.role === "assistant" && Boolean(message.replyTo) && before.has(message.replyTo!)));
 
     // FREYA reads a voice note as its transcript, and knows it was spoken.
     // FREYA reads a voice note as what was measured and said, and hears it on Gemini.
     const history = modelHistory(
-      visible.map((message) => {
+      forHer(visible).map((message) => {
         const note = referenceNote(message, visible);
         const described = forModel(message);
         return note
@@ -3391,6 +3450,8 @@ export default function Home() {
             message.id === target.id ? { ...message, herReaction } : message,
           ),
         );
+      // The face she makes with it, the moment she reacts.
+      if (herReaction && job.conversationId === activeIdRef.current) offerFace(reactionFace(herReaction));
       if (!text) return;
       // A reply that turns out substantial (a structured explanation, or simply long) becomes one
       // document from here on, rather than a stack of bubbles. What's already sent stays.
@@ -3487,6 +3548,10 @@ export default function Home() {
           candidLanguage,
           mood: moodRef.current,
           ...(userMoodRef.current ? { userMood: userMoodRef.current } : {}),
+          // They asked for a picture: she knows it's being taken, and answers in her mood.
+          ...(pictureAskRef.current && !initiative && pictureAskRef.current.messageId === target.id
+            ? { pictureNote: { mode: pictureAskRef.current.mode, ofHer: pictureAskRef.current.ofHer } }
+            : {}),
           // They may be asking for a picture: she offers one rather than describing it.
           ...(pictureOfferRef.current &&
           !initiative &&
@@ -3774,17 +3839,16 @@ export default function Home() {
           : pictureIntent(text, { hasRecentPicture: Boolean(lastPicture) });
       if (answer) pictureOfferRef.current = null;
       if (intent?.kind === "clear") {
-        setInput("");
-        setReplyingToId("");
-        const prompt = intent.ofHer
-          ? `a photo of you, ${intent.subject}`
-          : intent.subject;
-        void runPicture(
-          prompt,
-          text,
-          intent.followUp && lastPicture ? { from: lastPicture } : {},
-        );
-        return;
+        // A real request (lib/picture-intent). It goes to her like any message: she answers in her
+        // mood (happy, playful or horny, she's up for it; otherwise she makes them work for it a
+        // little, then gives in), and the picture is made meanwhile and sent when it's ready.
+        const willing = ["horny", "playful", "happy"].includes(moodRef.current.name);
+        pictureAskRef.current = {
+          prompt: intent.ofHer ? `a photo of you, ${intent.subject}` : intent.subject,
+          ofHer: intent.ofHer,
+          mode: willing ? "send" : "negotiate",
+          ...(intent.followUp && lastPicture ? { from: lastPicture } : {}),
+        };
       }
       pictureOfferRef.current =
         intent?.kind === "unclear"
@@ -3801,6 +3865,12 @@ export default function Home() {
     };
     if (pictureOfferRef.current && !pictureOfferRef.current.messageId)
       pictureOfferRef.current.messageId = message.id;
+    // The picture they asked for: tied to this message, and started in the background now.
+    if (pictureAskRef.current && !pictureAskRef.current.messageId) {
+      const ask = { ...pictureAskRef.current, messageId: message.id };
+      pictureAskRef.current = ask;
+      void runPicture(ask.prompt, text, { quiet: true, askedBy: message.id, ...(ask.from ? { from: ask.from } : {}) });
+    }
     updateActiveMessages((previous) => [...previous, message]);
     feel(text);
     const asked = requestedExpression(text);
@@ -4024,7 +4094,9 @@ export default function Home() {
       from,
       style,
       variation = false,
-    }: { from?: Message; style?: string; variation?: boolean } = {},
+      quiet = false,
+      askedBy,
+    }: { from?: Message; style?: string; variation?: boolean; quiet?: boolean; askedBy?: string } = {},
   ) {
     if (privacyMode) {
       notify(
@@ -4064,14 +4136,24 @@ export default function Home() {
         : previous
           ? `${previous.prompt}; ${prompt}`
           : prompt;
-    const { conversationId, cardId } = postCommand("image", shown, {
-      picture: {
-        status: "loading",
-        prompt: styleName
-          ? `${fullPrompt} (${styleName.toLowerCase()})`
-          : fullPrompt,
-      },
-    });
+    // Quietly (asked for in conversation): no card until it's ready; she talks meanwhile.
+    const { conversationId, cardId } = quiet
+      ? { conversationId: activeIdRef.current, cardId: id() }
+      : postCommand("image", shown, {
+          picture: {
+            status: "loading",
+            prompt: styleName
+              ? `${fullPrompt} (${styleName.toLowerCase()})`
+              : fullPrompt,
+          },
+        });
+    /** Puts the finished picture in the chat: in place of the card, or (quietly) as her next message, after she's done talking. */
+    const place = async (patch: Partial<Message>) => {
+      if (!quiet) return patchMessage(conversationId, cardId, patch);
+      while (activeJobRef.current?.conversationId === conversationId || jobsRef.current.some((job) => job.conversationId === conversationId && job.targetId === askedBy)) await delay(600);
+      patchConversation(conversationId, (messages) => [...messages, { id: cardId, role: "assistant", content: "", at: new Date().toISOString(), ...(askedBy ? { replyTo: askedBy } : {}), ...patch } as Message]);
+      if (conversationId === activeIdRef.current) setBubbleBeat((count) => count + 1);
+    };
     try {
       const response = await fetch("/api/image", {
         method: "POST",
@@ -4109,7 +4191,7 @@ export default function Home() {
           attachmentId,
         );
         await putAttachment(attachmentId, prepared.stored);
-        patchMessage(conversationId, cardId, {
+        await place({
           attachments: [prepared.meta],
           picture: {
             status: "ready",
@@ -4125,7 +4207,7 @@ export default function Home() {
         const svg = sanitizeSvg(payload.svg);
         if (payload.kind !== "svg" || !svg)
           throw new Error("That picture couldn't be made.");
-        patchMessage(conversationId, cardId, {
+        await place({
           picture: {
             status: "ready",
             kind: "svg",
@@ -4136,14 +4218,26 @@ export default function Home() {
         });
       }
     } catch (error) {
-      patchMessage(conversationId, cardId, {
-        picture: {
-          status: "error",
-          prompt: fullPrompt,
-          error: cardError(error, "That picture couldn't be made."),
-        },
-      });
       reportError("image", error);
+      if (quiet && askedBy) {
+        // No card to mark: she says it, her way, and doesn't pretend she sent it.
+        const reason = cardError(error, "it didn't work");
+        enqueueReply({
+          conversationId,
+          targetId: askedBy,
+          extraPrompt: `[The photo you were sending them didn't work out (${reason.slice(0, 120)}). Tell them in a few words, your way. Don't pretend you sent it and don't describe it.]`,
+        });
+      } else {
+        patchMessage(conversationId, cardId, {
+          picture: {
+            status: "error",
+            prompt: fullPrompt,
+            error: cardError(error, "That picture couldn't be made."),
+          },
+        });
+      }
+    } finally {
+      if (pictureAskRef.current?.messageId === askedBy) pictureAskRef.current = null;
     }
   }
 
@@ -4161,6 +4255,41 @@ export default function Home() {
     setReplyingToId(messageId);
     setRefiningId("");
     window.requestAnimationFrame(() => composerRef.current?.focus());
+  }
+
+  /**
+   * Delete for me: hidden on this side, she still has it. Delete for everyone: gone for both of
+   * them, with a placeholder where it was, and out of what she reads from now on (lib/one-chat).
+   */
+  function removeMessage(message: Message, scope: "me" | "everyone") {
+    setDeletingId("");
+    const conversationId = activeIdRef.current;
+    if (scope === "everyone") {
+      const files = [...(message.attachments ?? []).map((item) => item.id), ...(message.voice ? [message.voice.id] : [])];
+      if (files.length) void deleteAttachments(files);
+    }
+    patchConversation(conversationId, (messages) => scope === "me" ? deleteForMe(messages, message.id) : deleteForEveryone(messages, message.id));
+  }
+
+  /** The whole chat, gone: here, in the cloud, and what she was about to say. Her memories stay. */
+  async function clearChat() {
+    const sure = await askFor({
+      title: "Clear the whole chat?",
+      body: "Every message goes, here and in your account. She keeps her memories of you, and how she feels about you.",
+      confirmLabel: "Clear chat",
+      cancelLabel: "Keep it",
+    });
+    if (sure !== true) return;
+    const conversationId = activeIdRef.current;
+    cancelRepliesFor(conversationId);
+    const files = (conversationsRef.current.find((chat) => chat.id === conversationId)?.messages ?? [])
+      .flatMap((message) => [...(message.attachments ?? []).map((item) => item.id), ...(message.voice ? [message.voice.id] : [])]);
+    if (files.length) void deleteAttachments(files);
+    patchConversation(conversationId, () => []);
+    saveInflight(null);
+    chatSyncedRef.current = new Map();
+    if (supabase && user && chatCloudRef.current) void clearCloudChat(supabase, user.id);
+    notify("Chat cleared.");
   }
 
   /** One reaction per message: picking the same one again takes it off. */
@@ -4753,7 +4882,7 @@ export default function Home() {
   }
 
   return (
-    <main className={`app-shell ${drawerOpen ? "drawer-open" : ""}`}>
+    <main className="app-shell single-chat">
       <ToastStack
         toasts={toasts}
         onDismiss={(id) =>
@@ -4765,18 +4894,11 @@ export default function Home() {
         <button
           type="button"
           className="menu-trigger"
-          onClick={() => setDrawerOpen(!drawerOpen)}
-          aria-expanded={drawerOpen}
-          aria-controls="freya-sidebar"
-          title="Toggle conversations (Ctrl/⌘ + B)"
+          onClick={() => void clearChat()}
+          title="Clear the whole chat"
         >
-          <span className="menu-glyph">☰</span>
-          <span>CHATS</span>
-          {totalUnread > 0 && (
-            <span className="menu-unread" aria-label={`${totalUnread} unread`}>
-              {totalUnread}
-            </span>
-          )}
+          <span className="menu-glyph">⌫</span>
+          <span>CLEAR CHAT</span>
         </button>
         <div className="global-wordmark">FREYA</div>
         <button
@@ -5593,103 +5715,6 @@ export default function Home() {
       )}
 
       <div className="workspace-grid">
-        <aside
-          id="freya-sidebar"
-          className={`sidebar ${drawerOpen ? "mobile-open" : ""}`}
-          aria-label="Conversations and settings"
-        >
-          <div className="sidebar-title">
-            CONVERSATIONS
-            <span className="sidebar-count">{conversations.length}</span>
-          </div>
-          <button
-            className="new-chat"
-            onClick={newConversation}
-            title="New conversation (Ctrl/⌘ + K)"
-          >
-            ＋ <span>New conversation</span>
-          </button>
-          {conversations.length > 4 && (
-            <input
-              className="conversation-filter"
-              type="search"
-              value={conversationFilter}
-              onChange={(event) => setConversationFilter(event.target.value)}
-              placeholder="Filter conversations"
-              aria-label="Filter conversations"
-            />
-          )}
-          <div className="conversation-scroll">
-            {visibleConversations.length === 0 ? (
-              <p className="conversation-empty">
-                No conversation matches that filter.
-              </p>
-            ) : (
-              visibleConversations.map((conversation) => (
-                <div
-                  key={conversation.id}
-                  className={`conversation-row ${conversation.id === activeId ? "active" : ""}`}
-                >
-                  <button
-                    className="conversation-item"
-                    onClick={() => selectConversation(conversation.id)}
-                    aria-current={conversation.id === activeId}
-                    onDoubleClick={() => renameConversation(conversation.id)}
-                    title={conversation.title}
-                  >
-                    <span
-                      className={`conversation-status ${replyingIn.includes(conversation.id) ? "typing" : ""}`}
-                      aria-hidden="true"
-                    />
-                    <span className="conversation-label">
-                      {conversation.title}
-                    </span>
-                    {conversation.unread ? (
-                      <span
-                        className="conversation-unread"
-                        aria-label={`${conversation.unread} unread`}
-                      >
-                        {conversation.unread}
-                      </span>
-                    ) : (
-                      <span className="conversation-meta">
-                        {conversation.messages.length
-                          ? formatRelative(conversation.updatedAt)
-                          : "—"}
-                      </span>
-                    )}
-                  </button>
-                  <button
-                    className="conversation-delete"
-                    onClick={() => deleteConversation(conversation.id)}
-                    aria-label={`Delete conversation: ${conversation.title}`}
-                    title="Delete conversation"
-                  >
-                    ×
-                  </button>
-                </div>
-              ))
-            )}
-          </div>
-          <div className="sidebar-footer">
-            <span className="status-dot" />{" "}
-            <span>
-              {memoryInCloud
-                ? "Memories synced to your account"
-                : "Memories kept in this browser"}
-            </span>
-            <div>v0.5</div>
-          </div>
-        </aside>
-        {drawerOpen && (
-          <button
-            className="drawer-backdrop"
-            type="button"
-            aria-label="Close conversation drawer"
-            onClick={() => setDrawerOpen(false)}
-          />
-        )}
-
         <section className="main-panel">
           <div className="center-status-bar">
             <span className="status-name">FREYA</span>
@@ -5995,6 +6020,7 @@ export default function Home() {
               ) : (
                 <div className="message-list">
                   {messages.map((message, index) => {
+                    if (message.hiddenForMe) return null;
                     const info = thread[index];
                     const clock = info.endsRun ? formatClock(message.at) : "";
                     return (
@@ -6036,7 +6062,11 @@ export default function Home() {
                                     }
                                   />
                                 )}
-                              {editingId === message.id ? (
+                              {message.deleted ? (
+                                <p className="message-deleted">
+                                  {message.role === "user" ? "You deleted this message" : "This message was deleted"}
+                                </p>
+                              ) : editingId === message.id ? (
                                 <div className="message-edit">
                                   <textarea
                                     autoFocus
@@ -6176,8 +6206,25 @@ export default function Home() {
                             )}
                             {!message.streaming &&
                               !message.command &&
+                              !message.deleted &&
                               editingId !== message.id && (
                                 <div className="message-tools">
+                                  <button
+                                    type="button"
+                                    onClick={() => setDeletingId((current) => current === message.id ? "" : message.id)}
+                                    aria-expanded={deletingId === message.id}
+                                    aria-label={`Delete: ${messagePreview(message, 60)}`}
+                                    title="Delete"
+                                  >
+                                    🗑
+                                  </button>
+                                  {deletingId === message.id && (
+                                    <div className="delete-picker" role="group" aria-label="Delete this message">
+                                      <button type="button" onClick={() => removeMessage(message, "me")}>Delete for me</button>
+                                      <button type="button" onClick={() => removeMessage(message, "everyone")}>Delete for everyone</button>
+                                      <button type="button" onClick={() => setDeletingId("")}>Cancel</button>
+                                    </div>
+                                  )}
                                   <button
                                     type="button"
                                     onClick={() => startReply(message.id)}

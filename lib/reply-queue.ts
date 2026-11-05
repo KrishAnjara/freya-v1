@@ -2,9 +2,9 @@
  * What happens when a new reply is owed, while FREYA may already be replying: the rules that make
  * the conversation feel live instead of queued. Pure, so it is tested directly.
  *
- * - A new message from them in the conversation she's replying in interrupts her: the reply in
- *   progress stops where it is (what she's already sent stays) and she answers everything since,
- *   knowing she was cut off. Nothing is ever shown as "queued".
+ * - A new message from them while she's replying never interrupts her: she finishes what she was
+ *   saying, then answers what they sent meanwhile (several messages together, in one reply).
+ *   Nothing is ever shown as "queued".
  * - Messages arriving before she's started on them are answered together, in one reply to the
  *   latest, unless she has spoken in between (then the new one gets its own reply).
  * - She doesn't text first into a conversation that's already going.
@@ -63,13 +63,9 @@ export function planEnqueue<T extends QueueJob>(
 
   if (kind !== "message") return { abortActive: false, waiting: [...waiting, job] };
 
-  if (active && sameConversation(active.job)) {
-    // They wrote while she was replying here: she stops and answers what they've said since.
-    // Anything else she meant to text first in this conversation is moot now.
-    const rest = waiting.filter((other) => !(sameConversation(other) && (jobKind(other) === "message" || jobKind(other) === "initiative")));
-    const interrupted = { ...job, ...(active.posted > 0 ? { interrupted: true } : {}) };
-    return { abortActive: true, waiting: [interrupted, ...rest] };
-  }
+  // They wrote while she was replying here: she finishes first, and anything she meant to text
+  // first in this conversation is moot now. Their messages are answered after, together.
+  if (active && sameConversation(active.job)) waiting = waiting.filter((other) => !(sameConversation(other) && jobKind(other) === "initiative"));
 
   const index = waiting.findIndex((other) => sameConversation(other) && jobKind(other) === "message");
   if (index >= 0) {

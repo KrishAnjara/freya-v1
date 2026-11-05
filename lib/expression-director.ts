@@ -235,3 +235,14 @@ export function moodMotion(name: MoodName, intensity: ExpressionIntensity): Mood
   const toward = (value: number, rest: number) => rest + (value - rest) * scale;
   return { sway: toward(motion.sway, 1), pace: toward(motion.pace, 1), droop: motion.droop * scale, lean: motion.lean * scale, bounce: motion.bounce * scale };
 }
+
+/** Her own emoji reaction to their message (lib/chat-thread), as the face she makes with it. */
+const REACTION_FACE: Record<string, Expression> = {
+  "😂": "laugh", "🤣": "laugh", "💀": "laugh", "❤️": "affectionate", "🥺": "affectionate", "🫶": "affectionate", "🥰": "affectionate", "😘": "affectionate",
+  "😍": "excited", "🔥": "excited", "💯": "confident", "👍": "smile", "😮": "surprised", "😳": "surprised", "😢": "sad", "😭": "sad",
+  "🙄": "annoyed", "😏": "playful", "👀": "curious", "🤔": "thinking", "🙏": "smile",
+};
+export function reactionFace(emoji: string): Cue | null {
+  const expression = REACTION_FACE[emoji] ?? REACTION_FACE[emoji.replace("️", "")];
+  return expression ? { expression, level: 0.6, ms: 3500, reason: `reacted ${emoji}` } : null;
+}

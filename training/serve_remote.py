@@ -32,7 +32,7 @@ Behind the same login and address it also serves:
   --chat-format FORMAT   alpaca | chatml | model (the model's own). Dark Forest (--model) uses alpaca.
   --fallback-model NAME  the helper model (default: Qwen3.5 4B abliterated; "none" to skip)
   --embed-model NAME     for memory (default: nomic-embed-text; "none" to skip)
-  --vision-model NAME    what reads images when her voice can't (default: the helper model)
+  --vision-model NAME    what reads pictures they send (default: Gemma 3 4B uncensored; "none" = the helper model)
   --images               serve pictures (downloads ~36 GB the first time, in the background)
   --image-steps N        sampling steps per picture (default 28; the model card uses 40)
   --ctx N                context window (default: the largest that fits)
@@ -96,6 +96,9 @@ def contexts_for(base):
     return CONTEXTS if "dark-forest" in base.lower() else VOICE_CONTEXTS
 DEFAULT_FALLBACK = "DavidAU/gemma-3-4b-it-heretic-uncensored-abliterated-Extreme"
 DEFAULT_EMBED = "nomic-embed-text"
+#: Her eyes for pictures they send: Gemma 3 4B, uncensored (heretic, abliterated), with its vision
+#: projector, as a GGUF Ollama loads straight from Hugging Face (~3 GB).
+DEFAULT_VISION = "hf.co/mradermacher/gemma-3-4b-it-heretic-uncensored-abliterated-Extreme-GGUF:Q4_K_M"
 #: Pictures, two models (ImageEngine): normal ones image-guided from her portrait, spicy ones with
 #: an NSFW model; if one fails the other tries.
 SDXL_MODEL = "SG161222/RealVisXL_V5.0"
@@ -1382,7 +1385,7 @@ def main():
     parser.add_argument("--chat-format", default="", choices=["", "alpaca", "chatml", "model"])
     parser.add_argument("--fallback-model", default=DEFAULT_FALLBACK)
     parser.add_argument("--embed-model", default=DEFAULT_EMBED)
-    parser.add_argument("--vision-model", default="")
+    parser.add_argument("--vision-model", default=DEFAULT_VISION)
     parser.add_argument("--images", action="store_true")
     parser.add_argument("--image-steps", type=int, default=28)
     parser.add_argument("--ctx", type=int, default=0)

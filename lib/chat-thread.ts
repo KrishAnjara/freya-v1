@@ -154,9 +154,10 @@ export function describeThread(messages: ThreadMessage[]): ThreadRow[] {
     const firstOfTurn = message.role === "assistant" && !seenTurns.has(key);
     seenTurns.add(key);
     const target = message.replyTo ? byId.get(message.replyTo) : undefined;
-    // Tagged only when something sits between the reply and what it answers.
-    // A reply the user chose to make always shows what it replies to.
-    const tag = message.role === "user" ? target : firstOfTurn && target && previous && (previous.id !== target.id || message.quoted) ? target : undefined;
+    // Only a reply the user chose to make shows what it replies to. Hers are never tagged: she
+    // answers in order, like a person texting, without quoting each message.
+    const tag = message.role === "user" ? target : undefined;
+    void firstOfTurn;
     return {
       startsRun: !previous || previous.role !== message.role,
       endsRun: !next || next.role !== message.role,

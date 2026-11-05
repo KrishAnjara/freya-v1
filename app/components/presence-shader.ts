@@ -68,6 +68,7 @@ uniform float brightness;
 uniform vec3 tint;
 uniform vec3 lightDir;
 uniform float pixelRatio;
+uniform float viewScale;
 uniform float focus;
 uniform float pulse;
 uniform float pulseAge;
@@ -108,7 +109,8 @@ void main() {
   float depthFade = clamp(1.0 - (-mv.z - focus + 0.6) / 4.0, 0.35, 1.0);
   vColor *= depthFade;
   float size = (layer < 0.5 ? 0.05 : layer < 1.5 ? 0.066 : 0.045) * (0.8 + 0.4 * seed);
-  gl_PointSize = size * pixelRatio * (240.0 / -mv.z);
+  // Sized to the canvas (viewScale), so the body reads the same on a phone and on a big screen.
+  gl_PointSize = size * pixelRatio * viewScale * (240.0 / -mv.z);
   gl_Position = projectionMatrix * mv;
 }`;
 

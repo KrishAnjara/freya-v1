@@ -48,6 +48,11 @@ const OF_HER = /^(?:you|u|urself|yourself)\b|^(?:your|ur) (?:face|hair|outfit|fi
 /** Things she might be asked to show, but where a picture may not be what they mean. */
 const MAYBE = /^(?:(?:can|could|may) i see (?:you|u|it|that|them|what you look like)|i (?:wanna|want to|would love to|'d love to) see (?:you|u|it|that|what you look like)|what do (?:you|u) look like|show me(?: what you (?:mean|look like))?|let me see(?: you)?|pics\??|pic\??|send pics?\??|got any pics\??|how do (?:you|u) look)[\s?!.]*$/i;
 
+/** About pictures, not asking for one: "i sent you a pic", "nice photo", "do you like taking pictures?". */
+const NOT_ASKING = /\b(i (just )?(sent|took|made|saw|posted|uploaded|shared)|you (sent|posted|shared)|did you (get|see)|nice|cute|love (the|that|this|your)|(that|this|the) (pic|photo|picture|selfie) (you|i|is|was)|(pic|photo|picture|selfie)s? of me\b|do you (like|take|have|enjoy|ever)|are you (into|good at)|can you see (this|my|the)|look at (this|my))\b/i;
+/** Phone shots asked for in so many words: a mirror pic, a pic from behind, the view, a POV. */
+const PHONE_SHOT = /\b(mirror (pic|selfie|photo|shot)s?|(pic|photo|selfie)s? from (behind|the back)|pov (pic|photo|shot)|(show|send) me (the|ur|your) (view|room|outfit|fit|nails|food|setup|place|window)|(show|send) me what (you'?re|u r|ur|you are) (wearing|doing|eating|looking at))\b/i;
+
 const FIGURE = /^(conclusions?|the line|attention|a blank|breath|straws?|up a plan|from (?:experience|memory)|on (?:your|my) experience|the curtains?|a crowd|fire|blood|near|closer|this|that|the picture|it out)\b/i;
 const FOLLOW_UP = /^(?:(?:ok|okay|now|and|but|hmm|pls|please)[\s,]+)*(another(?: one)?|one more|again|more|(?:make|do) (?:it|that|one|her|him)\b.*|same\b.*|but\b.*|now\b.*|(?:darker|brighter|bigger|smaller|closer|wider|zoom(?: in| out)?)\b.*|without\b.*|with\b.*|in (?:the )?(?:style|colou?r)\b.*|change\b.*)$/i;
 
@@ -64,6 +69,14 @@ export function pictureIntent(text: string, { hasRecentPicture = false } = {}): 
   // Trailing punctuation, emoji and "pls" don't change what they asked for.
   const clean = text.trim().replace(/\s+/g, " ").replace(/(?:[\s?!.,]|\p{Extended_Pictographic}|\b(?:pls|plz|please|rn|babe|for me|real quick)\b)+$/u, "");
   if (!clean || clean.length > 320 || /\n/.test(text.trim())) return null;
+  // Talk about pictures isn't asking for one: one they sent or saw, praise, a question about her hobby.
+  if (NOT_ASKING.test(clean)) return null;
+  // Photos from her phone, asked for the way people do: a mirror pic, the view, her outfit, a POV.
+  const phone = clean.match(PHONE_SHOT);
+  if (phone) {
+    const ofHer = !/\b(view|outside|sky|street|room|food|setup|place|window)\b/i.test(clean) || /\b(you|your|ur|urself|yourself)\b.*\b(in|wearing|with)\b/i.test(clean);
+    return { kind: "clear", subject: clean, ofHer, followUp: false };
+  }
   const asked = clean.match(ASKS) ?? clean.match(CAN_I_HAVE);
   if (asked) {
     const subject = subjectOf(asked[1]);

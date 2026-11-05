@@ -74,7 +74,7 @@ test("for the model, a reply follows the message it answers, even if another arr
   ]);
 });
 
-test("messages sent while waiting are merged into one turn, and the reply is tagged", () => {
+test("messages sent while waiting are merged into one turn, and her replies are never tagged", () => {
   const messages = [
     { id: "a", role: "user", content: "hello" },
     { id: "r1", role: "assistant", content: "hi", turn: "t1", replyTo: "a" },
@@ -87,7 +87,8 @@ test("messages sent while waiting are merged into one turn, and the reply is tag
   assert.deepEqual(history.at(-1), { role: "user", content: "also\n\none more thing", attachments: [] });
   const rows = describeThread(messages);
   assert.equal(rows[4].tag, undefined, "a reply right under its message needs no tag");
-  assert.equal(rows[5].tag?.id, "a", "a reply separated from its message is tagged");
+  assert.equal(rows[5].tag, undefined, "she answers in order without quoting each message, even when one lands later");
+  assert.equal(describeThread([{ id: "q", role: "user", content: "x" }, { id: "u", role: "user", content: "re", replyTo: "q" }])[1].tag?.id, "q", "a reply they chose to make still shows what it answers");
   assert.equal(rows[1].endsTurn, true);
   assert.equal(rows[2].startsRun, true);
   assert.equal(rows[3].startsRun, false);

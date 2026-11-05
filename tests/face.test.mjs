@@ -64,8 +64,8 @@ test("she reads for one to five seconds, longer for longer messages", () => {
   assert.ok(readingDelay("x".repeat(500), () => 0) > readingDelay("hi", () => 0));
 });
 
-test("a reply is tagged when they were typing while she got to it", () => {
+test("her replies are never tagged with what they answer, even when they were typing meanwhile", () => {
   const thread = (extra) => [{ id: "a", role: "user", content: "hey" }, { id: "b", role: "assistant", content: "hi", replyTo: "a", ...extra }];
-  assert.equal(describeThread(thread({}))[1].tag, undefined, "right after the message, nothing needs tagging");
-  assert.equal(describeThread(thread({ quoted: true }))[1].tag.id, "a");
+  assert.equal(describeThread(thread({}))[1].tag, undefined);
+  assert.equal(describeThread(thread({ quoted: true }))[1].tag, undefined, "she just answers, in order, like a person texting");
 });
