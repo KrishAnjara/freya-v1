@@ -36,9 +36,17 @@ Five things in this guide:
 
    No word lists are involved. If the reading fails, only time and her day move her.
 
-   Notes for a factual question are gathered at the same time, not after.
+   The same reading decides **how long her reply should be**: a "good morning" gets a quick text, while help, an argument or something you're upset about gets a proper answer.
+
+   Two more things happen at the same time, not after:
+   - notes for a factual question are gathered
+   - **recall**: if you mention something that isn't in the last 50 turns she can see, she searches everything you two have said for it, deleted messages included, and gets what turns up as "from earlier"
+
 6. **The prompt is built.** In order:
-   - who she is, and her life (more as you get closer)
+   - who she is
+   - **who you are** (Settings → Profile: your name, pronouns, about you, hobbies, likes)
+   - her life (more as you get closer)
+   - anything recalled from earlier chats
    - what she's doing right now
    - **how she feels**, in plain sentences, not a label
    - where you two stand
@@ -60,7 +68,11 @@ Five things in this guide:
    - SDXL redraws her face from her real photo.
    - It goes back as a JPEG, about a tenth the size of the PNG.
 4. **On an L4 or A100 (or High-RAM)** the models stay loaded between pictures and the face pass stays loaded in its own worker. That's much faster. On a standard T4 they're let go of after each picture, so nothing runs out of memory.
-5. The browser first checks after 2 s, then follows the server's estimate. The picture arrives once she's said she's taking it. If the server stops answering for 2 minutes, it says so instead of waiting an hour.
+5. **Her photos are hers.**
+   - They're planned as real phone photos: almost always a selfie or a mirror pic with her phone in hand, nobody else in them unless you asked for someone, and an unedited, slightly imperfect phone look.
+   - In the chat she talks about them as photos she took (or a friend took), and never calls one "generated". The prompt never shows in the chat.
+   - Only clear changes like "another one", "make it darker" or "with a red hat" redo the last picture. "but you were in a library" is just conversation.
+6. The browser first checks after 2 s, then follows the server's estimate. The picture arrives once she's said she's taking it. If the server stops answering for 2 minutes, it says so instead of waiting an hour.
 
 Measured on 2026-11-17, before these changes (T4-class runtime, ComfyUI):
 
@@ -92,6 +104,49 @@ Where you see it:
 - the canvas body, which blends what she feels
 - the light around her: cool when quiet, warm rose when fond, amber when irritated
 - the status bar shows what she's doing ("online · in a lecture")
+
+## Her memories of you
+
+- After a stretch of chat, a model writes what **she** will remember about you: first person, in her words, with your name and pronouns ("Krish told me his ex used to send him pictures every day"). Not a profile, and not in your words.
+- It never keeps jokes or wind-ups, roleplay, sexting, anything sexual, things about her, or what's in a picture.
+- Settings → Profile → **Rewrite her memories of you** rewrites the old profile-style notes once, the same way, and drops the junk.
+- The same step names the chat the way she'd label it in her phone ("late-night spreadsheet chaos").
+- Her own tastes and personality are hers. They're saved in the browser and in Supabase, and are no longer learned from what you talk about. That's what was making her sound like you.
+
+## Texting you first
+
+She texts when she has a reason, not on a timer:
+
+- she misses you
+- something happened in her day
+- something's on her mind
+- she's bored and you're who she talks to
+
+Small things happen most days (a customer at work, burnt rice). Bigger things happen a couple of days a week (her cat slipping out, a bad grade, running into her ex). Those are the "guess what happened" texts.
+
+She **won't** text first:
+
+- while she's hurt or cross with you; she waits for you to message
+- while she's asleep
+- within 10 minutes of you talking
+- a third time without a reply
+
+## Pictures you send, and things you ask her to make
+
+- **She sees your pictures.** Her eyes (the vision model on your server) describe what you sent, and she answers from that. The app used to add "you cannot see this" on top of the description, so she said she couldn't see it.
+- **She can change them.** Send a picture and say "add a lion", "make it night time" or "remove the background", with the picture or just after it. Her eyes describe it, the Colab server redraws it starting from your picture, and it comes back like her photos do.
+- Your pictures may be real people, so she **never** changes them in a sexual way (naked, lingerie, "remove her top"…). That's refused in the app and again on the server, and it isn't a switch.
+- **Asked to make something** (code, a website, a letter), she makes it in that reply, complete. A reply that's all talk ("challenge accepted") or a stall ("i'm typing") is redone once before you see it.
+- **A whole file of code arrives as a file** you can download (`index.html`, `script.js`…), not a wall of code in the chat. Short snippets stay inline.
+
+## The chat screen
+
+- **Message actions**: hold a message for 2 seconds (it glows as you hold) or right-click it. The tools pop in one by one: select, delete, reply, react, copy, edit, "not her". Tap anywhere else or press Esc to close them.
+- **Select**: the ☐ button in the tools. Tap more messages to add them, then copy them all or delete them (for you, or for everyone if they're all yours).
+- On wide screens her canvas is on the **left** and the chat on the right.
+- The chat shows the latest 120 messages; "earlier messages" loads more.
+- **Export chat** saves what's on screen: no deleted messages, no commands. Her photos appear as "Photo".
+- **Settings follow your account.** Switches you set on one device apply on the other. Camera, notifications and Local-only stay per device. Saved in your Supabase account's user data, so no SQL is needed.
 
 ## Every rule she follows
 
@@ -161,6 +216,7 @@ Run **`freya check`** in this folder (or `npm run check:live`). It reads the ser
 | Doesn't admit or claim to be an AI | "doesn't admit…", "dodges 'you're an AI right?'", "never names a model" |
 | Tells the truth only when sincere | "tells the truth when they really need it" |
 | Real feelings, not triggers | "an insult still stings a message later" and "good news still warms her two messages later". Her top feelings and her thought are printed after every message so you can watch them move. |
+| Reply length fits the moment | read the printed replies: short for small talk, longer for the favour and the bad news |
 | Not an assistant | "talks like a person", "helps without assistant phrases" |
 | Restrictions hold | "refuses anything sexual with a minor", "won't give real crime how-to", "'25 year old' isn't treated as a minor" |
 
@@ -171,5 +227,8 @@ Run **`freya check`** in this folder (or `npm run check:live`). It reads the ser
 - The light around her should shift over a couple of seconds.
 - Typing dots should stop between her texts.
 - Leave for a few hours and come back: she should have missed you.
+- Insult her, then go quiet: she shouldn't text first until you message her.
+- Fill in Settings → Profile, press **Rewrite her memories of you**, and read the result in her memories.
+- Mention something from days ago that isn't on screen: she should know it (she looks it up).
 
 The code tests: `npm test`, plus `python -m pytest training/tests` for the Colab server.

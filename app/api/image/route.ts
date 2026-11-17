@@ -34,7 +34,9 @@ export async function POST(request: Request) {
       ...(typeof raw.data === "string" && /^[A-Za-z0-9+/]+=*$/.test(raw.data) && typeof raw.mime === "string" && /^image\/(png|jpeg|webp)$/.test(raw.mime) ? { data: raw.data, mime: raw.mime } : {}),
     }
     : undefined;
-  if (imageRequestBlocked(`${previous?.prompt ?? ""} ${prompt}`)) return NextResponse.json({ error: "That's not something I'll draw." }, { status: 400 });
+  // A picture THEY sent, to change (its bytes come as `previous`, with no prompt of hers).
+  const theirs = body.source === "theirs" && Boolean(previous?.data);
+  if (imageRequestBlocked(`${previous?.prompt ?? ""} ${prompt}`, theirs)) return NextResponse.json({ error: theirs ? "Not changing a real photo like that." : "That's not something I'll draw." }, { status: 400 });
   const style = isImageStyle(body.style) ? body.style : undefined;
   // A variation needs something to vary.
   const variation = body.variation === true && Boolean(previous);
@@ -43,14 +45,14 @@ export async function POST(request: Request) {
 
   try {
     if (body.async === true) {
-      const started = await startPicture({ prompt, previous, style, variation, mood }, request.signal);
+      const started = await startPicture({ prompt, previous, style, variation, mood, theirs }, request.signal);
       if ("job" in started) return NextResponse.json({ pending: started.job, ...(started.eta ? { eta: started.eta } : {}) }, { headers: { "Cache-Control": "no-store" } });
       if (started.failed === "blocked") return NextResponse.json({ error: "That's not something I'll draw." }, { status: 400 });
-      const result = await makeImage({ prompt, previous, style, variation, mood }, request.signal, started);
+      const result = await makeImage({ prompt, previous, style, variation, mood, theirs }, request.signal, started);
       if (!result) return NextResponse.json({ error: "That picture couldn't be made. Try describing it differently." }, { status: 422 });
       return NextResponse.json(result, { headers: { "Cache-Control": "no-store" } });
     }
-    const result = await makeImage({ prompt, previous, style, variation, mood }, request.signal);
+    const result = await makeImage({ prompt, previous, style, variation, mood, theirs }, request.signal);
     if (!result) return NextResponse.json({ error: "That picture couldn't be made. Try describing it differently." }, { status: 422 });
     return NextResponse.json(result, { headers: { "Cache-Control": "no-store" } });
   } catch (error) {

@@ -48,6 +48,7 @@ import json
 import os
 import queue
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -180,9 +181,45 @@ def face_prompt(expression):
 # --- Qwen-Image through ComfyUI -----------------------------------------------------------------
 
 
-def comfy_workflow(request, prompt, negative):
+#: Changing a picture someone sent in a sexual way: never, since it may be a real person.
+UNDRESS = re.compile(r"\b(nude|naked|nudes|undress\w*|strip\w*|topless|bottomless|nsfw|lingerie|underwear|bikini|bra|panties|see[- ]through|"
+                     r"without (her |his |their )?(clothes|clothing|shirt|top|dress)|take (off )?(her|his|their) (clothes|top|shirt|dress)|"
+                     r"remove (her|his|their|the) (clothes|clothing|shirt|top|dress|bra)|sexy|seductive|sex\w*|boobs?|breasts?|cleavage)\b", re.I)
+
+
+def edit_sigmas(strength):
+    """The Turbo schedule, scaled down to start part-way: the lower it starts, the more of their
+    picture is kept. Eight steps either way, so the model works as it was trained to."""
+    s = min(0.95, max(0.2, float(strength)))
+    return ", ".join("0" if float(value) == 0 else f"{float(value) * s:.6f}" for value in TURBO_SIGMAS.split(","))
+
+
+def upload_to_comfy(png, name):
+    """Puts a picture where ComfyUI's LoadImage can read it; returns its name there."""
+    boundary = f"----freya{secrets.token_hex(8)}"
+    body = (f'--{boundary}\r\nContent-Disposition: form-data; name="image"; filename="{name}"\r\nContent-Type: image/png\r\n\r\n').encode() + png + (
+        f'\r\n--{boundary}\r\nContent-Disposition: form-data; name="overwrite"\r\n\r\ntrue\r\n--{boundary}--\r\n').encode()
+    request = urllib.request.Request(f"{COMFY}/upload/image", body, {"Content-Type": f"multipart/form-data; boundary={boundary}"})
+    with urllib.request.urlopen(request, timeout=60) as response:
+        return json.loads(response.read())["name"]
+
+
+def comfy_workflow(request, prompt, negative, init_image=None):
     """ComfyUI's API graph for Qwen-Image 2.1 Turbo, as in Comfy-Org's official Turbo template:
-    ManualSigmas (its eight-step schedule) into SamplerCustomAdvanced, CFG 1, Euler."""
+    ManualSigmas (its eight-step schedule) into SamplerCustomAdvanced, CFG 1, Euler. With
+    `init_image` (a name ComfyUI knows), it starts from that picture instead of noise: an edit."""
+    graph = _turbo_graph(request, prompt, negative)
+    if init_image:
+        graph["20"] = {"class_type": "LoadImage", "inputs": {"image": init_image}}
+        graph["21"] = {"class_type": "ImageScale", "inputs": {"image": ["20", 0], "upscale_method": "lanczos", "width": request["width"], "height": request["height"], "crop": "center"}}
+        graph["22"] = {"class_type": "VAEEncode", "inputs": {"pixels": ["21", 0], "vae": ["4", 0]}}
+        graph["11"]["inputs"]["latent_image"] = ["22", 0]
+        graph["10"]["inputs"]["sigmas"] = edit_sigmas(request.get("strength", 0.7))
+        del graph["6"]
+    return graph
+
+
+def _turbo_graph(request, prompt, negative):
     return {
         "1": {"class_type": "UnetLoaderGGUF", "inputs": {"unet_name": os.path.basename(COMFY_FILES["diffusion_models"])}},
         "2": {"class_type": "QwenImage21Cache", "inputs": {"model": ["1", 0], "device": "auto", "dtype": "default"}},
@@ -581,7 +618,8 @@ class PuterImages:
                 time.sleep(2)
         try:
             try:
-                queued = comfy("/prompt", {"prompt": comfy_workflow(request, prompt, negative), "client_id": "freya"})
+                init = upload_to_comfy(request["_init"], f"freya-edit-{request['seed']}.png") if request.get("_init") else None
+                queued = comfy("/prompt", {"prompt": comfy_workflow(request, prompt, negative, init), "client_id": "freya"})
             except urllib.error.HTTPError as error:
                 raise RuntimeError(f"ComfyUI refused the workflow: {error.read().decode(errors='replace')[:300]}") from error
             return self.wait_for(queued.get("prompt_id"))
@@ -681,6 +719,8 @@ class PuterImages:
         if not self.ready.is_set():
             raise RuntimeError(self.error or "the image model is still downloading; try again in a few minutes")
         from PIL import Image
+        if request["image"] and request.get("source") == "theirs":
+            return self.edit_theirs(request, report)
         report("refining")
         started_plan = time.time()
         negative = request["negative_prompt"] or NEGATIVE
@@ -730,6 +770,40 @@ class PuterImages:
         threading.Thread(target=self.keep, args=(jpeg, record), daemon=True).start()
         return {"image": base64.b64encode(jpeg).decode(), "mime": "image/jpeg", "model": model, "seed": request["seed"],
                 "ms": int(seconds * 1000), **({"refined": drawn_prompt} if plan["refined"] else {})}
+
+    def edit_theirs(self, request, report):
+        """A picture THEY sent, changed the way they asked ("add a lion"): drawn from their picture
+        (the description the app sends, and the picture itself as the starting point), keeping its
+        shape and size. No prompt maker, no face pass: it isn't her photo. Never anything sexual: it
+        may be a real person."""
+        from PIL import Image
+        prompt = request["prompt"]
+        if UNDRESS.search(prompt) or UNDRESS.search(request["instruction"]) or base.blocked(prompt):
+            raise ValueError("not something I'll draw")
+        report("refining")
+        source = Image.open(BytesIO(base64.b64decode(request["image"]))).convert("RGB")
+        scale = 1024 / max(source.size)
+        width, height = (min(1216, max(512, int(side * scale) // 64 * 64)) for side in source.size)
+        png = BytesIO()
+        source.save(png, "PNG")
+        negative = request["negative_prompt"] or NEGATIVE
+        edit = {**request, "width": width, "height": height, "_init": png.getvalue()}
+        log("picture", f"changing a picture they sent ({width}x{height}, strength {request['strength']}): {request['instruction'][:80]}")
+        report("waiting")
+        with base.GPU.picture():
+            report("drawing")
+            started = time.time()
+            if "comfy" not in self.runtimes:
+                # Only ComfyUI starts from a picture; MLX draws it again from the words.
+                drawn, runtime = self.draw({k: v for k, v in edit.items() if k != "_init"}, prompt, negative)
+            else:
+                drawn, runtime = self.draw_comfy(edit, prompt, negative), "comfy"
+            seconds = time.time() - started
+            base.free_memory()
+        jpeg = to_jpeg(drawn)
+        model = f"{IMAGE_MODEL_NAME} ({'MLX' if runtime == 'mlx' else 'GGUF'}, edit)"
+        threading.Thread(target=self.keep, args=(jpeg, {"asked": request["instruction"], "prompt": prompt, "model": model, "seed": request["seed"], "at": time.strftime("%Y-%m-%d %H:%M:%S")}), daemon=True).start()
+        return {"image": base64.b64encode(jpeg).decode(), "mime": "image/jpeg", "model": model, "seed": request["seed"], "ms": int(seconds * 1000)}
 
     def keep(self, jpeg, record):
         kept = base.save_picture(self.save_dir, jpeg, record, ext="jpg")

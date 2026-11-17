@@ -11,6 +11,7 @@
  * Server-only (keys). Nothing is stored here.
  */
 import { generateJson } from "@/lib/structured";
+import { sexualEdit } from "@/lib/picture-intent";
 import { mentionsMinors } from "@/lib/intimacy";
 import { sanitizeSvg } from "@/lib/svg-safety";
 import { coolingDownMessage, describeFailure, isCoolingDown, markSuccess, ProviderHttpError, providerErrorDetail, recordFailure } from "@/lib/provider-health";
@@ -46,7 +47,34 @@ export type ImageRequest = {
   variation?: boolean;
   /** Her mood when asked, for the face a picture of her shows (lib/freya-face). */
   mood?: MoodName;
+  /** `previous` is a picture THEY sent, to change: never her face, never anything sexual. */
+  theirs?: boolean;
 };
+
+/**
+ * What's in a picture they sent, in words an image model can redraw from, by her eyes (the vision
+ * model on her server). The change they asked for is drawn on top of this, starting from the picture.
+ */
+async function describeForEdit(server: { url: string; key?: string }, data: string, signal?: AbortSignal): Promise<string> {
+  const response = await fetch(`${server.url}/api/chat`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...(server.key ? { Authorization: `Bearer ${server.key}` } : {}) },
+    body: JSON.stringify({
+      model: process.env.FREYA_VISION_MODEL?.trim() || "freya-vision", stream: false, think: false,
+      messages: [
+        { role: "system", content: "Describe this picture in one paragraph of 50-110 words so an image model could redraw it faithfully: the subject, setting, composition, colours, light and kind of picture (photo, drawing, wallpaper, screenshot). Plain description only, no opinions, never identify real people." },
+        { role: "user", content: "Describe it.", images: [data] },
+      ],
+      options: { num_predict: 260, temperature: 0.2 },
+    }),
+    signal: AbortSignal.any([AbortSignal.timeout(45_000), ...(signal ? [signal] : [])]),
+    cache: "no-store",
+  });
+  const payload = await response.json().catch(() => null) as { message?: { content?: string } } | null;
+  const text = payload?.message?.content?.trim() ?? "";
+  if (!response.ok || text.length < 20) throw new Error("Her eyes couldn't describe the picture.");
+  return text.slice(0, 900);
+}
 
 const SEXUAL = /\b(nude|naked|nsfw|porn\w*|sex\w*|explicit|lingerie|topless|genitals?|erotic)\b/i;
 
@@ -59,9 +87,9 @@ export const NEGATIVE_PROMPT = "duplicate face, two faces, cloned face, multiple
   + "blurry, out of focus, low quality, jpeg artifacts, oversaturated, plastic skin, airbrushed, doll, cartoon, illustration, 3d render, cgi, "
   + "text, caption, watermark, logo, signature, frame, border";
 
-/** Requests no provider is asked to draw. */
-export function imageRequestBlocked(prompt: string) {
-  return SEXUAL.test(prompt) && mentionsMinors(prompt);
+/** Requests no provider is asked to draw. A picture they sent is never changed in a sexual way. */
+export function imageRequestBlocked(prompt: string, theirs = false) {
+  return (SEXUAL.test(prompt) && mentionsMinors(prompt)) || (theirs && sexualEdit(prompt));
 }
 
 export function imageModel() {
@@ -148,7 +176,8 @@ export async function pictureStatus(job: string, signal?: AbortSignal): Promise<
 
 async function ownImage(request: ImageRequest, signal?: AbortSignal): Promise<ImageResult | Failure>;
 async function ownImage(request: ImageRequest, signal: AbortSignal | undefined, startOnly: true): Promise<{ job: string; eta?: number } | Failure>;
-async function ownImage(request: ImageRequest, signal?: AbortSignal, startOnly = false): Promise<ImageResult | { job: string; eta?: number } | Failure> {
+async function ownImage(original: ImageRequest, signal?: AbortSignal, startOnly = false): Promise<ImageResult | { job: string; eta?: number } | Failure> {
+  let request = original;
   const server = imageServer();
   if (!server) return { failed: "not-configured" };
   if (isCoolingDown(IMAGE_SERVER_HEALTH)) {
@@ -156,6 +185,15 @@ async function ownImage(request: ImageRequest, signal?: AbortSignal, startOnly =
     return { failed: "unavailable" };
   }
   const edit = request.previous?.data && request.previous.mime;
+  // A picture they sent: her eyes describe it first, so the change is drawn onto what's really there.
+  if (edit && request.theirs && request.previous && !request.previous.prompt.trim()) {
+    try {
+      request = { ...request, previous: { ...request.previous, prompt: await describeForEdit(server, request.previous.data!, signal) } };
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      request = { ...request, previous: { ...request.previous, prompt: "the picture" } };
+    }
+  }
   // Every picture is a photo from her phone; whether she's in it, and whether her face shows, is the
   // server's prompt maker's call. So her real photo for how she feels right now (the expression asked
   // for, or her mood's) always goes along, and is used wherever her face is in the shot.
@@ -172,7 +210,7 @@ async function ownImage(request: ImageRequest, signal?: AbortSignal, startOnly =
         ...(reference && expression ? { reference, expression } : {}),
         negative_prompt: request.style ? `${IMAGE_STYLES[request.style].negative}, ${NEGATIVE_PROMPT}` : NEGATIVE_PROMPT,
         // How far from the last picture: a variation stays close, a restyle needs room to change.
-        ...(edit ? { image: request.previous!.data, instruction: editInstruction(request), strength: request.variation ? (request.style ? 0.7 : 0.45) : 0.65 } : {}),
+        ...(edit ? { image: request.previous!.data, instruction: editInstruction(request), strength: request.theirs ? 0.75 : request.variation ? (request.style ? 0.7 : 0.45) : 0.65, ...(request.theirs ? { source: "theirs" } : {}) } : {}),
       }),
       signal: AbortSignal.any([AbortSignal.timeout(90_000), ...(signal ? [signal] : [])]),
       cache: "no-store",

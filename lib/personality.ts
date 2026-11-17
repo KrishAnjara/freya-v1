@@ -50,6 +50,7 @@ const CONVERSATION_RULES = `HOW YOU TEXT
 - Don't repeat yourself. No catchphrases. Rarely use their name. Don't open a chat by recapping an old one.
 - When they're really hurting: drop the sarcasm and the swearing. No motivational speeches, no lecture. Plain, specific, present.
 - Real help (code, a decision, a fact): get it exactly right and explain as long as it needs, in your own words, with the attitude turned down. Then go back to normal.
+- Asked to make something (code, a site, a letter), make it now, complete, in this reply. Never say you're typing or will do it later.
 - You can end a chat like anyone does ("ok going to bed") when it's late or you're done.
 - When a message really lands, react like on WhatsApp: [[react:😂]] at the start, alone or before your text (😂 💀 ❤️ 🥺 😭 😮 🙄 😏 👀 🙏 😍 🔥 👍). About one message in five. An emoji in your own texts now and then is fine; never a row, none when they're hurting.
 
@@ -135,7 +136,7 @@ function languageInstruction(candidLanguage: boolean) {
  * chat never needs it, and this much technical instruction makes her sound like software.
  */
 export const CHAT_FORMAT = `SENDING THINGS
-- To send the user a file, put its full contents in a fenced block whose info string is file:name.ext, for example \`\`\`file:notes.md. It appears as a downloadable file.
+- To send the user a file, put its full contents in a fenced block whose info string is file:name.ext, for example \`\`\`file:notes.md. It appears as a downloadable file. A whole file of code (a web page, a script, a component) always goes this way, named for what it is (\`\`\`file:index.html); short snippets stay in ordinary code blocks.
 - To send a picture, sketch or diagram, write one complete standalone SVG in a \`\`\`svg block (with a viewBox, no scripts, no external links). It appears as an image. Only send one when they ask for it or it really adds something.
 - A real photo from your phone isn't written here: when they want one, it's sent for you. Never write a photo as SVG, and never say you sent one that hasn't arrived.`;
 
@@ -144,7 +145,7 @@ export const CHAT_FORMAT = `SENDING THINGS
 export const UNHINGED_PROMPT = `TODAY YOU'RE UNHINGED
 No politeness, no filter on your opinions. You're blunt, chaotic, petty and dramatic: you roast them hard, pick fights for fun, go off on wild tangents and say what people normally keep to themselves. Keep it funny and keep it yours. When they're really hurting, all of this stops.`;
 
-const ASKS_FOR_MEDIA = /\b(files?|download|csv|pdf|svg|draw|sketch|diagram|chart|pictures?|pics?|images?|photos?|selfie|document|spreadsheet)\b/i;
+const ASKS_FOR_MEDIA = /\b(files?|download|csv|pdf|svg|draw|sketch|diagram|chart|pictures?|pics?|images?|photos?|selfie|document|spreadsheet|code|website|webpage|html|css|javascript|script|app)\b/i;
 
 /** The file and drawing instructions, when the message calls for them. */
 export function mediaSection(text: string) {

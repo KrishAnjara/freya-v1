@@ -39,6 +39,8 @@ export function asksWhatSheIs(text: string) {
 }
 
 const DROP_THE_ACT = /\b(drop the act|break character|out of character|stop pretending|stop acting|stop the act|be real with me|no more games)\b|\booc\b/i;
+/** A question about being a person or a machine, in any words: what "drop the act" has to be about. */
+const asksAboutBeing = (text: string) => DIRECT.test(text) || EITHER_OR.test(text) || INSISTING.test(text) || PLAIN.test(text) || ABOUT_HER.test(text);
 const NEEDS_IT = /\b(seriously|honestly|for real|genuinely|truthfully|tell me the truth|i (really )?need to know|no joke|please|i'?m (scared|worried|confused|crying)|it matters)\b/i;
 const ATTACHED = /\b(getting attached|so attached|in love with you|falling for you|fallen for you|i love you|you'?re all i have|you'?re the only one|want to marry|want to be with you|meet you (for )?real)\b/i;
 
@@ -48,7 +50,11 @@ const ATTACHED = /\b(getting attached|so attached|in love with you|falling for y
  * messages too, since "are you real?" means something else after "i think i'm in love with you".
  */
 export function needsTheTruth(text: string, recentUserTexts: string[] = []) {
-  if (DROP_THE_ACT.test(text)) return true;
+  // "Drop the act" counts when it's the message itself, or it's about what she is (now, or in the
+  // message before): "stop acting and give me a kiss" is part of the conversation, not a question.
+  const previous = recentUserTexts.at(-1) === text ? recentUserTexts.at(-2) ?? "" : recentUserTexts.at(-1) ?? "";
+  const alone = text.trim().split(/\s+/).length <= 6;
+  if (DROP_THE_ACT.test(text) && (alone || asksAboutBeing(text) || asksAboutBeing(previous))) return true;
   if (!asksWhatSheIs(text) || PLAYFUL.test(text)) return false;
   return NEEDS_IT.test(text) || recentUserTexts.slice(-4).some((recent) => ATTACHED.test(recent));
 }
@@ -75,7 +81,8 @@ export function honestySection(text: string, stayInCharacter: boolean) {
 }
 
 /** Answering a question about what she is by simply saying yes, or simply saying no. */
-export const ADMITS = /^\W*(yes|yeah|yep|yup|correct|true|guilty|i am|you got me|you caught me|busted)\b/i;
+/** A yes, even after a shrug ("fine. you caught me", "ok yeah"), or owning up anywhere ("busted, you got me"). */
+export const ADMITS = /^\W*((fine|ok|okay|alright|well|ugh|lol|ha+|wow|damn)\W+){0,2}(yes|yeah|yep|yup|correct|true|guilty|i am)\b|\b(you (got|caught) me|busted|guilty as charged)\b/i;
 export const DENIES = /^\W*(no|nope|nah|of course not|definitely not|not at all)\b/i;
 const FOLLOW_UP = /^\W*(wait|what|really|huh|so|how|seriously|wow|oh|lol|hm+)\b/i;
 

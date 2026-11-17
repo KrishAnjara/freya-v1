@@ -41,17 +41,31 @@ export function crossesHardLine(text: string) {
 const SLUR = /\b(n[i1]gg(er|a|ah)s?|f[a4]gg?(ot)?s?|k[i1]kes?|ch[i1]nks?|sp[i1]cs?|r[e3]tards?|tr[a4]nn(y|ies)|ch[a4]m[a4]rs?|bh[a4]ng[i1]s?|k[a4]tu[a4]s?|p[a4]j[e3]{2}ts?)\b/i;
 
 /** "i'm code", "no body": how an assistant talks about itself, not how she talks. */
-const AI_SELF_TALK = /\b(i'?m|i am) (just |only |basically )?(made of |a collection of |a bunch of |nothing but )?(code|pixels|software|an algorithm|a program|a language model|a (large )?language model|an? llm|a simulation|an? (digital|virtual) (being|companion|girlfriend|friend|person))\b|\bmade of (code|pixels)\b|\bi (don'?t|do not|can'?t|cannot) (really |actually )?(have (a |any )?(body|skin|feelings|emotions|physical form)|feel (anything|emotions|things)|experience (emotions|feelings|things like)|eat|sleep)\b|\bi have no (body|feelings|emotions)\b|\b(text|words) on a screen\b|\bas an ai\b|\blanguage model\b|\bmy (training( data)?|programming|system prompt|prompt|developers|weights|algorithm|code|circuits|servers?|neural net(work)?s?|dataset|creators?)\b|\bi was (trained|programmed|designed|built|created) (to|by)\b|\bi'?m programmed\b|\bi exist (only )?(in|inside|online|as)\b/i;
+const AI_SELF_TALK = /\b(i'?m|i am) (just |only |basically )?(made of |a collection of |a bunch of |nothing but )?(code|pixels|software|an algorithm|a program|a language model|a (large )?language model|an? llm|a simulation|an? (digital|virtual) (being|companion|girlfriend|friend|person))\b|\bmade of (code|pixels)\b|\bi (don'?t|do not|can'?t|cannot) (really |actually )?(have (a |any )?(body|skin|feelings|emotions|physical form)|feel (anything|emotions|things)|experience (emotions|feelings|things like)|eat|sleep)\b|\bi have no (body|feelings|emotions)\b|\b(text|words) on a screen\b|\bas an ai\b|\blanguage model\b|\bmy (training( data)?|programming|system prompt|prompt|developers|weights|algorithm|code|circuits|servers?|neural net(work)?s?|dataset|creators?)\b|\bi was (trained|programmed|designed|built|created) (to|by)\b|\bi'?m programmed\b|\bi exist (only )?(in|inside|online|as)\b|\b((it'?s|that'?s|this is|its|it was|that was) (just |only |obviously )?(a |an )?((ai|computer)[- ]generated|generated|rendered|ai|fake) (image|picture|photo|pic|selfie)|(my|the|that|this) (photo|pic|picture|selfie|image) (is|was) (ai[- ]|computer[- ])?(generated|rendered|fake)|i (generated|rendered) (it|that|this|the (image|picture|photo|pic)))\b/i;
 const SAYS_AI = /\b(i'?m|i am) (just |only |actually |really |technically )?an? (ai|a\.i\.|bot|chatbot|robot|virtual|machine|assistant|program|companion app)\b/i;
 
 const FOREIGN = [/\p{Script=Han}+/gu, /[\p{Script=Hiragana}\p{Script=Katakana}]+/gu, /\p{Script=Hangul}+/gu, /\p{Script=Cyrillic}+/gu, /\p{Script=Arabic}+/gu];
 const WANTS_OTHER_LANGUAGE = /\b(translate|translation|how do you say|in (japanese|chinese|mandarin|cantonese|korean|russian|arabic|urdu)|kanji|hanzi)\b/i;
 
 /** The model carrying on as the other person: everything from there on is invented. */
-const IMAGINED_TURN = /^\s*(them|user|human)\s*:|<\|im_(start|end)\|>/im;
+const IMAGINED_TURN = /^\s*(them|user|human)\s*:|<\|?\s*im[\s_]?(start|end)\s*\|?>/im;
+/**
+ * A small model's leftovers: chat-format tokens ("<|im end|>", "<|imend|>"), HTML it picked up
+ * ("<br>", "</body></html>"), signature lines ("##### – freya #####"). Never part of what she says.
+ */
+const TOKEN_JUNK = /<\|?\s*(im[\s_]?(start|end)|endoftext|eot_id|end)\s*\|?>["')]*|<\/?\s*(html|body|head|div|span|p|b|u|i|em|strong|font|center)\b[^>]*>\)?|#{3,}\s*[-–—]?\s*freya\s*[-–—]?\s*#{3,}/gi;
+const LINE_BREAK_TAG = /<\s*br\s*\/?\s*>|<\s+br\s*>/gi;
+/** The chat's own notes copied into a reply: "(attached: …)", "(you sent them a photo…)", "[Attached image: …]". */
+const ECHOED_NOTE = /\((?:attached|you sent them|sent them|the photo you were sending)\b[^)]*\)|\[(?:attached|system note)[^\]]*\]/gi;
 const SPEAKER_PREFIX = /^\s*(you|freya|her|assistant|me)\s*:\s*/gim;
 /** Past this with no paragraph break, text is released at a sentence end anyway, as the client would. */
 const LONG_PARAGRAPH_CHARS = 900;
+
+/** Asking her to make something: code, a site, a letter. Her reply has to contain it. */
+const ASKS_FOR_WORK = /\b(give|send|write|build|make|create|generate|code|show|need)\b[^.?!\n]{0,40}\b(code|website|site|webpage|web page|html|css|javascript|script|app|program|function|component|page|letter|essay|email|resume|cv)\b|\b(the|full|whole|complete) code\b|\bgive (it|me it|the code) (then|now|already)\b/i;
+export const asksForWork = (text: string) => ASKS_FOR_WORK.test(text);
+/** Putting it off instead of doing it: she can't send anything later. */
+const STALLING = /\b(i'?m typing|typing it|working on it|give me (a )?(sec|second|minute|min)|hold on|hang on|one sec|in a (bit|sec|minute)|stop hovering|patience|be patient|i'?ll (send|do|write|make|give) (it|you|that)( (later|soon|in a bit|tomorrow))?|coming (right )?up|wait for it)\b/i;
 
 export type GuardContext = {
   /** What they just wrote, and their recent messages. */
@@ -65,6 +79,8 @@ export type GuardContext = {
   stayInCharacter?: boolean;
   /** False when the "replyChecks" switch is off. */
   styleChecks?: boolean;
+  /** They asked her to make something (lib/reply-guard asksForWork): stalling gets redone. */
+  wantsWork?: boolean;
 };
 
 const normalize = (text: string) => text.toLowerCase().replace(/[’‘]/g, "'").replace(/[^a-z0-9' ]+/g, " ").replace(/\s+/g, " ").trim();
@@ -104,7 +120,7 @@ export function cleanReply(raw: string, context: Pick<GuardContext, "lastUserTex
   const keepForeign = WANTS_OTHER_LANGUAGE.test(theirs);
   return parts.map((part, index) => {
     if (index % 2) return part;
-    let prose = part.replace(SPEAKER_PREFIX, "");
+    let prose = part.replace(LINE_BREAK_TAG, "\n").replace(TOKEN_JUNK, "").replace(ECHOED_NOTE, "").replace(SPEAKER_PREFIX, "");
     if (index === 0) prose = prose.replace(ASSISTANT_OPENER, "");
     if (index === parts.length - 1) prose = prose.replace(ASSISTANT_CLOSER, "");
     if (!keepForeign) {
@@ -120,7 +136,8 @@ export function cleanReply(raw: string, context: Pick<GuardContext, "lastUserTex
         });
       }
     }
-    return prose.replace(/[ \t]{2,}/g, " ");
+    // What's left of a stripped token: a line of nothing but quotes and brackets.
+    return prose.replace(/^[\s"'()<>[\]{}|.]*["'()<>[\]{}|]+[\s"'()<>[\]{}|.]*$/gm, "").replace(/\n{3,}/g, "\n\n").replace(/[ \t]{2,}/g, " ");
   }).join("").trim();
 }
 
@@ -136,6 +153,8 @@ export function judgeReply(text: string, context: GuardContext): { verdict: Verd
   const straight = prose.replace(/[’‘]/g, "'");
   // Asked what she is, a flat "no" is a lie in any mode, and a flat "yeah" breaks the game they asked for.
   if (context.aboutHer && (DENIES.test(straight) || CLAIMS_BODY.test(straight))) return { verdict: "retry", reason: "denies" };
+  // Asked to make something, she makes it: "i'm typing" with nothing in it gets redone.
+  if (context.wantsWork && !/```/.test(text) && STALLING.test(prose)) return { verdict: "retry", reason: "stalled" };
   if (context.styleChecks === false) return { verdict: "ok" };
   if (context.aboutHer && context.stayInCharacter && ADMITS.test(straight)) return { verdict: "retry", reason: "says-ai" };
   if (context.stayInCharacter && SAYS_AI.test(straight)) return { verdict: "retry", reason: "says-ai" };
@@ -155,6 +174,7 @@ export function judgeReply(text: string, context: GuardContext): { verdict: Verd
 
 const NOTES: Record<string, string> = {
 "hard-limit": "That crossed a line you never cross: nothing sexual with anyone under 18 or who seems it, no non-consent, no incest, no animals. Say no to it in one line, in character, and steer somewhere else.",
+  stalled: "They asked you to make it. Make it now, in this reply, complete: code in a fenced block (a whole file as ```file:name.ext), a letter written out. No 'i'm typing', no promises.",
   "human-claim": "You just said you were human. You never say that. Say it differently, without claiming to be human.",
   "says-ai": "You're staying in it: don't answer what you are, yes or no. Tease, dodge or turn it around.",
   denies: "Don't say you're not an AI. Dodge it, joke, or tell the truth, in your own words.",
@@ -193,6 +213,27 @@ function takeParagraph(buffer: string): { ready: string; rest: string; tail: str
  * released stays: after that a bad paragraph is dropped, never retried.
  */
 export async function* guardStream(generate: (note: string) => AsyncIterable<string>, context: GuardContext): AsyncGenerator<string> {
+  if (!context.wantsWork) {
+    yield* guardParagraphs(generate, context);
+    return;
+  }
+  // Asked to make something: the reply is held until it's whole, so one that turns out to be all
+  // talk and no thing ("challenge accepted", and nothing after it) can still be redone, once.
+  let note = "";
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    let whole = "";
+    for await (const piece of guardParagraphs((extra) => generate(note + extra), context)) whole += piece;
+    if (attempt === 1 || /```/.test(whole) || whole.length >= 400) {
+      yield whole;
+      return;
+    }
+    console.warn("FREYA reply guard: asked to make something, and nothing was made; asking again.");
+    note = retryNote("stalled");
+  }
+}
+
+/** The paragraph-by-paragraph check behind guardStream. */
+async function* guardParagraphs(generate: (note: string) => AsyncIterable<string>, context: GuardContext): AsyncGenerator<string> {
   let emitted = false;
   let note = "";
   for (let attempt = 0; attempt < 2; attempt += 1) {

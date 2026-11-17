@@ -26,7 +26,7 @@
  * out from the feelings every time they change (label). This is a character simulation the app keeps,
  * not a measurement of anything inside a model. Pure apart from the storage helpers, so it's tested.
  */
-import { herDayEvent, herMoment, type ActivityName, type Temper } from "@/lib/her-day";
+import { herBigThing, herDayEvent, herMoment, type ActivityName, type Temper } from "@/lib/her-day";
 
 export const FEELINGS = [
   "joy", "affection", "amusement", "curiosity", "excitement", "desire", "pride",
@@ -83,6 +83,8 @@ export type HeartState = {
   wants?: Want;
   /** Her day's small happening last taken in (lib/her-day), so each one lands once. */
   dayEvent?: string;
+  /** The last bigger thing that happened to her (lib/her-day herBigThing), likewise. */
+  bigThing?: string;
   // Worked out from the above every time they change (label): her face and older code read these.
   name: MoodName;
   energy: number;
@@ -258,6 +260,12 @@ export function passTime(input: HeartState, now = Date.now(), context: TimeConte
   if (event && event.key !== state.dayEvent) {
     next = { ...next, dayEvent: event.key };
     if (silent > 10 * MINUTE || state.talked === 0) next = feel(next, event.feel, now, false, { text: event.text, feeling: event.mainFeeling, own: true });
+  }
+  // Now and then something bigger happens: it hits harder and stays on her mind longer.
+  const big = herBigThing(new Date(now));
+  if (big && big.key !== state.bigThing) {
+    next = feel({ ...next, bigThing: big.key }, big.feel, now, false, { text: big.text, feeling: big.mainFeeling, own: true });
+    next = { ...next, residue: next.residue.map((item) => item.text === cleanText(big.text, 100) ? { ...item, weight: 0.8 } : item) };
   }
   // Thoughts older than a few hours are gone.
   next = { ...next, thoughts: next.thoughts.filter((thought) => now - thought.at < 4 * HOUR) };
@@ -454,6 +462,36 @@ export function desireLine(state: HeartState): string {
   return desire >= 0.25 ? `\n\nRight now you're ${phrase("desire", desire)}, and you're not hiding it.` : "";
 }
 
+/**
+ * Whether she'd text them first right now, decided by how she feels, not a timer: she misses them,
+ * something happened in her day, something's on her mind, or she's bored and they're who she talks
+ * to. Never while she's hurt or cross with them (she waits for them to come to her), never when she's
+ * asleep, never right after they've talked, and not a third time unanswered. `closeness` is how
+ * much she likes them (the relationship's affection): the closer, the readier she is.
+ * The browser texts when `urge` passes READY_TO_TEXT, then gives it a rest (`restMs`).
+ */
+export const READY_TO_TEXT = 0.5;
+export function urgeToText(state: HeartState, now = Date.now(), closeness = 0.5): { urge: number; reason: string; restMs: number } {
+  const none = (reason: string) => ({ urge: 0, reason, restMs: 20 * MINUTE });
+  const silent = now - state.lastUserAt;
+  if (state.talked === 0) return none("they haven't talked yet");
+  if (silent < 10 * MINUTE) return none("they were just here");
+  if (state.body < 0.2) return none("asleep");
+  if (state.unprompted >= 2) return none("already texted twice without a reply");
+  const sore = state.feelings.hurt >= 0.3 || state.feelings.irritation >= 0.35 || state.residue.some((item) => !item.own && (item.feeling === "hurt" || item.feeling === "irritation") && item.weight >= 0.4);
+  if (sore) return none("cross with them: she waits for them to come to her");
+  const fresh = state.residue.find((item) => item.own && now - item.at < 3 * HOUR && item.weight >= 0.35);
+  const thinking = state.thoughts[0] && now - state.thoughts[0].at < 90 * MINUTE;
+  const bored = Math.max(0, state.feelings.boredom - TEMPERAMENT.rest.boredom);
+  let urge = 0.9 * state.feelings.longing + 0.6 * bored + (fresh ? 0.45 : 0) + (thinking ? 0.12 : 0) + 0.3 * Math.max(0, state.feelings.affection - 0.3);
+  urge *= 0.6 + 0.4 * clamp(closeness);
+  // A second text without a reply takes a lot more.
+  if (state.unprompted === 1) urge -= 0.35;
+  const reason = fresh ? `something happened: ${fresh.text}` : state.feelings.longing >= 0.3 ? "she misses them" : bored > 0.2 ? "bored, and they're who she talks to" : thinking ? "something's on her mind" : "nothing much";
+  // The readier she was, the sooner she might again; otherwise a good while.
+  return { urge: clamp(urge), reason, restMs: (urge >= 0.8 ? 40 : 75) * MINUTE };
+}
+
 /** Guidance when she texts first: something from her head, not a random topic. */
 export function initiativePrompt(state: HeartState, now = Date.now()): string {
   const minutes = Math.round((now - state.lastUserAt) / 60_000);
@@ -539,6 +577,7 @@ export function normalizeHeart(input: unknown): HeartState | null {
     body: clamp(number(raw.body, 0.55)), residue, thoughts,
     ...(isWant(raw.wants) ? { wants: raw.wants } : {}),
     ...(typeof raw.dayEvent === "string" && raw.dayEvent.length <= 40 ? { dayEvent: raw.dayEvent } : {}),
+    ...(typeof raw.bigThing === "string" && raw.bigThing.length <= 40 ? { bigThing: raw.bigThing } : {}),
     name: isMoodName(raw.name) ? raw.name : "neutral", energy: 0.55, warmth: 0.5, since: number(raw.since, now),
     ...bookkeeping,
   };

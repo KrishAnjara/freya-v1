@@ -53,7 +53,7 @@ function geminiContents(messages: ChatMessage[]) {
   }));
 }
 
-const MAX_MESSAGES = 24;
+const MAX_MESSAGES = 60;
 const MAX_MESSAGE_CHARS = 6000;
 /**
  * Ceiling for turns the chat route has already validated and then extended with attached
@@ -78,6 +78,14 @@ const VOICE_SERVER_TIMEOUT_MS = 90_000;
 function ollamaTimeoutMs(local = ollamaIsLocal()) {
   return Math.max(10_000, Number(process.env.OLLAMA_TIMEOUT_MS) || (local ? 300_000 : 90_000));
 }
+
+/**
+ * The laptop standing in for her server (which is down): a minute to start answering, then the next
+ * voice. As her only voice it gets the full five minutes a cold CPU load can take; as a stand-in,
+ * waiting that long made a reply take five minutes before Groq answered.
+ */
+const LAPTOP_STAND_IN_MS = 60_000;
+const timeoutFor = (target: OllamaTarget): number => target.local && !ollamaIsLocal() ? Math.min(LAPTOP_STAND_IN_MS, ollamaTimeoutMs(true)) : ollamaTimeoutMs(target.local);
 
 /** One Ollama endpoint and model: the Colab server, its fallback model, or the laptop. */
 export type OllamaTarget = Pick<OllamaTier, "baseUrl" | "model" | "key" | "local" | "health" | "label"> & { vision?: boolean };
@@ -319,7 +327,7 @@ async function ollamaChat(system: string, messages: ChatMessage[], signal: Abort
       method: "POST",
       headers: ollamaHeadersFor(target),
       body: ollamaBody(system, messages, target, false, think),
-    }, signal, ollamaTimeoutMs(target.local));
+    }, signal, timeoutFor(target));
     if (!response.ok) throw new ProviderHttpError(`Ollama request failed (${response.status}).`, response.status, undefined, providerErrorDetail(payload));
     const text = payload?.message?.content;
     if (typeof text !== "string" || !text.trim()) throw new Error("Ollama returned no text.");
@@ -642,7 +650,7 @@ async function* ollamaStream(system: string, messages: ChatMessage[], signal: Ab
       method: "POST",
       headers: ollamaHeadersFor(target),
       body: ollamaBody(system, messages, target, true, think),
-    }, signal, ollamaTimeoutMs(target.local)));
+    }, signal, timeoutFor(target)));
     if (!response.ok || !response.body) {
       const payload = await response.json().catch(() => null);
       throw new ProviderHttpError(`Ollama request failed (${response.status}).`, response.status, undefined, providerErrorDetail(payload));

@@ -24,7 +24,8 @@ import { consumeChatRateLimit, isSelfHosted, RateLimitUnavailableError, type Cha
 import { normalizeCharacterProfile } from "@/lib/character-profile";
 import { containsSensitiveCredential, redactSensitiveCredentials } from "@/lib/sensitive-data";
 import { applyAppraisal, arrive, desireLine, heartPrompt, initialHeart, initiativePrompt, newerHeart, normalizeHeart, passTime } from "@/lib/heart";
-import { appraiseHeart } from "@/lib/mood-appraisal";
+import { appraiseHeart, lengthLine } from "@/lib/mood-appraisal";
+import { recallFromChat, recallSection, recallTerms } from "@/lib/chat-recall";
 import { crisisReading, faceReading, nextUserMood, normalizeUserMood, readUserMood, userMoodSection } from "@/lib/user-mood";
 import { homeTimeReply, noSearchReply, timeReply, unknownZoneReply } from "@/lib/plain-replies";
 import { asksOut, bondSection, initialBond, nextBond, normalizeBond } from "@/lib/relationship";
@@ -33,10 +34,11 @@ import { INTIMACY_PROMPT, PLAYFUL_HEAT_PROMPT, PRIVATE_VOICE_DOWN, isIntimateTon
 import { canonSection, closenessOf, normalizeTotals } from "@/lib/canon";
 import { herMoment } from "@/lib/her-day";
 import { isRealQuestion, lastWord, momentSections } from "@/lib/moment-prompt";
-import { guardStream, guardText, type GuardContext } from "@/lib/reply-guard";
+import { asksForWork, guardStream, guardText, type GuardContext } from "@/lib/reply-guard";
 import { ollamaContextLength, ollamaIsLocal } from "@/lib/ollama-models";
 import { honestAnswer, honestySection, needsTheTruth, sincerelyAsksIfHuman, topicIsLive } from "@/lib/honesty";
 import { chapterContext, normalizeChapters, normalizeRelationship } from "@/lib/chapters";
+import { normalizeUserProfile, userProfileSection } from "@/lib/user-profile";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -45,7 +47,8 @@ export const dynamic = "force-dynamic";
  * carry up to four downscaled images or a PDF as base64, so the body ceiling is set by those.
  */
 const MAX_BODY_CHARS = 6_000_000;
-const MAX_REQUEST_MESSAGES = 24;
+/** Her last 50 turns travel with each message; older ones are looked up when they come up (lib/chat-recall). */
+const MAX_REQUEST_MESSAGES = 60;
 /**
  * Input budget per reply. Groq allows ~8,000 input tokens a minute per model, so an
  * unbounded prompt (24 turns of up to 6,000 characters, plus raw search text) could exhaust
@@ -156,12 +159,23 @@ function fullSearchContext(text: string, sources: SearchSource[]) {
  * she's up for it; in any other mood she makes them work for it a little first. Either way it comes,
  * and she never describes it or claims it's already sent.
  */
-const PICTURE_TAKING_NOTE = (note: { mode?: unknown; ofHer?: unknown }, mood: string) => {
+const PICTURE_TAKING_NOTE = (note: { mode?: unknown; ofHer?: unknown; edit?: unknown }, mood: string) => {
   const what = note.ofHer === true ? "a photo of you" : "a photo";
+  // Changing a picture they sent: she's on it, and it comes back in a minute or two.
+  if (note.edit === true) return `\n\nTHEIR PICTURE, CHANGED\nThey asked you to change the picture they sent, and you're doing it now on your phone; it'll come back to them in a minute or two. Say so your way, in a few words, and keep talking. Don't describe the result and don't say it's done.`;
   return note.mode === "send"
     ? `\n\nA PHOTO THEY ASKED FOR\nThey asked for ${what}, and you're up for it: you're taking it now on your phone and it'll come through in a minute or two. Say so your way, in a few words, and keep talking like normal. Don't describe the photo and don't say it's already sent.`
     : `\n\nA PHOTO THEY ASKED FOR\nThey asked for ${what}. You're ${mood}, not exactly in the mood for it: tease them, make them work for it a little, or ask what's in it for you, playfully, not a refusal. Then give in: it'll come through in a minute or two anyway. Don't describe the photo and don't say it's already sent.`;
 };
+
+/**
+ * Her photos are hers. Once she's sent one, she talks about it like anyone would: a selfie she took,
+ * a mirror pic, her phone on a timer, a friend taking it. Never a "generated image".
+ */
+const PHOTOS_NOTE = `
+
+YOUR PHOTOS
+The photos you've sent them are yours, from your phone: selfies and mirror pics you took yourself, or one a friend took of you, or your phone propped up on a timer. If they ask about one (who took it, where you were, who's in it), answer like that, about what's in it. Never call one generated, rendered, edited by a computer or fake.`;
 
 const PICTURE_OFFER_NOTE = (ofHer: boolean) => `
 
@@ -533,6 +547,13 @@ export async function POST(request: Request) {
     const readingPromise = judges && !privacyMode
       ? appraiseHeart(heart, messages, { intimate: intimateMode, own: ownReadingOnly, signal: request.signal })
       : Promise.resolve(null);
+    // Something they mention that isn't in the conversation she can see: she looks for it in
+    // everything they've said to each other, deleted messages too (lib/chat-recall), meanwhile.
+    const theirProfile = normalizeUserProfile(requestData.userProfile);
+    const terms = useMemories && cloudState && !textingFirst ? recallTerms(lastText, messages.slice(0, -1).map((message) => message.content).join(" ")) : [];
+    const recallPromise = terms.length && cloudState
+      ? recallFromChat(bearer, cloudState.userId, terms, messages.map((message) => message.content))
+      : Promise.resolve([]);
 
     // When the local model is the one speaking, a cloud model researches the question first so
     // a small model can answer beyond what it knows. Privacy mode never leaves the machine,
@@ -741,6 +762,10 @@ ${historySummary}
       : null;
     const attachmentNotes = described?.text ?? null;
     const localSpeaks = localVoice && (!visual || Boolean(attachmentNotes) || ownSees);
+    // Read for her by her eyes (a vision model): those notes are what she saw. Her voice gets the
+    // words, not image bytes it can't open; sending those made it add "you cannot see this", and she
+    // said she couldn't see a picture her eyes had just described.
+    const seenTurns: ChatMessage[] = attachmentNotes && !ownSees && localSpeaks ? turns.map((turn) => ({ role: turn.role, content: turn.content })) : turns;
     // Started earlier for ordinary turns; a hard question whose panel failed gets one now instead.
     const brief = (await briefPromise) ?? (localSpeaks && !panel && !visual && deliberate
       ? await buildBrief(turns, request.signal, briefProviderFor(lastText, Boolean(searchMaterial)), searchMaterial)
@@ -787,9 +812,16 @@ ${historySummary}
     const intimateGuidance = !soundsUpset(lastText) && (intimateTurn || playfulHeat)
       ? `\n\n${INTIMACY_PROMPT}${playfulHeat ? `\n\n${PLAYFUL_HEAT_PROMPT}` : ""}${desireLine(heart)}`
       : "";
+    // Asked to make something now, or pushing for what they asked for a moment ago ("give it then").
+    const makingSomething = !textingFirst && (asksForWork(lastText) || (lastText.length < 40 && userTexts.slice(-3, -1).some(asksForWork)));
+    // Who they are, in their own words (Settings → Profile): what she knows about them from the start.
+    const aboutThem = userProfileSection(theirProfile);
+    const recalled = recallSection(await recallPromise, theirProfile.name || "they");
     const system = persona +
+      aboutThem +
       canonSection(closeness) +
       history +
+      recalled +
       summaryContext +
       "\n\n" +
       dateContext +
@@ -806,20 +838,25 @@ ${historySummary}
       (textingFirst && autonomyLevel > 0 ? `\n\n${initiativePrompt(heart, now.getTime())}` : "") +
       (config.unhinged ? `\n\n${UNHINGED_PROMPT}` : "") +
       seenSection(seen, textingFirst) +
+      // She's sent photos in this chat: they're hers, from her phone.
+      (messages.some((message) => message.role === "assistant" && /\(you sent them a (photo|little drawing)/.test(message.content)) ? PHOTOS_NOTE : "") +
       // A picture they asked for, being taken now: she answers in her mood, and keeps talking.
-      (requestData.pictureNote && typeof requestData.pictureNote === "object" && !textingFirst ? PICTURE_TAKING_NOTE(requestData.pictureNote as { mode?: unknown; ofHer?: unknown }, heart.name) : "") +
+      (requestData.pictureNote && typeof requestData.pictureNote === "object" && !textingFirst ? PICTURE_TAKING_NOTE(requestData.pictureNote as { mode?: unknown; ofHer?: unknown; edit?: unknown }, heart.name) : "") +
       // "can i see you?": she can really send a picture, so she offers one instead of describing it.
       (requestData.pictureOffer && typeof requestData.pictureOffer === "object" && !textingFirst ? PICTURE_OFFER_NOTE((requestData.pictureOffer as { ofHer?: unknown }).ofHer === true) : "") +
       // They wrote while she was mid-reply (lib/reply-queue): she stopped, like a person would.
       (requestData.interrupted === true && !textingFirst ? INTERRUPTED_NOTE : "") +
+      // How long this reply should be, from her reading of the moment (a "hey" gets a quick text back);
+      // asked to make something, it's as long as the thing itself.
+      (textingFirst ? "" : lengthLine(makingSomething ? "long" : reading?.length)) +
       // Last, because the last thing it reads is what a model follows most closely.
-      (textingFirst ? "" : lastWord(lastText)) +
+      (textingFirst ? "" : lastWord(lastText, makingSomething)) +
       honestySection(lastText, stayInCharacter);
     // A 4,096-token window (this laptop's model, or Dark Forest on the server) holds the persona and
     // only a short history; a longer one would push the persona out of what the model reads.
     const tightWindow = smallVoice || ollamaContextLength() <= 4096;
     const wideWindow = (localSpeaks || intimateTurn) && !smallVoice && ollamaContextLength() >= 16_384;
-    const promptMessages = fitHistory(turns, tightWindow && (localSpeaks || privacyMode || intimateTurn) ? LOCAL_HISTORY_MAX_CHARS : wideWindow ? WIDE_HISTORY_MAX_CHARS : HISTORY_MAX_CHARS);
+    const promptMessages = fitHistory(seenTurns, tightWindow && (localSpeaks || privacyMode || intimateTurn) ? LOCAL_HISTORY_MAX_CHARS : wideWindow ? WIDE_HISTORY_MAX_CHARS : HISTORY_MAX_CHARS);
     const guardContext: GuardContext = {
       lastUserText: lastText,
       recentUserTexts: userTexts.slice(-4),
@@ -827,6 +864,7 @@ ${historySummary}
       aboutHer: topicIsLive(userTexts),
       stayInCharacter,
       styleChecks: config.replyChecks !== false,
+      wantsWork: makingSomething,
     };
     /** What each attempt sends. A retry adds a private note to the prompt. */
     // On a free GPU hidden thinking runs at about 10 tokens a second: replies took minutes, and some

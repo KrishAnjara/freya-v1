@@ -96,6 +96,28 @@ function FileCard({ name, source }: { name: string; source: string }) {
   );
 }
 
+/** The name a whole file goes by, from its language (or a name in its first line). */
+const FILE_NAMES: Record<string, string> = {
+  html: "index.html", htm: "index.html", css: "styles.css", js: "script.js", javascript: "script.js", mjs: "script.mjs", jsx: "App.jsx",
+  ts: "main.ts", typescript: "main.ts", tsx: "App.tsx", py: "main.py", python: "main.py", json: "data.json", java: "Main.java",
+  c: "main.c", cpp: "main.cpp", "c++": "main.cpp", cs: "Program.cs", go: "main.go", rs: "main.rs", rust: "main.rs", php: "index.php",
+  rb: "main.rb", ruby: "main.rb", kt: "Main.kt", swift: "main.swift", sh: "script.sh", bash: "script.sh", sql: "query.sql",
+  yaml: "config.yaml", yml: "config.yaml", xml: "data.xml", vue: "App.vue", svelte: "App.svelte",
+};
+
+/**
+ * Whether a code block is a whole file rather than a snippet: a complete web page, or 30 lines or
+ * more in a language that's written as files. Those arrive as a file to download, not an inline wall.
+ */
+export function wholeFileName(language: string | undefined, source: string): string | null {
+  const lang = (language ?? "").toLowerCase();
+  const named = source.match(/^\s*(?:\/\/|#|<!--|\/\*)\s*([\w.-]+\.[a-z0-9]{1,6})\b/i)?.[1];
+  const page = /^\s*(<!doctype html|<html[\s>])/i.test(source);
+  if (page) return named ?? "index.html";
+  if (!FILE_NAMES[lang]) return null;
+  return source.split("\n").length >= 30 ? named ?? FILE_NAMES[lang] : null;
+}
+
 const markdownComponents: Components = {
   pre({ children }) {
     const codeChild = isCodeElement(children)
@@ -111,6 +133,9 @@ const markdownComponents: Components = {
       const fileName = language?.match(/^file:(.+)$/)?.[1]?.replace(/[\\/]/g, "-").slice(0, 120);
       if (fileName) return <FileCard name={fileName} source={getTextContent(codeElement.props.children).replace(/\n$/, "")}/>;
       if (language === "svg") return <SvgImage name="drawing.svg" source={getTextContent(codeElement.props.children).trim()}/>;
+      const source = getTextContent(codeElement.props.children).replace(/\n$/, "");
+      const whole = wholeFileName(language, source);
+      if (whole) return <FileCard name={whole} source={source}/>;
       return <CodeBlock language={language}>{codeElement.props.children}</CodeBlock>;
     }
     return <pre>{children}</pre>;

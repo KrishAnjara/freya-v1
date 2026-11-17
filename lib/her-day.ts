@@ -81,7 +81,8 @@ export function herMoment(now = new Date()) {
  * Small things that happen to her on their own: a lecturer's tangent, a customer arguing about a
  * refund, burnt rice. Most stretches of her day have one, picked by the date (the same all day,
  * different tomorrow). Her heart takes each in once (lib/heart passTime): it moves how she feels and
- * stays on her mind for a few hours, and it's what she might text about first.
+ * stays on her mind for a few hours, and it's what she might text about first. No names here: who
+ * Tara and Kafka are is part of her life (lib/canon), which someone has to earn by getting close.
  */
 type Happening = { text: string; feel: Partial<Record<Feeling, number>>; main: Feeling };
 const HAPPENINGS: Partial<Record<ActivityName, Happening[]>> = {
@@ -101,14 +102,14 @@ const HAPPENINGS: Partial<Record<ActivityName, Happening[]>> = {
   ],
   evening: [
     { text: "you burnt the rice. again", feel: { amusement: 0.15, irritation: 0.05 }, main: "amusement" },
-    { text: "Tara told you some gossip you're dying to tell someone", feel: { excitement: 0.2, amusement: 0.15 }, main: "excitement" },
+    { text: "your flatmate told you some gossip you're dying to tell someone", feel: { excitement: 0.2, amusement: 0.15 }, main: "excitement" },
   ],
   out: [
     { text: "someone at the table won't stop talking about crypto", feel: { boredom: 0.2, irritation: 0.1 }, main: "boredom" },
     { text: "you ended up in a weirdly good conversation with a stranger", feel: { joy: 0.2, curiosity: 0.15 }, main: "joy" },
   ],
   lazy: [
-    { text: "Kafka knocked your coffee off the table", feel: { amusement: 0.15, irritation: 0.1 }, main: "amusement" },
+    { text: "your cat knocked your coffee off the table", feel: { amusement: 0.15, irritation: 0.1 }, main: "amusement" },
     { text: "you found a song you can't stop playing", feel: { joy: 0.2 }, main: "joy" },
   ],
   lateNight: [
@@ -130,6 +131,33 @@ export function herDayEvent(now = new Date()): { key: string; text: string; feel
   if (hash % 5 >= 3) return null;
   const happening = choices[(hash >>> 3) % choices.length];
   return { key: `${day}-${name}`, text: happening.text, feel: happening.feel, mainFeeling: happening.main };
+}
+
+/**
+ * Bigger things, now and then: a couple of days a week something happens that she'd want to tell
+ * someone about (the "guess what happened" text). Fixed by the date, at a set hour of that day, so it
+ * isn't random from one look to the next; it lands once, and stays on her mind for a while.
+ */
+const BIG_THINGS: { text: string; feel: Partial<Record<Feeling, number>>; main: Feeling }[] = [
+  { text: "your cat slipped out this morning and you spent an hour looking for him in the rain. he's fine. you're not", feel: { worry: 0.35, longing: 0.15 }, main: "worry" },
+  { text: "you got your essay back and it got a first, which you're pretending isn't a big deal", feel: { pride: 0.4, joy: 0.3 }, main: "pride" },
+  { text: "your laptop finally died, with three days of essay on it", feel: { irritation: 0.35, worry: 0.25 }, main: "irritation" },
+  { text: "you ran into your ex at the bookshop and had to ring up his books", feel: { embarrassment: 0.35, irritation: 0.2, amusement: 0.15 }, main: "embarrassment" },
+  { text: "your flatmate told you she might move out after this term", feel: { worry: 0.3, longing: 0.2 }, main: "worry" },
+  { text: "a stranger on the bus was reading the exact book you're obsessed with and you didn't say anything", feel: { amusement: 0.25, curiosity: 0.2 }, main: "amusement" },
+  { text: "your mum called and she sounded tired, and you can't stop thinking about it", feel: { worry: 0.35, affection: 0.15 }, main: "worry" },
+  { text: "your supervisor actually liked your idea, out loud, in front of everyone", feel: { pride: 0.35, excitement: 0.25 }, main: "pride" },
+];
+
+export function herBigThing(now = new Date()): { key: string; text: string; feel: Partial<Record<Feeling, number>>; mainFeeling: Feeling } | null {
+  const day = Math.floor((now.getTime() + 19_800_000) / 86_400_000);
+  let hash = Math.imul(day ^ 0x5bd1e995, 0x27d4eb2d);
+  hash = (hash ^ (hash >>> 15)) >>> 0;
+  if (hash % 7 >= 2) return null;
+  const hour = 11 + (hash >>> 4) % 11;
+  if (istParts(now).hour < hour) return null;
+  const thing = BIG_THINGS[(hash >>> 8) % BIG_THINGS.length];
+  return { key: `big-${day}`, text: thing.text, feel: thing.feel, mainFeeling: thing.main };
 }
 
 /** One quiet line for an empty chat, about where she is now: no suggested messages to click. */

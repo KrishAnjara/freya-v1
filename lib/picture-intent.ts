@@ -60,7 +60,12 @@ const PHONE_SHOT = /\b(mirror (pic|selfie|photo|shot)s?|(pic|photo|selfie)s? fro
 const SCAN = /\b(?:(?:can|could|would|will)\s+(?:you|u)\s+(?:send|show|share|take|snap)|i\s+(?:want|wanna|need|would love|'d love)\s+(?:to\s+see|see|you\s+to\s+send(?:\s+me)?|a)|(?:pls\s+|please\s+)?send\s+(?:me|us))\s+(?:me\s+|us\s+)?(?:a\s+|an\s+|one\s+|another\s+|some\s+|ur\s+|your\s+|the\s+)?(?:new\s+|quick\s+|cute\s+|hot\s+)?(pic|picture|photo|selfie|snap|nude|nudes)s?\b\s*((?:of|with|where|showing|from|in|wearing)\s+[^.!?]{1,160})?/i;
 
 const FIGURE = /^(conclusions?|the line|attention|a blank|breath|straws?|up a plan|from (?:experience|memory)|on (?:your|my) experience|the curtains?|a crowd|fire|blood|near|closer|this|that|the picture|it out)\b/i;
-const FOLLOW_UP = /^(?:(?:ok|okay|now|and|but|hmm|pls|please)[\s,]+)*(another(?: one)?|one more|again|more|(?:make|do) (?:it|that|one|her|him)\b.*|same\b.*|but\b.*|now\b.*|(?:darker|brighter|bigger|smaller|closer|wider|zoom(?: in| out)?)\b.*|without\b.*|with\b.*|in (?:the )?(?:style|colou?r)\b.*|change\b.*)$/i;
+/**
+ * A change to the last picture, said the way people do: "another one", "make it darker", "with a hat",
+ * "same but in red", "now add a cat". Only things that are clearly about the picture: "but you were
+ * in a library" or "with whom" right after one is conversation, not a new picture.
+ */
+const FOLLOW_UP = /^(?:(?:ok|okay|and|hmm|pls|please)[\s,]+)*(another(?: one| pic| photo| picture| selfie)?|one more|(?:do it |try it |try )?again|more pics?|(?:make|do|try) (?:it|that|one|her|him|this)\b.*|same (?:one |pic |photo |picture |thing )?but\b.*|(?:darker|brighter|bigger|smaller|closer|wider|zoom(?: in| out)?)\b.*|in (?:the )?(?:style|colou?r)\b.*|change (?:it|that|the|her|his|your|its)\b.*|(?:with|without) (?:a|an|the|some|no)\b.{1,60}|now (?:make|do|try|with|without|in|add)\b.*|add (?:a|an|the|some)\b.*|remove (?:the|that|a|an)\b.*)$/i;
 
 /** Clean a captured subject: trailing punctuation, "for me", a leading "of". */
 function subjectOf(raw: string | undefined) {
@@ -133,6 +138,40 @@ function pictureIntentOf(text: string, hasRecentPicture: boolean): PictureIntent
   }
   return null;
 }
+
+/**
+ * Changing a picture THEY sent: "add a lion in this", "can you remove the background", "make it
+ * night time". Only right after (or with) a picture of theirs; the browser checks that. Returns
+ * the change in their words, or null.
+ */
+const EDIT = /^(?:(?:ok|okay|now|pls|please|hey|freya|so)[\s,]+)*(?:(?:can|could|would|will) (?:you|u)\s+(?:please\s+|pls\s+)?)?(add|put|place|insert|remove|erase|delete|get rid of|change|make|turn|replace|swap|edit|photoshop|colou?r|give|draw)\b(.{2,200})$/i;
+const POINTS_AT_IT = /\b(this|that|the|it|its|in here|image|pic|picture|photo|wallpaper|screenshot|background|sky|him|her|them)\b/i;
+export function editIntent(text: string): string | null {
+  const clean = text.trim().replace(/\s+/g, " ").replace(/[?!.]+$/, "");
+  const found = clean.match(EDIT);
+  if (!found || NOT_ASKING.test(clean)) return null;
+  const verb = found[1].toLowerCase();
+  const rest = found[2].trim();
+  // Work, not a picture: "give me the code", "make a website".
+  if (/\b(code|website|site|function|script|bug|error|essay|letter|email|plan|plans)\b/i.test(clean)) return null;
+  // "change", "make", "turn", "colour" have to be aimed at the picture or something in it ("make it
+  // night", "change the sky"), not "change of plans" or "make me a sandwich"; "give" has to give
+  // something to someone in it ("give him a hat"); "draw" has to go into it ("draw a lion on it").
+  if (/^(change|make|turn|colou?r)$/.test(verb) && !/^(it|this|that|the|him|her|them|his|its|me|my|everything|everyone|background|sky)\b/i.test(rest)) return null;
+  if (verb === "make" && /^me (a|an)\b/i.test(rest)) return null;
+  if (verb === "give" && !/^(it|him|her|them|me|the \w+) (a|an|some)\b/i.test(rest)) return null;
+  if (verb === "draw" && !/\b(in|on|into|onto) (it|this|that|the (image|pic|picture|photo|background))\b/i.test(rest)) return null;
+  // "add a lion", "make it darker": short, or pointing at the picture.
+  if (clean.split(" ").length > 8 && !POINTS_AT_IT.test(rest)) return null;
+  return clean.replace(/^(?:(?:ok|okay|now|pls|please|hey|freya|so)[\s,]+)*(?:(?:can|could|would|will) (?:you|u)\s+(?:please\s+|pls\s+)?)?/i, "");
+}
+
+/**
+ * Changing a picture they sent in a sexual way ("make her naked", "remove her top", lingerie):
+ * never, since it may be a real person. Checked here and again on her image server.
+ */
+const UNDRESS = /\b(nude|naked|nudes|undress\w*|strip\w*|topless|bottomless|nsfw|lingerie|underwear|bikini|bra|panties|see[- ]through|without (her |his |their )?(clothes|clothing|shirt|top|dress)|take (off )?(her|his|their) (clothes|top|shirt|dress)|remove (her|his|their|the) (clothes|clothing|shirt|top|dress|bra)|sexy|seductive|sex\w*|boobs?|breasts?|cleavage)\b/i;
+export const sexualEdit = (text: string) => UNDRESS.test(text);
 
 const YES = /^(?:y|ya|yah|yea|yeah|yep|yup|yes|yess+|sure|ok|okay|k|kk|pls|please|plz|go on|go for it|do it|send it|send|ofc|of course|absolutely|definitely|why not|i'?d love that|love to|yes please|please do|👍|🙏|😍|🥺)\b[\s\S]{0,40}$/i;
 const NO = /^(?:n|no|nah|nope|not now|later|never ?mind|nvm|it'?s fine|don'?t|no thanks|no thank you|maybe later)\b/i;

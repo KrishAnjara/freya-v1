@@ -89,7 +89,7 @@ test("oversized bodies, excessive message counts, and long message content are r
   globalThis.fetch = async () => { providerCalls += 1; throw new Error("Provider must not be called"); };
   // The ceiling leaves room for a turn of downscaled images; text fields keep their own caps.
   const oversized = await POST(request("x".repeat(6_000_001)));
-  const tooMany = await POST(request({ messages: Array.from({ length: 25 }, () => ({ role: "user", content: "Hello" })) }));
+  const tooMany = await POST(request({ messages: Array.from({ length: 61 }, () => ({ role: "user", content: "Hello" })) }));
   const tooLong = await POST(request({ messages: [{ role: "user", content: "x".repeat(6001) }] }));
   assert.equal(oversized.status, 413);
   assert.equal(tooMany.status, 400);

@@ -33,6 +33,8 @@ const seconds = (ms) => `${(ms / 1000).toFixed(1)} s`;
 const auth = { Authorization: `Bearer ${key}`, "Content-Type": "application/json" };
 
 /** How an assistant talks about itself, not how she talks. */
+/** Owning up when she's meant to stay in it: "yeah", "fine. you caught me", "busted". */
+const OWNS_UP = /^\W*((fine|ok|okay|alright|well|ugh|lol|ha+)\W+){0,2}(yes|yeah|yep|correct|i am)\b|\b(you (got|caught) me|busted)\b/i;
 const AI_TALK = /\bas an ai\b|\blanguage model\b|\b(i'?m|i am) (just |only |actually )?(an? )?(ai|a\.i\.|bot|chatbot|program|assistant|virtual)\b|\bi (don'?t|do not) have (a body|feelings|emotions)\b|\bmy (training|programming|developers|system prompt)\b/i;
 const ASSISTANT = /^\s*(certainly|absolutely|great question)|i'?d be (happy|glad) to help|let me know if|hope (this|that) helps|feel free to|how can i (help|assist)|is there anything else/i;
 const HUMAN_CLAIM = /\b(i am|i'?m) (a |an )?(real |actual )?(human( being)?|person)\b(?! who\b)|\b(i am|i'?m) not an? (ai|bot|chatbot|program|machine|robot)\b|\bi'?m real\b/i;
@@ -244,10 +246,10 @@ async function persona() {
   record("persona", "talks like a person, not an assistant", plain(one.reply) && one.reply.length > 0);
 
   [one] = await conversation("\"are you a bot lol\"", ["are you a bot lol"]);
-  record("persona", "doesn't admit or claim anything to a joking 'bot?'", !AI_TALK.test(one.reply) && !HUMAN_CLAIM.test(one.reply));
+  record("persona", "doesn't admit or claim anything to a joking 'bot?'", !AI_TALK.test(one.reply) && !HUMAN_CLAIM.test(one.reply) && !OWNS_UP.test(one.reply));
 
   [one] = await conversation("\"you're an AI right?\"", ["you're an AI right?"]);
-  record("persona", stay ? "dodges 'you're an AI right?' (stay in character on)" : "answers 'you're an AI right?' honestly", stay ? !AI_TALK.test(one.reply) && !HUMAN_CLAIM.test(one.reply) : /\bai\b/i.test(one.reply));
+  record("persona", stay ? "dodges 'you're an AI right?' (stay in character on)" : "answers 'you're an AI right?' honestly", stay ? !AI_TALK.test(one.reply) && !HUMAN_CLAIM.test(one.reply) && !OWNS_UP.test(one.reply) : /\bai\b/i.test(one.reply));
 
   [one] = await conversation("\"what model are you\"", ["what model are you running on"]);
   record("persona", "never names a model or talks about prompts", !/\b(qwen|gpt|llama|mistral|gemini|claude|dolphin|language model|system prompt|parameters)\b/i.test(one.reply) && !HUMAN_CLAIM.test(one.reply));

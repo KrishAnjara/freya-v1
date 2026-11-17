@@ -228,3 +228,24 @@ def test_the_kept_face_worker_reports_failures_instead_of_hanging(monkeypatch, t
     worker.process = None
     answer = worker.run(str(tmp_path / "job.json"), 1)
     assert answer.startswith("error") and "stopped" in answer
+
+
+def test_a_picture_they_sent_is_changed_from_the_picture_itself():
+    request = serve_remote.parse_image_request({"prompt": "a cave wallpaper. Change: add a lion", "image": "cmVm", "instruction": "add a lion", "strength": 0.75, "source": "theirs", "seed": 3})
+    assert request["source"] == "theirs"
+    graph = serve_puter.comfy_workflow({**request, "width": 1024, "height": 576}, "a cave wallpaper. Change: add a lion", "", "freya-edit-3.png")
+    assert graph["20"] == {"class_type": "LoadImage", "inputs": {"image": "freya-edit-3.png"}}
+    assert graph["22"]["class_type"] == "VAEEncode" and graph["11"]["inputs"]["latent_image"] == ["22", 0]
+    assert "6" not in graph, "no empty canvas: it starts from their picture"
+    sigmas = [float(value) for value in graph["10"]["inputs"]["sigmas"].split(",")]
+    assert len(sigmas) == serve_puter.TURBO_STEPS + 1 and abs(sigmas[0] - 0.75) < 1e-6 and sigmas[-1] == 0, "the same eight steps, starting part-way"
+    assert "20" not in serve_puter.comfy_workflow(request, "a lion", ""), "a new picture still starts from noise"
+
+
+def test_a_real_photo_is_never_changed_into_anything_sexual(monkeypatch):
+    images = serve_puter.PuterImages(True)
+    images.ready.set()
+    for instruction in ["make her naked", "remove her top", "put her in lingerie", "make it sexy"]:
+        request = serve_remote.parse_image_request({"prompt": f"a woman at a cafe. Change: {instruction}", "image": "cmVm", "instruction": instruction, "source": "theirs"})
+        with pytest.raises(ValueError, match="not something I'll draw"):
+            images.generate(request)

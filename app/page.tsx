@@ -5,6 +5,8 @@ import {
   FormEvent,
   Fragment,
   KeyboardEvent,
+  MouseEvent as ReactMouseEvent,
+  PointerEvent as ReactPointerEvent,
   useCallback,
   useEffect,
   useMemo,
@@ -91,7 +93,8 @@ import {
   saveMood,
   type MoodState,
 } from "@/lib/mood";
-import { feelReaction, heartLabel, heartTheme } from "@/lib/heart";
+import { feelReaction, heartLabel, heartTheme, READY_TO_TEXT, urgeToText } from "@/lib/heart";
+import { emptyUserProfile, isEmptyProfile, loadUserProfile, newerProfile, normalizeUserProfile, saveUserProfile, type UserProfile } from "@/lib/user-profile";
 import {
   loadUserMood,
   nextUserMood,
@@ -194,7 +197,7 @@ import {
   type VisualizationInfo,
 } from "@/app/components/MediaCards";
 import { commandHints, parseCommand } from "@/lib/composer-commands";
-import { answersOffer, pictureIntent } from "@/lib/picture-intent";
+import { answersOffer, editIntent, pictureIntent, sexualEdit } from "@/lib/picture-intent";
 import { planEnqueue, type QueueJob } from "@/lib/reply-queue";
 import { FORM_POINTS, validateSpec, type VisualSpec } from "@/lib/visualize";
 import { cloudForSpec } from "@/lib/visualize-client";
@@ -235,8 +238,8 @@ import type { MemoryChanges } from "@/lib/memory-reflection";
 import { containsSensitiveCredential } from "@/lib/sensitive-data";
 
 // Only rendered inside the settings dialog, so it stays out of the first-load bundle.
-const CharacterProfileEditor = dynamic(
-  () => import("@/app/components/CharacterProfileEditor"),
+const UserProfileEditor = dynamic(
+  () => import("@/app/components/UserProfileEditor"),
   { ssr: false },
 );
 const EmotionCanvas = dynamic(() => import("@/app/components/EmotionCanvas"), {
@@ -627,15 +630,18 @@ function forModel(message: Message): Message {
     };
   if (message.picture) {
     const picture = message.picture;
+    // Her photos read as what they are to her: photos from her phone. Only the gist goes in (the last
+    // thing asked for, a few words), never the full request, which a model would copy into the chat.
+    const gist = picture.prompt.split(";").pop()!.replace(/^(a photo of (you|yourself),?\s*|yourself,\s*)/i, "").replace(/\s+/g, " ").trim().slice(0, 80);
     return {
       ...message,
       attachments: [],
       content:
         picture.status !== "ready"
-          ? "(a picture didn't work)"
+          ? "(the photo you were sending didn't go through)"
           : picture.kind === "svg"
-            ? `(sent them an SVG drawing, not a generated image, of: ${picture.prompt})`
-            : `(sent them a generated picture of: ${picture.prompt})`,
+            ? `(you sent them a little drawing you did${gist ? `: ${gist}` : ""})`
+            : `(you sent them a photo from your phone${gist && !/casual photo like one you'd text/i.test(gist) ? `: ${gist}` : ""})`,
     };
   }
   return message;
@@ -650,7 +656,8 @@ function cardError(error: unknown, fallback: string) {
 
 /** "make it…", "now add…": a follow-up that changes the last picture rather than starting over. */
 function refinesPrevious(text: string) {
-  return /^(make (it|her|him|them)|now\b|add\b|change\b|turn (it|her|him)|but\b|more\b|less\b|without\b|with\b|same\b|again\b|remove\b|zoom\b|darker|brighter|bigger|smaller)/i.test(
+  // Clearly about the picture: "but you were in a library" or "with whom" is conversation.
+  return /^(make (it|her|him|them)|now (make|add|with|without|in)\b|add (a|an|the|some)\b|change (it|that|the)\b|turn (it|her|him)|same (one |pic |photo )?but\b|more\b|less\b|without (a|an|the|some)\b|with (a|an|the|some)\b|again\b|remove (the|that|a|an)\b|zoom\b|darker|brighter|bigger|smaller)/i.test(
     text.trim(),
   );
 }
@@ -678,6 +685,10 @@ type PendingPicture = { job?: string; conversationId: string; cardId: string; qu
 const PENDING_PICTURES_KEY = "freya.v1.pending-pictures";
 /** How long a picture is waited for: a queue of pictures on a small GPU can take this long. */
 const PICTURE_WAIT_MS = 60 * 60_000;
+/** How long to hold a message before its tools open. */
+const HOLD_TO_OPEN_MS = 2000;
+/** When this browser's settings last changed, to know whether the account's copy is newer. */
+const SETTINGS_AT_KEY = "freya.v1.settingsAt";
 /** Messages on screen at once; older ones load a page at a time. */
 const MESSAGE_PAGE = 120;
 /** Her image server not answering at all for this long: the picture isn't coming. */
@@ -904,12 +915,14 @@ function conversationToMarkdown(conversation: Conversation) {
     "",
   ];
   let previousRole = "";
-  for (const message of conversation.messages) {
+  // What's on screen: messages deleted (for you, or for everyone) and slash commands stay out.
+  for (const message of conversation.messages.filter((item) => !item.hiddenForMe && !item.deleted && !item.command)) {
     // A reply's parts read as one section, as they would in the chat.
     if (message.role !== previousRole)
       lines.push(`## ${message.role === "assistant" ? "FREYA" : "You"}`, "");
     previousRole = message.role;
-    lines.push(message.content, "");
+    if (message.content.trim()) lines.push(message.content, "");
+    else if (message.picture?.status === "ready") lines.push("_Photo_", "");
     if (message.attachments?.length)
       lines.push(
         `_Attachments: ${message.attachments.map((item) => item.name).join(", ")}_`,
@@ -969,6 +982,10 @@ function FreyaApp() {
   const [cloudProfileReady, setCloudProfileReady] = useState(!supabase);
   const [cloudProfileAvailable, setCloudProfileAvailable] = useState(!supabase);
   const [autonomyLevel, setAutonomyLevel] = useState<0 | 1 | 2>(1);
+  /** Who they are (Settings → Profile, lib/user-profile): sent with each message, kept here and with the account. */
+  const [userProfile, setUserProfile] = useState<UserProfile>(() => emptyUserProfile());
+  const userProfileRef = useRef(userProfile);
+  const [tidyingMemories, setTidyingMemories] = useState(false);
   const [privacyMode, setPrivacyMode] = useState(false);
   /** The server-owned AI setup (display only): Local-only mode's model and the reasoning setting. */
   const [serverSetup, setServerSetup] = useState<{
@@ -994,6 +1011,38 @@ function FreyaApp() {
   const [reactingToId, setReactingToId] = useState("");
   /** The message whose delete choices are open (for me / for everyone). */
   const [deletingId, setDeletingId] = useState("");
+  /**
+   * A message's tools (delete, reply, react, copy…) show only after holding it for HOLD_TO_OPEN_MS,
+   * like a phone: no row of icons flickering under the pointer. Right-click opens them at once.
+   */
+  const [menuFor, setMenuFor] = useState("");
+  const [holdingId, setHoldingId] = useState("");
+  const holdRef = useRef<{ timer: number; x: number; y: number; id: string; type: string } | null>(null);
+  /** Choosing several messages at once, to copy or delete them together. */
+  const [selecting, setSelecting] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  // An open menu closes when you tap anywhere else; Escape closes it, or ends choosing messages.
+  useEffect(() => {
+    if (!menuFor && !selecting) return;
+    const away = (event: globalThis.PointerEvent) => {
+      if (menuFor && !(event.target as Element | null)?.closest?.(`[id="message-${menuFor}"]`)) {
+        setMenuFor("");
+        setReactingToId("");
+        setDeletingId("");
+      }
+    };
+    const escape = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      if (menuFor) { setMenuFor(""); setReactingToId(""); setDeletingId(""); }
+      else { setSelecting(false); setSelectedIds([]); }
+    };
+    document.addEventListener("pointerdown", away);
+    document.addEventListener("keydown", escape);
+    return () => {
+      document.removeEventListener("pointerdown", away);
+      document.removeEventListener("keydown", escape);
+    };
+  }, [menuFor, selecting]);
   /** A picture tagged to be changed by the next message (⋯ → Change it). */
   const [pictureEditId, setPictureEditId] = useState("");
   const [editingId, setEditingId] = useState("");
@@ -1117,6 +1166,7 @@ function FreyaApp() {
       setMood(passTime(loadMood(moodAccount), Date.now(), { attachment: bondRef.current.affection }));
       setUserMood(loadUserMood(moodAccount));
       setBond(loadBond(moodAccount));
+      setUserProfile(loadUserProfile(moodAccount));
     }
   }, [moodAccount]);
   /** Why the site is locked (lib/access): not signed in, not the owner, or signed in elsewhere. */
@@ -1162,7 +1212,7 @@ function FreyaApp() {
   const userMoodRef = useRef<UserMood | null>(null);
   const bondRef = useRef<Bond>(bond);
   /** A picture they asked for, and how she answers it (her mood decides), tied to their message. */
-  const pictureAskRef = useRef<{ prompt: string; ofHer: boolean; mode: "send" | "negotiate"; from?: Message; messageId?: string } | null>(null);
+  const pictureAskRef = useRef<{ prompt: string; ofHer: boolean; mode: "send" | "negotiate"; from?: Message; messageId?: string; theirs?: AttachmentMeta } | null>(null);
   /** "can i see you?" was asked: she offers, and a yes makes the picture (lib/picture-intent). */
   const pictureOfferRef = useRef<{
     subject: string;
@@ -1476,6 +1526,7 @@ function FreyaApp() {
       setMood(passTime(loadMood(), Date.now(), { attachment: bondRef.current.affection }));
       setUserMood(loadUserMood());
       setBond(loadBond());
+      setUserProfile(loadUserProfile());
       timingsRef.current = loadTimings();
       lastProviderRef.current = expectedTiming(timingsRef.current)
         ? Object.entries(timingsRef.current).sort(
@@ -1547,6 +1598,64 @@ function FreyaApp() {
     cloudFallbackOn,
     hydrated,
   ]);
+
+  /*
+   * Settings and their profile follow the account (Supabase user metadata, so no table is needed):
+   * whichever copy was changed last wins, so a second device picks up the switches you set on the
+   * first. The camera, notifications and Local-only belong to this device and stay here.
+   */
+  const syncedSettings = JSON.stringify({
+    autonomyLevel, autoMemory, memoryEnabled, candidLanguage, initiativeOn, soundOn, intimateMode, stayInCharacter,
+    realisticTiming, expressionIntensity, canvasQuality, externalFilesOn, cloudFallbackOn,
+  });
+  const settingsPulledRef = useRef(false);
+  const settingsPushedRef = useRef("");
+  useEffect(() => {
+    settingsPulledRef.current = false;
+    if (!hydrated || !user) return;
+    const meta = (user.user_metadata ?? {}) as Record<string, unknown>;
+    if (meta.freya_profile) setUserProfile((local) => newerProfile(local, normalizeUserProfile(meta.freya_profile)));
+    const cloud = meta.freya_settings as Record<string, unknown> | undefined;
+    let localAt = 0;
+    try { localAt = Number(localStorage.getItem(SETTINGS_AT_KEY) || 0); } catch { /* no local stamp */ }
+    if (cloud && typeof cloud.at === "number" && cloud.at > localAt) {
+      const flag = (name: string, set: (value: boolean) => void) => { if (typeof cloud[name] === "boolean") set(cloud[name] as boolean); };
+      if (cloud.autonomyLevel === 0 || cloud.autonomyLevel === 1 || cloud.autonomyLevel === 2) setAutonomyLevel(cloud.autonomyLevel);
+      flag("autoMemory", setAutoMemory); flag("memoryEnabled", setMemoryEnabled); flag("candidLanguage", setCandidLanguage);
+      flag("initiativeOn", setInitiativeOn); flag("soundOn", setSoundOn); flag("intimateMode", setIntimateMode);
+      flag("stayInCharacter", setStayInCharacter); flag("realisticTiming", setRealisticTiming);
+      flag("externalFilesOn", setExternalFilesOn); flag("cloudFallbackOn", setCloudFallbackOn);
+      if (EXPRESSION_INTENSITIES.includes(cloud.expressionIntensity as ExpressionIntensity)) setExpressionIntensity(cloud.expressionIntensity as ExpressionIntensity);
+      if (cloud.canvasQuality === "auto" || cloud.canvasQuality === "low" || cloud.canvasQuality === "high") setCanvasQuality(cloud.canvasQuality);
+      // What was just pulled counts as already saved: it isn't sent straight back with a new time.
+      const local = JSON.parse(syncedSettings) as Record<string, unknown>;
+      settingsPushedRef.current = JSON.stringify(Object.fromEntries(Object.keys(local).map((key) => [key, cloud[key] ?? local[key]])));
+      try { localStorage.setItem(SETTINGS_AT_KEY, String(cloud.at)); } catch { /* fine */ }
+    }
+    settingsPulledRef.current = true;
+    // Only when the account changes: syncedSettings is read once here, then pushed by the effect below.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hydrated, user?.id]);
+  useEffect(() => {
+    if (!hydrated || !supabase || !user || !settingsPulledRef.current || syncedSettings === settingsPushedRef.current) return;
+    const timer = window.setTimeout(() => {
+      settingsPushedRef.current = syncedSettings;
+      const at = Date.now();
+      try { localStorage.setItem(SETTINGS_AT_KEY, String(at)); } catch { /* fine */ }
+      void supabase.auth.updateUser({ data: { freya_settings: { ...JSON.parse(syncedSettings), at } } }).catch(() => undefined);
+    }, 1500);
+    return () => window.clearTimeout(timer);
+  }, [syncedSettings, hydrated, user]);
+  useEffect(() => {
+    userProfileRef.current = userProfile;
+    if (!hydrated) return;
+    saveUserProfile(userProfile, moodAccountRef.current);
+    if (!supabase || !user || !settingsPulledRef.current || !userProfile.updatedAt) return;
+    const cloudAt = normalizeUserProfile((user.user_metadata as Record<string, unknown> | undefined)?.freya_profile).updatedAt;
+    if (userProfile.updatedAt <= cloudAt) return;
+    const timer = window.setTimeout(() => void supabase.auth.updateUser({ data: { freya_profile: userProfile } }).catch(() => undefined), 1200);
+    return () => window.clearTimeout(timer);
+  }, [userProfile, hydrated, user]);
 
   // The camera runs only while it's switched on, here and in freya.config.json.
   const cameraAllowed = hydrated && cameraOn && switches.camera !== false;
@@ -2159,42 +2268,6 @@ function FreyaApp() {
     }
   }
 
-  async function reflectOnConversation(
-    turns: Message[] = activeConversation?.messages ?? [],
-    quiet = false,
-  ) {
-    if (!user || !cloudProfileAvailable || autonomyLevel === 0) return;
-    const candidates = deriveReflectionCandidates(turns);
-    if (!candidates.length) {
-      if (!quiet)
-        notify(
-          "No recurring low-risk topic appeared enough times to support a proposal.",
-        );
-      return;
-    }
-    try {
-      for (const candidate of candidates.slice(0, 1)) {
-        const saved = await personalityRequest({
-          action: "propose",
-          ...candidate,
-        });
-        if (autonomyLevel === 2)
-          await personalityRequest({
-            action: "review",
-            id: saved.proposal.id,
-            decision: "approved",
-          });
-      }
-      await refreshPersonalityHistory();
-      notify(
-        autonomyLevel === 2
-          ? "Low-risk reflection was added as tentative preferences."
-          : "Reflection proposals are ready for your review.",
-      );
-    } catch (error) {
-      notify(reportError("reflection", error), "error");
-    }
-  }
 
   useEffect(() => {
     if (!supabase || !user || !hydrated) {
@@ -2397,11 +2470,11 @@ function FreyaApp() {
       const last = conversation?.messages.at(-1);
       // Only into a conversation that exists and isn't waiting on her to answer.
       if (!conversation || !last || last.role !== "assistant") return;
-      // Closer, she texts first more often (lib/relationship).
-      const gap =
-        (((8 + Math.random() * 37) * 60_000) / Math.max(0.3, state.energy)) *
-        initiativeFactor(bondRef.current);
-      setMood((current) => ({ ...current, nextInitiativeAt: now + gap }));
+      // She texts when she has a reason, from her heart (lib/heart urgeToText): she misses them,
+      // something happened, she's bored. Not on a timer, and never while she's cross with them.
+      const { urge, restMs } = urgeToText(passTime(state, now), now, bondRef.current.affection);
+      if (urge < READY_TO_TEXT) return;
+      setMood((current) => ({ ...current, nextInitiativeAt: now + restMs * initiativeFactor(bondRef.current) }));
       enqueueReply({
         conversationId: conversation.id,
         targetId: last.id,
@@ -2641,36 +2714,6 @@ function FreyaApp() {
     }
   }
 
-  /**
-   * Local-only mode can't use automatic memory (it would send the chat to a hosted model), so
-   * there, and only there, the old on-device rule still saves explicit "I prefer…" statements,
-   * to this browser only: Local-only never writes to the cloud.
-   */
-  async function autoSaveExplicitPreference(userText: string) {
-    if (!autoMemory || !memoryEnabled || !privacyMode || memoryInCloud) return;
-    const candidate = captureExplicitPreference(userText);
-    if (
-      !candidate ||
-      memories.length >= LOCAL_MEMORY_LIMIT ||
-      memories.some(
-        (memory) => memory.text.toLowerCase() === candidate.toLowerCase(),
-      )
-    )
-      return;
-    const timestamp = new Date().toISOString();
-    saveLocalMemories([
-      {
-        id: id(),
-        text: candidate,
-        createdAt: timestamp,
-        updatedAt: timestamp,
-        kind: "preference",
-        source: "freya",
-      },
-      ...memories,
-    ]);
-    notify(`FREYA will remember: "${candidate}"`);
-  }
 
   /** Saves validated automatic-memory changes where the notes live. True only if all of it saved. */
   async function applyMemoryChanges(changes: MemoryChanges): Promise<boolean> {
@@ -2782,6 +2825,7 @@ function FreyaApp() {
           })),
           forgotten: loadForgotten(),
           today: localDate(),
+          profile: userProfileRef.current,
           ...(conversation.recap ? { recap: conversation.recap } : {}),
           conversation: {
             id: conversationId,
@@ -2794,7 +2838,11 @@ function FreyaApp() {
       if (!response.ok) return;
       const changes = (await response.json()) as MemoryChanges & {
         recap?: unknown;
+        title?: unknown;
       };
+      // What she'd call this chat in her phone (lib/memory-reflection validateTitle).
+      if (typeof changes.title === "string" && changes.title.trim())
+        setConversations((current) => current.map((chat) => chat.id === conversationId ? { ...chat, title: changes.title as string } : chat));
       if (
         !Array.isArray(changes.add) ||
         !Array.isArray(changes.update) ||
@@ -2838,6 +2886,27 @@ function FreyaApp() {
       void reflectConversation(conversationId);
     };
   });
+
+  /** Rewrites her existing memories of them in her own words, once, and drops the junk (lib/memory-reflection TIDY_PROMPT). */
+  async function tidyMemories() {
+    if (tidyingMemories || !memoriesRef.current.length) return;
+    setTidyingMemories(true);
+    try {
+      const response = await fetch("/api/memory/reflect", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode: "tidy", memories: memoriesRef.current.map((memory) => ({ id: memory.id, text: memory.text })), profile: userProfileRef.current }),
+      });
+      const changes = response.ok ? (await response.json()) as MemoryChanges : null;
+      if (!changes || !Array.isArray(changes.update) || !Array.isArray(changes.remove)) throw new Error("Her memories couldn't be tidied this time.");
+      if (!(await applyMemoryChanges({ add: [], update: changes.update, remove: changes.remove }))) throw new Error("Her memories couldn't be saved.");
+      notify(`Rewrote ${changes.update.length} of her memories in her own words${changes.remove.length ? ` and let go of ${changes.remove.length} that weren't real` : ""}.`);
+    } catch (error) {
+      notify(reportError("memory", error, "Her memories couldn't be tidied this time."), "error");
+    } finally {
+      setTidyingMemories(false);
+    }
+  }
 
   function scheduleReflection(
     conversationId: string,
@@ -3599,10 +3668,11 @@ function FreyaApp() {
           autonomyLevel,
           candidLanguage,
           mood: moodRef.current,
+          ...(isEmptyProfile(userProfileRef.current) ? {} : { userProfile: userProfileRef.current }),
           ...(userMoodRef.current ? { userMood: userMoodRef.current } : {}),
           // They asked for a picture: she knows it's being taken, and answers in her mood.
           ...(pictureAskRef.current && !initiative && pictureAskRef.current.messageId === target.id
-            ? { pictureNote: { mode: pictureAskRef.current.mode, ofHer: pictureAskRef.current.ofHer } }
+            ? { pictureNote: { mode: pictureAskRef.current.mode, ofHer: pictureAskRef.current.ofHer, ...(pictureAskRef.current.theirs ? { edit: true } : {}) } }
             : {}),
           // They may be asking for a picture: she offers one rather than describing it.
           ...(pictureOfferRef.current &&
@@ -3730,10 +3800,8 @@ function FreyaApp() {
         ),
       );
       setTruncatedReplyId(truncated && lastPart ? lastPart : "");
-      if (latestUserText && !job.extraPrompt && !initiative)
-        void autoSaveExplicitPreference(latestUserText);
-      if (!job.turn && !initiative && user && autonomyLevel > 0)
-        void reflectOnConversation(visible, true);
+      // Her memory of them comes from reading the conversation (scheduleReflection), not from word
+      // lists; and her tastes are her own, never taken from what they talk about.
       scheduleReflection(job.conversationId);
     } catch (error) {
       failStream(controller.signal.aborted);
@@ -3898,6 +3966,19 @@ function FreyaApp() {
           ? { subject: intent.subject, ofHer: intent.ofHer, at: Date.now() }
           : offer;
     }
+    // Changing a picture THEY sent ("add a lion in this"): one sent with this message, or in the last
+    // few messages with nothing of hers since (lib/picture-intent editIntent).
+    const change = text ? editIntent(text) : null;
+    if (change && !pictureAskRef.current) {
+      const recent = [...messages].reverse().slice(0, 6);
+      const sinceHers = recent.findIndex((item) => item.role === "assistant" && item.picture);
+      const earlier = recent.slice(0, sinceHers < 0 ? undefined : sinceHers).find((item) => item.role === "user" && item.attachments?.some((file) => file.kind === "image"));
+      const theirs = pendingFiles.find((file) => file.kind === "image") ?? earlier?.attachments?.find((file) => file.kind === "image");
+      if (theirs) {
+        if (sexualEdit(change)) notify("Not changing a real photo like that.", "error");
+        else pictureAskRef.current = { prompt: change, ofHer: false, mode: "send", theirs };
+      }
+    }
     // Each file or picture is its own message (reply to it, react to it, delete it on its own), as
     // on a phone; what they typed follows as one more. She answers them all together.
     const sentAt = Date.now();
@@ -3924,7 +4005,7 @@ function FreyaApp() {
     if (pictureAskRef.current && !pictureAskRef.current.messageId) {
       const ask = { ...pictureAskRef.current, messageId: message.id };
       pictureAskRef.current = ask;
-      void runPicture(ask.prompt, text, { quiet: true, askedBy: message.id, ...(ask.from ? { from: ask.from } : {}) });
+      void runPicture(ask.prompt, text, { quiet: true, askedBy: message.id, ...(ask.from ? { from: ask.from } : {}), ...(ask.theirs ? { theirs: ask.theirs } : {}) });
     }
     updateActiveMessages((previous) => [...previous, ...fileMessages, message]);
     feel();
@@ -4151,7 +4232,8 @@ function FreyaApp() {
       variation = false,
       quiet = false,
       askedBy,
-    }: { from?: Message; style?: string; variation?: boolean; quiet?: boolean; askedBy?: string } = {},
+      theirs,
+    }: { from?: Message; style?: string; variation?: boolean; quiet?: boolean; askedBy?: string; theirs?: AttachmentMeta } = {},
   ) {
     if (privacyMode) {
       notify(
@@ -4169,7 +4251,12 @@ function FreyaApp() {
             .find((message) => message.picture?.status === "ready")
         : undefined);
     let previous: { prompt: string; mime?: string; data?: string } | undefined;
-    if (last?.picture) {
+    // A picture of theirs to change: its bytes go along, and her eyes describe it on the server.
+    if (theirs) {
+      const stored = await getAttachment(theirs.id).catch(() => undefined);
+      if (stored?.data) previous = { prompt: "", mime: theirs.mime, data: stored.data };
+    }
+    if (!theirs && last?.picture) {
       previous = { prompt: last.picture.prompt };
       const stored =
         last.picture.kind === "generated" && last.attachments?.[0]
@@ -4185,11 +4272,12 @@ function FreyaApp() {
     const styleName = style
       ? PICTURE_STYLES.find(([key]) => key === style)?.[1]
       : "";
+    // A change builds on the last picture's idea, kept short so changes don't pile up for ever.
     const fullPrompt =
       variation && previous
         ? previous.prompt
         : previous
-          ? `${previous.prompt}; ${prompt}`
+          ? `${previous.prompt.slice(0, 240)}; ${prompt}`
           : prompt;
     // Quietly (asked for in conversation): no card until it's ready; she talks meanwhile.
     const { conversationId, cardId } = quiet
@@ -4213,6 +4301,7 @@ function FreyaApp() {
           prompt,
           mood: moodRef.current.name,
           async: true,
+          ...(theirs && previous?.data ? { source: "theirs" } : {}),
           ...(previous ? { previous } : {}),
           ...(style ? { style } : {}),
           ...(variation ? { variation: true } : {}),
@@ -4368,6 +4457,78 @@ function FreyaApp() {
    * Delete for me: hidden on this side, she still has it. Delete for everyone: gone for both of
    * them, with a placeholder where it was, and out of what she reads from now on (lib/one-chat).
    */
+  /** Holding a message: its tools open after HOLD_TO_OPEN_MS, unless the pointer moves or lets go. */
+  function startHold(event: ReactPointerEvent, message: Message) {
+    if (selecting || event.button > 0 || message.streaming || message.command || message.deleted) return;
+    if ((event.target as HTMLElement).closest("button, a, input, textarea, select, .message-tools, .attachment-list")) return;
+    cancelHold();
+    const id = message.id;
+    holdRef.current = {
+      id, x: event.clientX, y: event.clientY, type: event.pointerType,
+      timer: window.setTimeout(() => {
+        holdRef.current = null;
+        setHoldingId("");
+        setMenuFor(id);
+        setReactingToId("");
+        setDeletingId("");
+        navigator.vibrate?.(12);
+      }, HOLD_TO_OPEN_MS),
+    };
+    setHoldingId(id);
+  }
+  function moveHold(event: ReactPointerEvent) {
+    const hold = holdRef.current;
+    if (hold && Math.hypot(event.clientX - hold.x, event.clientY - hold.y) > 10) cancelHold();
+  }
+  function cancelHold() {
+    if (holdRef.current) window.clearTimeout(holdRef.current.timer);
+    holdRef.current = null;
+    setHoldingId("");
+  }
+  function closeMenu() {
+    setMenuFor("");
+    setReactingToId("");
+    setDeletingId("");
+  }
+  /** Right-click opens the tools at once; a long touch waits for the hold instead of the browser's menu. */
+  function openMenuNow(event: ReactMouseEvent, message: Message) {
+    if (message.streaming || message.command || message.deleted || selecting) return;
+    if ((event.target as HTMLElement).closest("a, input, textarea, .markdown-content pre")) return;
+    event.preventDefault();
+    if (holdRef.current?.type === "touch") return;
+    cancelHold();
+    setMenuFor(message.id);
+  }
+  function toggleSelected(id: string) {
+    setSelectedIds((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]);
+  }
+  function startSelecting(message: Message) {
+    closeMenu();
+    setSelecting(true);
+    setSelectedIds([message.id]);
+  }
+  function stopSelecting() {
+    setSelecting(false);
+    setSelectedIds([]);
+  }
+  async function copySelected() {
+    const chosen = messages.filter((message) => selectedIds.includes(message.id));
+    const name = userProfileRef.current.name || "You";
+    const text = chosen.map((message) => `${message.role === "assistant" ? "Freya" : name}: ${message.content || message.picture?.prompt || ""}`.trim()).join("\n\n");
+    try {
+      await navigator.clipboard.writeText(text);
+      notify(`Copied ${chosen.length} message${chosen.length === 1 ? "" : "s"}.`);
+      stopSelecting();
+    } catch (error) {
+      notify(reportError("copy", error, "Those couldn't be copied."), "error");
+    }
+  }
+  function deleteSelected(scope: "me" | "everyone") {
+    for (const message of messages.filter((item) => selectedIds.includes(item.id))) removeMessage(message, scope);
+    notify(`Deleted ${selectedIds.length} message${selectedIds.length === 1 ? "" : "s"}${scope === "everyone" ? " for everyone" : ""}.`);
+    stopSelecting();
+  }
+
   function removeMessage(message: Message, scope: "me" | "everyone") {
     setDeletingId("");
     if (message.role !== "user") scope = "me";
@@ -4961,31 +5122,18 @@ function FreyaApp() {
                   className="settings-tab-panel"
                 >
                   <div className="profile-summary">
-                    <div className="profile-monogram">F</div>
+                    <div className="profile-monogram">{(userProfile.name || "You").slice(0, 1).toUpperCase()}</div>
                     <div>
-                      <strong>FREYA, 20</strong>
+                      <strong>{userProfile.name ? userProfile.name.toUpperCase() : "YOU"}</strong>
                       <span>{user ? user.email : "Anonymous session"}</span>
                     </div>
                   </div>
-                  <p className="settings-description">
-                    Edit FREYA&apos;s fictional character dossier. These tastes
-                    are separate from your saved memories.
-                  </p>
-                  <CharacterProfileEditor
-                    profile={characterProfile}
-                    onChange={setCharacterProfile}
-                    revisions={profileRevisions}
-                    proposals={personalityProposals}
-                    canReflect={
-                      Boolean(user) &&
-                      cloudProfileAvailable &&
-                      autonomyLevel > 0
-                    }
-                    onRollback={(revision) => void rollbackProfile(revision)}
-                    onReview={(proposalId, decision) =>
-                      void reviewProposal(proposalId, decision)
-                    }
-                    onReflect={() => void reflectOnConversation()}
+                  <UserProfileEditor
+                    profile={userProfile}
+                    onChange={setUserProfile}
+                    memoryCount={memories.length}
+                    tidying={tidyingMemories}
+                    onTidyMemories={() => void tidyMemories()}
                   />
                   {supabase && (
                     <div className="settings-account-block">
@@ -5906,8 +6054,8 @@ function FreyaApp() {
                   refineTarget
                     ? `What should change about ${refineTarget.visualization?.title}?`
                     : replyingHere
-                      ? "Keep talking — she'll get to it…"
-                      : "Say something interesting…"
+                      ? "Message…"
+                      : "Ask Freya…"
                 }
                 rows={1}
                 maxLength={MAX_INPUT_CHARS}
@@ -5959,6 +6107,17 @@ function FreyaApp() {
                 </div>
               ) : (
                 <div className="message-list">
+                  {selecting && (
+                    <div className="selection-bar" role="toolbar" aria-label="Selected messages">
+                      <span>{selectedIds.length} selected</span>
+                      <button type="button" disabled={!selectedIds.length} onClick={() => void copySelected()}>Copy</button>
+                      <button type="button" disabled={!selectedIds.length} onClick={() => deleteSelected("me")}>Delete for me</button>
+                      {selectedIds.length > 0 && messages.filter((message) => selectedIds.includes(message.id)).every((message) => message.role === "user") && (
+                        <button type="button" onClick={() => deleteSelected("everyone")}>Delete for everyone</button>
+                      )}
+                      <button type="button" onClick={stopSelecting}>Done</button>
+                    </div>
+                  )}
                   {!searchOpen && messages.length > shownCount && (
                     <button type="button" className="earlier-messages" onClick={() => setShownCount((count) => count + MESSAGE_PAGE)}>
                       earlier messages
@@ -5978,8 +6137,23 @@ function FreyaApp() {
                       )}
                       <article
                         id={`message-${message.id}`}
-                        className={`message ${message.role} ${message.longform ? "longform" : ""} ${searchMatches.includes(message.id) ? (searchMatches[Math.min(searchIndex, searchMatches.length - 1)] === message.id ? "search-hit search-current" : "search-hit") : ""} ${info.startsRun ? "run-start" : "run-continued"} ${info.endsRun ? "run-end" : ""}`}
+                        className={`message ${message.role} ${message.longform ? "longform" : ""} ${searchMatches.includes(message.id) ? (searchMatches[Math.min(searchIndex, searchMatches.length - 1)] === message.id ? "search-hit search-current" : "search-hit") : ""} ${info.startsRun ? "run-start" : "run-continued"} ${info.endsRun ? "run-end" : ""} ${menuFor === message.id ? "menu-open" : ""} ${holdingId === message.id ? "is-holding" : ""} ${selecting ? "is-selecting" : ""} ${selectedIds.includes(message.id) ? "is-selected" : ""}`}
+                        onPointerDown={(event) => startHold(event, message)}
+                        onPointerMove={moveHold}
+                        onPointerUp={cancelHold}
+                        onPointerLeave={cancelHold}
+                        onPointerCancel={cancelHold}
+                        onContextMenu={(event) => openMenuNow(event, message)}
+                        onClickCapture={(event) => {
+                          if (!selecting || message.deleted) return;
+                          event.preventDefault();
+                          event.stopPropagation();
+                          toggleSelected(message.id);
+                        }}
                       >
+                        {selecting && !message.deleted && (
+                          <span className="select-mark" role="checkbox" aria-checked={selectedIds.includes(message.id)} aria-label="Selected">{selectedIds.includes(message.id) ? "✓" : ""}</span>
+                        )}
                         <div className="avatar" aria-hidden="true">
                           {message.role === "assistant" ? "F" : "Y"}
                         </div>
@@ -6153,8 +6327,18 @@ function FreyaApp() {
                             {!message.streaming &&
                               !message.command &&
                               !message.deleted &&
-                              editingId !== message.id && (
-                                <div className="message-tools">
+                              editingId !== message.id &&
+                              menuFor === message.id &&
+                              !selecting && (
+                                <div className="message-tools" role="toolbar" aria-label="Message actions" onClick={(event) => { if ((event.target as HTMLElement).closest("button") && !(event.target as HTMLElement).closest("[aria-expanded]")) window.setTimeout(closeMenu, 120); }}>
+                                  <button
+                                    type="button"
+                                    onClick={() => startSelecting(message)}
+                                    aria-label={`Select: ${messagePreview(message, 60)}`}
+                                    title="Select"
+                                  >
+                                    ☐
+                                  </button>
                                   <button
                                     type="button"
                                     onClick={() => setDeletingId((current) => current === message.id ? "" : message.id)}
@@ -6459,9 +6643,9 @@ function FreyaApp() {
           )}
           <div className="profile-name-row">
             <h2>FREYA, 20</h2>
-            <span className={`profile-state ${offline ? "is-offline" : ""}`}>
-              {offline ? "OFFLINE" : `ONLINE · ${heartLabel(mood).toUpperCase()}`}
-            </span>
+            {/* <span className={`profile-state ${offline ? "is-offline" : ""}`}> */}
+              {/* {offline ? "OFFLINE" : `ONLINE · ${heartLabel(mood).toUpperCase()}`} */}
+            {/* </span> */}
           </div>
           <p className="profile-description">
             Hey, I&apos;m Freya. I read too much, stay up too late, and have

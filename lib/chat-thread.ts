@@ -60,7 +60,7 @@ function clipTurn(text: string) {
  * The request body's turns. Only the current (last) turn carries attachment bytes: at most
  * MAX_ATTACHMENTS of them, the newest. Every other attachment is described by a note.
  */
-export function requestTurns(entries: HistoryEntry[], limit = 23) {
+export function requestTurns(entries: HistoryEntry[], limit = 50) {
   const trimmed = [...entries];
   while (trimmed.length && trimmed[0].role === "assistant") trimmed.shift();
   const recent = trimmed.slice(-limit);
