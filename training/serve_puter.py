@@ -65,10 +65,7 @@ import serve_remote as base  # noqa: E402 - the login, tunnel, jobs and prompt m
 log = base.log
 
 PUTER_MODELS = [
-    "infron:qwen/qwen3.8-27b-abliterated",                 # her voice: Qwen3.8 27B abliterated
     "infron:qwen/qwen3.8-27b:free",                        # Qwen3.8 27B Uncensored (free), 256k context
-    "infron:qwen/qwen3.5-27b-bluestar-v3-derestricted",
-    "openrouter:cognitivecomputations/dolphin-mistral-24b-venice-edition",
 ]
 PUTER_VISION = ["alibaba:qwen/qwen3-vl-plus", "alibaba:qwen/qwen3.8-27b"]
 LOCAL_VISION = "gemma3:4b"
