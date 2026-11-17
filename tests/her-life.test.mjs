@@ -118,8 +118,8 @@ test("a small model's leftovers never reach the chat", () => {
 test("how long she answers comes from the moment: a hello gets a quick text, help gets a proper answer", () => {
   assert.equal(parseLength({ length: "short" }), "short");
   assert.equal(parseLength({ length: "essay" }), undefined);
-  assert.match(lengthLine("short"), /A quick text or two/);
-  assert.match(lengthLine("long"), /proper answer/);
+  assert.match(lengthLine("short"), /each one saying something real/);
+  assert.match(lengthLine("long"), /proper, thoughtful answer/);
   assert.equal(lengthLine(undefined), "", "no reading, no length line");
 });
 

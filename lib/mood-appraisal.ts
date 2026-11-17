@@ -42,7 +42,7 @@ What she feels right now: ${now}.${onMind ? `\nStill on her mind: ${onMind}.` : 
 - events: any of these that happened in their message: ${EVENTS.join(", ")}. [] if none.
 - onMind: if something in this message will stay with her for hours (a real insult, big news, something they confided), a few words about it; otherwise "".
 - them: how THEY seem (not her): one of neutral, happy, excited, playful, affectionate, flirty, curious, stressed, anxious, sad, lonely, frustrated, angry, tired, bored; strength mild or strong ("strong" only when unmistakable).
-- length: how long her reply should be, as a person would answer this: "short" (a greeting, small talk, a quick reaction, a yes or no: one or two quick texts), "medium" (an ordinary back-and-forth), "long" (they asked her to make or write something, like code, a website or a letter, even in a few words like "give me the code"; they asked for help or an explanation; they're upset or opening up; you two are arguing; or there's a real story to tell).
+- length: how long her reply should be. She's a talker who likes real conversation: "short" only for a bare greeting, an "ok" or a yes/no; "medium" for most ordinary back-and-forth; "long" (they asked her to make or write something, like code, a website or a letter, even in a few words like "give me the code"; they asked for help or an explanation; they're upset or opening up; you two are arguing; or there's a real story to tell).
 
 Examples (their latest message, then the answer):
 "lol i got fired today" {"feel":{"worry":0.3,"affection":0.15,"amusement":-0.1},"thought":"they're laughing it off but that has to sting","wants":"comfort","events":["hurting","news"],"onMind":"they got fired today","them":{"feeling":"sad","strength":"mild"},"length":"long"}
@@ -86,9 +86,9 @@ export function parseLength(data: unknown): ReplyLength | undefined {
 
 /** What each length means in her prompt: guidance for this one reply, in plain words. */
 export function lengthLine(length: ReplyLength | undefined): string {
-  if (length === "short") return "\n\nTHIS REPLY: short. A quick text or two, a few words each, the way you'd fire one back.";
-  if (length === "medium") return "\n\nTHIS REPLY: an ordinary length: two or three short texts.";
-  if (length === "long") return "\n\nTHIS REPLY: this one deserves a proper answer. Say as much as it needs and actually engage (still your texts, no headings unless they asked for steps).";
+  if (length === "short") return "\n\nTHIS REPLY: on the short side: two or three texts, but each one saying something real.";
+  if (length === "medium") return "\n\nTHIS REPLY: a full reply: three to five texts with substance (a real reaction, your own take, something of yours, a question you mean).";
+  if (length === "long") return "\n\nTHIS REPLY: this one deserves a proper, thoughtful answer. Say as much as it needs, go into it properly and actually engage (still your texts, no headings unless they asked for steps).";
   return "";
 }
 
