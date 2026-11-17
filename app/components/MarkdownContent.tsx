@@ -1,6 +1,6 @@
 "use client";
 
-import { isValidElement, useEffect, useState, type ReactElement, type ReactNode } from "react";
+import { isValidElement, memo, useEffect, useMemo, useState, type ReactElement, type ReactNode } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { copyTextToClipboard } from "@/lib/clipboard";
@@ -162,13 +162,23 @@ function useHighlighter(needed: boolean) {
   return plugin;
 }
 
-export default function MarkdownContent({ content }: { content: string }) {
+/** Made once: a new plugin array on every render made react-markdown parse the whole message again. */
+const REMARK_PLUGINS = [remarkGfm];
+const NO_REHYPE: [] = [];
+
+/**
+ * Memoized on its text: the chat re-renders often (her face, the typing dots), and each message
+ * used to be parsed again every time. Now a message is parsed when its text changes, and only then.
+ */
+const MarkdownContent = memo(function MarkdownContent({ content }: { content: string }) {
   const highlight = useHighlighter(content.includes("```"));
+  const rehype = useMemo(() => highlight ? [highlight] : NO_REHYPE, [highlight]);
   return (
     <div className="markdown-content">
-      <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={highlight ? [highlight] : []} components={markdownComponents}>
+      <ReactMarkdown remarkPlugins={REMARK_PLUGINS} rehypePlugins={rehype} components={markdownComponents}>
         {content}
       </ReactMarkdown>
     </div>
   );
-}
+});
+export default MarkdownContent;

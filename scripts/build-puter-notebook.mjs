@@ -26,9 +26,9 @@ LOCAL_VISION = True  #@param {type:"boolean"}
 #@markdown **Pictures**: Qwen-Image 2.1 Turbo (abenzerps/Qwen-Image-2.1-Turbo-Quantized, 8 steps) on MLX; if MLX can't use this GPU (it needs CUDA 13), the same model as GGUF in ComfyUI. **Face pass**: SDXL redraws her face from her real photo. Set up in the background. Needs a GPU.
 IMAGES = True  #@param {type:"boolean"}
 FACE_FIX = True  #@param {type:"boolean"}
-#@markdown Steps for the face pass (Qwen-Image Turbo always takes 8).
-IMAGE_STEPS = 20  #@param {type:"slider", min:8, max:50, step:1}
-#@markdown **Prompt maker** on the CPU (a small uncensored model). Off: simple rules write the prompt.
+#@markdown Steps for the face pass (Qwen-Image Turbo always takes 8). Fewer is faster; 14 is plenty for a face.
+IMAGE_STEPS = 14  #@param {type:"slider", min:10, max:50, step:1}
+#@markdown **Prompt maker**: her Puter voice plans each photo in a few seconds. Off: simple rules write the prompt.
 PROMPT_MAKER = True  #@param {type:"boolean"}
 #@markdown **Memory by meaning** (a small embedding model on the CPU).
 MEMORY = True  #@param {type:"boolean"}
@@ -45,7 +45,7 @@ for secret in ("HF_TOKEN", "PUTER_AUTH_TOKEN"):
         pass  # Not set: Puter asks for it below; HF_TOKEN isn't needed for the defaults.
 sys.argv = ["serve_puter.py", "--puter-models", PUTER_MODELS if PUTER_VOICE else "none", "--vision-models", "" if PUTER_VISION else "none",
             "--local-voice", LOCAL_VOICE_MODEL if LOCAL_VOICE else "none", "--local-vision", "gemma3:4b" if LOCAL_VISION else "none",
-            "--enhancer", "huihui_ai/qwen3-abliterated:1.7b" if PROMPT_MAKER else "none", "--embed-model", "nomic-embed-text" if MEMORY else "none"]
+            "--enhancer", "puter" if PROMPT_MAKER and PUTER_VOICE else "none", "--embed-model", "nomic-embed-text" if MEMORY else "none"]
 sys.argv += (["--images", "--image-steps", str(IMAGE_STEPS)] if IMAGES else []) + ([] if FACE_FIX else ["--no-face-fix"]) + (["--token", TOKEN] if TOKEN else [])
 if KEEP_ON_DRIVE:
     from google.colab import drive
@@ -75,7 +75,7 @@ export const notebook = {
       metadata: {},
       source: lines(`# FREYA's Puter server on Colab
 
-Her voice runs through **Puter.js** (Qwen3.8 27B Uncensored, then uncensored fallbacks), so it needs no GPU and she keeps talking while a picture draws. The GPU draws her pictures: **Qwen-Image 2.1 Turbo** (quantized; on MLX through MFLUX, or as GGUF in ComfyUI when MLX can't use the GPU), then **SDXL** redraws her face from her real photo. A small model on the CPU writes the picture prompts. Every provider has its own switch in the form below. The GPU-only server (\`freya_server.ipynb\`) is separate and unchanged.
+Her voice runs through **Puter.js** (Qwen3.8 27B Uncensored, then uncensored fallbacks), so it needs no GPU and she keeps talking while a picture draws. The GPU draws her pictures: **Qwen-Image 2.1 Turbo** (quantized; on MLX through MFLUX, or as GGUF in ComfyUI when MLX can't use the GPU), then **SDXL** redraws her face from her real photo. Her Puter voice plans each photo. On an L4 or A100 (or High-RAM) the picture models stay loaded between pictures, which is much faster than a standard T4. Every provider has its own switch in the form below. The GPU-only server (\`freya_server.ipynb\`) is separate and unchanged.
 
 1. **Puter key**: sign in at puter.com, copy your auth token (Account), and add it in Colab's **Secrets** (key icon on the left) as \`PUTER_AUTH_TOKEN\`, with notebook access on.
 2. **Runtime > Change runtime type**: an L4 or A100 GPU for pictures. With pictures off, a CPU runtime is enough.

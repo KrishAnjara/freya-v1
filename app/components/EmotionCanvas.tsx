@@ -3,9 +3,10 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import * as THREE from "three";
 import type { MoodName, MoodState } from "@/lib/mood";
+import { FEELINGS, heartLabel, TEMPERAMENT, type Feeling, type HeartState } from "@/lib/heart";
 import { initialFormPose, moveForm, rotateForm, stepFormPose, zoomForm } from "@/lib/form-pose";
 import { FORM_POINTS, type PointCloud } from "@/lib/visualize";
-import { state as telemetry, subscribeTelemetry, telemetryRevision } from "@/lib/stream-telemetry";
+import { state as telemetry, subscribeTelemetry, telemetryPhase } from "@/lib/stream-telemetry";
 import { PRESENCE_FRAGMENT, PRESENCE_VERTEX } from "@/app/components/presence-shader";
 import type { Expression } from "@/lib/expression";
 import type { Glance } from "@/lib/expression-director";
@@ -71,6 +72,39 @@ const MOOD_STYLE: Record<MoodName, MoodStyle> = {
   disgusted: { scale: 0.9, squash: 0.94, sink: 0, wave: 0.02, waveSpeed: 1.1, jag: 0.03, drift: 0, lean: -0.2, glow: 0.75, tint: [0.56, 0.72, 0.42] },
   sulking: { scale: 0.78, squash: 0.95, sink: -0.06, wave: 0.005, waveSpeed: 0.3, jag: 0.02, drift: 0, lean: 0, glow: 0.5, tint: [0.62, 0.52, 0.58] },
 };
+
+/** Which body each feeling gives her (lib/heart): blended by how strongly she feels each one. */
+const FEELING_BODY: Record<Feeling, MoodName> = {
+  joy: "happy", pride: "happy", affection: "warm", amusement: "playful", embarrassment: "playful", curiosity: "curious", excitement: "excited",
+  desire: "horny", hurt: "sulking", irritation: "irritated", worry: "melancholy", longing: "melancholy", boredom: "bored", disgust: "disgusted",
+};
+const STYLE_KEYS = Object.keys(MOOD_STYLE.neutral).filter((key) => key !== "tint") as Exclude<keyof MoodStyle, "tint">[];
+
+/**
+ * Her body for how she feels: a mix of each feeling's body, weighted by how far it stands out
+ * from where she rests, so being amused and a bit stung looks like both. Mostly at rest, mostly
+ * neutral; low energy pulls toward tired. A saved mood without feelings uses its label.
+ */
+function styleFor(mood: MoodState): MoodStyle {
+  const feelings = (mood as Partial<HeartState>).feelings;
+  if (!feelings) return MOOD_STYLE[mood.name] ?? MOOD_STYLE.neutral;
+  const weights = new Map<MoodName, number>([["neutral", 0.25]]);
+  for (const name of FEELINGS) {
+    const lift = feelings[name] - TEMPERAMENT.rest[name];
+    if (lift > 0.05) weights.set(FEELING_BODY[name], (weights.get(FEELING_BODY[name]) ?? 0) + lift);
+  }
+  if (mood.energy < 0.3) weights.set("tired", (weights.get("tired") ?? 0) + (0.3 - mood.energy) * 2);
+  const total = [...weights.values()].reduce((sum, value) => sum + value, 0);
+  const out: MoodStyle = { ...MOOD_STYLE.neutral, tint: [0, 0, 0] };
+  for (const key of STYLE_KEYS) out[key] = 0;
+  for (const [name, weight] of weights) {
+    const part = MOOD_STYLE[name];
+    const share = weight / total;
+    for (const key of STYLE_KEYS) out[key] += part[key] * share;
+    for (let channel = 0; channel < 3; channel += 1) out.tint[channel] += part.tint[channel] * share;
+  }
+  return out;
+}
 
 /** Even directions on a sphere (Fibonacci lattice). */
 function sphereDirections(count: number): Float32Array {
@@ -209,8 +243,9 @@ export default function EmotionCanvas({ signal, mood, form = null, onClearForm, 
   const beatRef = useRef(beat);
   const typedRef = useRef(typed);
 
-  // Re-render on stream events so the activity label stays true.
-  useSyncExternalStore(subscribeTelemetry, telemetryRevision, () => 0);
+  // Re-render when the stream's phase changes, so the activity label stays true. (Not on every
+  // chunk: the label only depends on the phase, and the drawing reads the rest itself each frame.)
+  useSyncExternalStore(subscribeTelemetry, telemetryPhase, () => "idle");
   useEffect(() => { signalRef.current = signal; }, [signal]);
   useEffect(() => { moodRef.current = mood; }, [mood]);
   useEffect(() => { formRef.current = form; }, [form]);
@@ -293,7 +328,9 @@ export default function EmotionCanvas({ signal, mood, form = null, onClearForm, 
     let arrivedChars = 0;
     let speak = 0;
     // Smoothed state, so moods and activities blend instead of jumping.
-    const style = { ...MOOD_STYLE.neutral };
+    const style: MoodStyle = { ...MOOD_STYLE.neutral, tint: [...MOOD_STYLE.neutral.tint] };
+    let styledMood: MoodState | null = null;
+    let target: MoodStyle = MOOD_STYLE.neutral;
     let energy = 0.55;
     let warmth = 0.5;
     let listen = 0;
@@ -434,11 +471,10 @@ export default function EmotionCanvas({ signal, mood, form = null, onClearForm, 
 
       // Mood: ease towards the current mood's body, energy and warmth.
       const currentMood = moodRef.current;
-      const target = MOOD_STYLE[currentMood.name] ?? MOOD_STYLE.neutral;
-      for (const key of Object.keys(target) as (keyof MoodStyle)[]) {
-        if (key === "tint") style.tint = style.tint.map((value, channel) => value + (target.tint[channel] - value) * blend) as MoodStyle["tint"];
-        else (style[key] as number) += ((target[key] as number) - (style[key] as number)) * blend;
-      }
+      // Worked out when her heart changes, not every frame.
+      if (currentMood !== styledMood) { styledMood = currentMood; target = styleFor(currentMood); }
+      for (const key of STYLE_KEYS) style[key] += (target[key] - style[key]) * blend;
+      for (let channel = 0; channel < 3; channel += 1) style.tint[channel] += (target.tint[channel] - style.tint[channel]) * blend;
       energy += (currentMood.energy - energy) * blend;
       warmth += (currentMood.warmth - warmth) * blend;
       listen += ((activity === "listening" ? 1 : 0) - listen) * (1 - Math.exp(-dt * 3));
@@ -607,11 +643,11 @@ export default function EmotionCanvas({ signal, mood, form = null, onClearForm, 
   const activity = activityOf(signal);
   return <section
     className={`emotion-canvas presence-canvas signal-${signal} activity-${activity} mood-${mood.name}`}
-    aria-label={offline ? "FREYA is offline." : `FREYA's presence: ${ACTIVITY_LABEL[activity].toLowerCase()}, mood ${mood.name}. Shows the app's simulated mood and conversation state.`}
+    aria-label={offline ? "FREYA is offline." : `FREYA's presence: ${ACTIVITY_LABEL[activity].toLowerCase()}, feeling ${heartLabel(mood)}. Shows the app's simulated feelings and conversation state.`}
   >
     {fallback && <div className="canvas-fallback" aria-hidden="true"><span>✧</span><i/><i/><i/><i/><i/><i/><i/><i/></div>}
     <div ref={hostRef} className={`three-host ${form?.status === "ready" || form?.status === "refining" ? "form-in-hand" : ""}`} aria-hidden="true" />
-    <div className="presence-status" aria-hidden="true">{offline ? "OFFLINE" : `${ACTIVITY_LABEL[activity]} · ${mood.name.toUpperCase()}`}</div>
+    <div className="presence-status" aria-hidden="true">{offline ? "OFFLINE" : `${ACTIVITY_LABEL[activity]} · ${heartLabel(mood).toUpperCase()}`}</div>
     {form && <div className={`form-caption form-${form.status}`} role="status" aria-live="polite">
       <span>{form.status === "loading" ? `Composing · ${form.title}…` : form.status === "refining" ? `Refining · ${form.title}…` : form.status === "error" ? `Couldn't visualise ${form.title}` : `${form.title}${fallback ? " · 3D view needs motion enabled" : ""}`}</span>
       {form.status !== "loading" && form.status !== "refining" && onClearForm && <button type="button" onClick={onClearForm} aria-label="Clear the visualisation">Clear</button>}

@@ -629,6 +629,10 @@ async function* geminiStreamRaw(system: string, messages: ChatMessage[], signal?
   }
 }
 
+/** Her server, remote: no first word in this long, or this long silent mid-reply, means it's stuck. */
+const REMOTE_FIRST_WORD_MS = 60_000;
+const REMOTE_IDLE_MS = 45_000;
+
 async function* ollamaStream(system: string, messages: ChatMessage[], signal: AbortSignal | undefined, state: StreamState | undefined, target: OllamaTarget, think = ollamaThinking()) {
   if (target.health && isCoolingDown(target.health)) throw coolingDownError(target.health);
   let release = () => {};
@@ -652,9 +656,29 @@ async function* ollamaStream(system: string, messages: ChatMessage[], signal: Ab
     const reader = response.body!.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
+    // A remote server keeps the line open with blank heartbeats, so the connection alone says nothing:
+    // what counts is words. None for a minute at the start, or 45 s in the middle, and it's stuck.
+    let lastWordAt = Date.now();
+    let spoke = false;
+    const read = async () => {
+      if (target.local) return reader.read();
+      const wait = spoke ? REMOTE_IDLE_MS : REMOTE_FIRST_WORD_MS;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        return await Promise.race([
+          reader.read(),
+          new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new DOMException(`no words for ${Math.round(wait / 1000)}s`, "TimeoutError")), Math.max(0, wait - (Date.now() - lastWordAt))); }),
+        ]);
+      } catch (error) {
+        if (error instanceof DOMException && error.name === "TimeoutError") void reader.cancel().catch(() => undefined);
+        throw error;
+      } finally {
+        clearTimeout(timer);
+      }
+    };
     try {
       while (true) {
-        const { done, value } = await reader.read();
+        const { done, value } = await read();
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
         let newline = buffer.indexOf("\n");
@@ -665,7 +689,7 @@ async function* ollamaStream(system: string, messages: ChatMessage[], signal: Ab
             const item = JSON.parse(line);
             if (typeof item?.error === "string") throw new ProviderHttpError("Ollama stream failed.", 500, undefined, providerErrorDetail(item));
             const text = item?.message?.content;
-            if (typeof text === "string" && text) yield text;
+            if (typeof text === "string" && text) { spoke = true; lastWordAt = Date.now(); yield text; }
             if (item?.done && state) state.truncated = item?.done_reason === "length";
           }
           newline = buffer.indexOf("\n");

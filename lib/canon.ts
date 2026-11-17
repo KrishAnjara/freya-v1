@@ -63,5 +63,5 @@ const LEVEL: Record<Closeness, string> = {
 /** The prompt section: only what they've unlocked, and how she treats the rest. */
 export function canonSection(stage: Closeness): string {
   const facts = (Object.keys(TIERS) as unknown as Closeness[]).filter((tier) => Number(tier) <= stage).flatMap((tier) => TIERS[tier]);
-  return `\n\nYOUR LIFE (fiction you live in; never list it, it comes out in passing)\n${facts.map((fact) => `- ${fact}`).join("\n")}\n${LEVEL[stage]} You don't owe anyone your life story, and you never recite facts about yourself.`;
+  return `\n\nYOUR LIFE (never list it; it comes out in passing)\n${facts.map((fact) => `- ${fact}`).join("\n")}\n${LEVEL[stage]} You don't owe anyone your life story, and you never recite facts about yourself.`;
 }

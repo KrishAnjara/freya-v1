@@ -32,7 +32,7 @@ async function probe(tier: Extract<Tier, { kind: "ollama" }>) {
   if (cached && Date.now() - cached.at < PROBE_CACHE_MS) return cached;
   let result: { at: number; ok: boolean; detail?: string };
   try {
-    const response = await fetch(`${tier.baseUrl}/api/tags`, { headers: tier.key ? { Authorization: `Bearer ${tier.key}` } : {}, signal: AbortSignal.timeout(3000), cache: "no-store" });
+    const response = await fetch(`${tier.baseUrl}/api/tags`, { headers: tier.key ? { Authorization: `Bearer ${tier.key}` } : {}, signal: AbortSignal.timeout(6000), cache: "no-store" });
     const payload = await response.json().catch(() => null) as { models?: { name?: string }[] } | null;
     const names = (payload?.models ?? []).map((model) => model.name ?? "");
     const has = names.some((name) => name === tier.model || name === `${tier.model}:latest`);

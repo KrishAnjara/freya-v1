@@ -81,20 +81,17 @@ import {
   readingDelay,
 } from "@/lib/reply-parts";
 import {
-  addCuriosity,
   arrive,
   extractMoodTag,
   initialMood,
   loadMood,
   mergeVerdict,
   normalizeMood,
-  moodFromReply,
   passTime,
-  reactToMessage,
-  resumeMood,
   saveMood,
   type MoodState,
 } from "@/lib/mood";
+import { feelReaction, heartLabel, heartTheme } from "@/lib/heart";
 import {
   loadUserMood,
   nextUserMood,
@@ -110,7 +107,7 @@ import {
   typingStartsAt,
   type Timings,
 } from "@/lib/model-timing";
-import { herStatusLine } from "@/lib/her-day";
+import { herDoingNow, herStatusLine } from "@/lib/her-day";
 import { canEdit, deliveryOf, thoughtful } from "@/lib/delivery";
 import { loadInflight, resumeJobs, saveInflight } from "@/lib/resume";
 import { chatDiff, clearForMe, deleteForEveryone, deleteForMe, forHer, mergeChats, mergeCloud, pullChat, pushChat } from "@/lib/one-chat";
@@ -147,7 +144,6 @@ const STAGE_LABEL: Record<Stage, string> = {
   crush: "SOMETHING'S THERE",
   together: "TOGETHER",
 };
-import { contentWords } from "@/lib/stream-telemetry";
 import {
   isReasoningMode,
   needsReasoning,
@@ -177,7 +173,6 @@ import {
 } from "@/lib/notifications";
 import { playChime } from "@/lib/chime";
 import VoiceControls, {
-  type SpeechRequest,
 } from "@/app/components/VoiceControls";
 import {
   CHARACTER_PROFILE_KEY,
@@ -683,6 +678,10 @@ type PendingPicture = { job?: string; conversationId: string; cardId: string; qu
 const PENDING_PICTURES_KEY = "freya.v1.pending-pictures";
 /** How long a picture is waited for: a queue of pictures on a small GPU can take this long. */
 const PICTURE_WAIT_MS = 60 * 60_000;
+/** Messages on screen at once; older ones load a page at a time. */
+const MESSAGE_PAGE = 120;
+/** Her image server not answering at all for this long: the picture isn't coming. */
+const PICTURE_UNREACHABLE_MS = 2 * 60_000;
 function loadPendingPictures(): PendingPicture[] {
   try {
     const saved = JSON.parse(localStorage.getItem(PENDING_PICTURES_KEY) || "[]");
@@ -943,7 +942,6 @@ export default function Home() {
 function FreyaApp() {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeId, setActiveId] = useState("");
-  const [conversationFilter, setConversationFilter] = useState("");
   const [memories, setMemories] = useState<Memory[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -1003,6 +1001,11 @@ function FreyaApp() {
   const [copiedId, setCopiedId] = useState("");
   /** Search inside the open conversation: whether the bar is open, what's typed, which match is shown. */
   const [searchOpen, setSearchOpen] = useState(false);
+  /**
+   * How many of the latest messages are on screen. The one chat grows for ever, and every message
+   * on screen is work on each render: older ones come in a page at a time ("earlier messages").
+   */
+  const [shownCount, setShownCount] = useState(MESSAGE_PAGE);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchIndex, setSearchIndex] = useState(0);
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -1012,8 +1015,6 @@ function FreyaApp() {
   const [settingsTab, setSettingsTab] = useState<"profile" | "settings">(
     "profile",
   );
-  const [drawerOpen, setDrawerOpen] = useState(false);
-  const [speechRequest, setSpeechRequest] = useState<SpeechRequest>(null);
   const [style, setStyle] = useState<Style>("adaptive");
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [ask, setAsk] = useState<AskRequest | null>(null);
@@ -1024,6 +1025,9 @@ function FreyaApp() {
   const [atBottom, setAtBottom] = useState(true);
   /** The conversation FREYA is typing in right now, if any. */
   const [typingIn, setTypingIn] = useState("");
+  /** Where she's typing right now, for code that runs outside a render (a finished picture waits for it). */
+  const typingInRef = useRef("");
+  useEffect(() => { typingInRef.current = typingIn; }, [typingIn]);
   /** The conversation whose message she's reading, before she starts typing. */
   const [readingIn, setReadingIn] = useState("");
   /** Her day has her busy, so she hasn't picked it up yet. */
@@ -1089,6 +1093,11 @@ function FreyaApp() {
    * then resends what didn't get through. No error pop-ups: it reads like a phone that's off.
    */
   const [offline, setOffline] = useState(false);
+  // The light around her follows how she feels (lib/heart heartTheme, app/freya.css), gliding.
+  const themeStyle = useMemo(() => {
+    const theme = heartTheme(mood);
+    return { "--heart-hue": theme.hue, "--heart-sat": `${theme.saturation}%`, "--heart-glow": offline ? 0.1 : theme.glow } as CSSProperties;
+  }, [mood, offline]);
   /** New messages from her that arrived while scrolled up, for the "↓ N new" button. */
   const [newBelow, setNewBelow] = useState(0);
   /** Where this chat's unread messages began when it was opened: a divider is drawn there. */
@@ -1105,7 +1114,7 @@ function FreyaApp() {
     if (moodAccountRef.current === moodAccount) return;
     moodAccountRef.current = moodAccount;
     if (moodLoadedRef.current) {
-      setMood(passTime(loadMood(moodAccount), Date.now(), recentTurns()));
+      setMood(passTime(loadMood(moodAccount), Date.now(), { attachment: bondRef.current.affection }));
       setUserMood(loadUserMood(moodAccount));
       setBond(loadBond(moodAccount));
     }
@@ -1144,7 +1153,8 @@ function FreyaApp() {
   const chatCloudRef = useRef(false);
   /**
    * Where the chat is kept: "pending" until Supabase answers, "cloud" (the only copy; nothing in
-   * this browser), or "browser" only while the messages table doesn't exist, so nothing is lost.
+   * this browser), or "browser" while the messages table doesn't exist: then the chat isn't kept
+   * anywhere (never in this browser's storage) and the app says so.
    */
   const [chatStore, setChatStore] = useState<"pending" | "cloud" | "browser">("pending");
   const chatSyncedRef = useRef<Map<string, string>>(new Map());
@@ -1225,9 +1235,10 @@ function FreyaApp() {
   useEffect(() => {
     connectCloudFiles(supabase, user?.id ?? null);
   }, [user]);
-  // The one chat lives in Supabase (lib/one-chat): fetched when signed in, then written back a few
-  // seconds after it changes. A browser copy from before is merged in once, then dropped. Without
-  // the table it stays in this browser; Supabase not answering, it tries again shortly.
+  // The one chat lives in Supabase (lib/one-chat), and only there: fetched when signed in, then
+  // written back a few seconds after it changes. A browser copy from before is merged in once, then
+  // dropped. Without the table it isn't saved at all (and says so); Supabase not answering, it tries
+  // again shortly.
   useEffect(() => {
     if (!hydrated || !supabase || !user) { chatCloudRef.current = false; return; }
     let cancelled = false;
@@ -1235,7 +1246,8 @@ function FreyaApp() {
     const pull = () => void pullChat<Message>(supabase, user.id).then((cloud) => {
       if (cancelled) return;
       if (cloud === "missing") {
-        console.info("FREYA: run supabase/freya-messages.sql to keep the chat with your account. Until then it stays in this browser.");
+        console.info("FREYA: run supabase/freya-messages.sql to keep the chat with your account. Until then it isn't saved anywhere.");
+        notify("Your chat isn't being saved: run supabase/freya-messages.sql in Supabase once.", "error");
         setChatStore("browser");
         return;
       }
@@ -1250,6 +1262,8 @@ function FreyaApp() {
     }).catch(() => { if (!cancelled) retry = window.setTimeout(pull, 5000); });
     pull();
     return () => { cancelled = true; window.clearTimeout(retry); };
+    // notify is declared further down (and stable): naming it here would read it before it exists.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hydrated, user]);
   useEffect(() => {
     if (!supabase || !user || !chatCloudRef.current) return;
@@ -1459,7 +1473,7 @@ function FreyaApp() {
       setCloudFallbackOn(localStorage.getItem(CLOUD_FALLBACK_KEY) !== "false");
       setFeedbackCount(loadFeedback().length);
       moodLoadedRef.current = true;
-      setMood(passTime(loadMood(), Date.now(), recentTurns()));
+      setMood(passTime(loadMood(), Date.now(), { attachment: bondRef.current.affection }));
       setUserMood(loadUserMood());
       setBond(loadBond());
       timingsRef.current = loadTimings();
@@ -1702,21 +1716,6 @@ function FreyaApp() {
   );
   const messages = activeConversation?.messages ?? NO_MESSAGES;
 
-  const visibleConversations = useMemo(() => {
-    const query = conversationFilter.trim().toLowerCase();
-    const sorted = [...conversations].sort((a, b) =>
-      b.updatedAt.localeCompare(a.updatedAt),
-    );
-    if (!query) return sorted;
-    return sorted.filter(
-      (conversation) =>
-        conversation.title.toLowerCase().includes(query) ||
-        conversation.messages.some((message) =>
-          message.content.toLowerCase().includes(query),
-        ),
-    );
-  }, [conversations, conversationFilter]);
-
   const updateActiveMessages = useCallback(
     (updater: (previous: Message[]) => Message[]) => {
       setConversations((previous) =>
@@ -1750,7 +1749,7 @@ function FreyaApp() {
   const [phone, setPhone] = useState(false);
   useEffect(() => {
     const media = window.matchMedia("(max-width: 700px)");
-    const syncDrawerForViewport = () => { setDrawerOpen(!media.matches); setPhone(media.matches); };
+    const syncDrawerForViewport = () => setPhone(media.matches);
     syncDrawerForViewport();
     media.addEventListener("change", syncDrawerForViewport);
     return () => media.removeEventListener("change", syncDrawerForViewport);
@@ -2328,11 +2327,9 @@ function FreyaApp() {
   useEffect(() => {
     if (!hydrated || chatStore === "pending") return;
     try {
-      // No messages in the browser: the chat is in Supabase. Only the thread itself (its id, the
-      // unread count) is kept here, unless the messages table doesn't exist yet.
-      const kept = chatStore === "cloud"
-        ? conversations.map((conversation) => ({ ...conversation, messages: [] }))
-        : conversations;
+      // Never any messages in the browser: the chat is in Supabase. Only the thread itself (its id,
+      // the unread count) is kept here.
+      const kept = conversations.map((conversation) => ({ ...conversation, messages: [] }));
       localStorage.setItem(
         CONVERSATIONS_KEY,
         JSON.stringify(kept.slice(0, MAX_CONVERSATIONS)),
@@ -2378,7 +2375,7 @@ function FreyaApp() {
     const tick = () => {
       // Time moves her mood too: moods wear off, she misses them, and her own day goes on (lib/mood).
       checkServerRun();
-      setMood((current) => passTime(current, Date.now(), recentTurns()));
+      setMood((current) => passTime(current, Date.now(), { attachment: bondRef.current.affection }));
       // Their mood fades on its own when nothing new has shown how they are.
       setUserMood((current) =>
         nextUserMood(current, null, Date.now(), current?.source ?? "words"),
@@ -2480,10 +2477,7 @@ function FreyaApp() {
   }, [input]);
 
   function selectConversation(conversationId: string) {
-    if (conversationId === activeId) {
-      setDrawerOpen((open) => (window.innerWidth <= 700 ? false : open));
-      return;
-    }
+    if (conversationId === activeId) return;
     // Leaving a conversation is a natural point to remember what mattered in it.
     reflectRef.current(activeIdRef.current);
     setReplyingToId("");
@@ -2496,7 +2490,6 @@ function FreyaApp() {
     shouldAutoScroll.current = true;
     atBottomRef.current = true;
     setAtBottom(true);
-    if (window.innerWidth <= 700) setDrawerOpen(false);
   }
 
   const newConversation = useCallback(() => {
@@ -2529,69 +2522,6 @@ function FreyaApp() {
     setAtBottom(true);
     window.requestAnimationFrame(() => composerRef.current?.focus());
   }, []);
-
-  async function deleteConversation(conversationId: string) {
-    const target = conversations.find(
-      (conversation) => conversation.id === conversationId,
-    );
-    if (target?.messages.length) {
-      const confirmed = await askFor({
-        title: "Delete this conversation?",
-        body: `"${target.title}" and its ${target.messages.length} messages will be removed. This cannot be undone. Anything FREYA remembered from it stays in Memory, where you can delete it separately.`,
-        confirmLabel: "Delete",
-        destructive: true,
-      });
-      if (!confirmed) return;
-    }
-    cancelRepliesFor(conversationId);
-    void deleteAttachments(
-      target?.messages.flatMap(
-        (message) => message.attachments?.map((item) => item.id) ?? [],
-      ) ?? [],
-    );
-    // Worked out before the update (an updater may run twice), so the active id always exists.
-    const remaining = conversationsRef.current.filter(
-      (conversation) => conversation.id !== conversationId,
-    );
-    const replacement = remaining.length ? null : createConversation();
-    if (conversationId === activeIdRef.current) {
-      const nextId = replacement?.id ?? remaining[0].id;
-      activeIdRef.current = nextId;
-      setActiveId(nextId);
-    }
-    setConversations((previous) => {
-      const kept = previous.filter(
-        (conversation) => conversation.id !== conversationId,
-      );
-      return kept.length ? kept : [replacement ?? createConversation()];
-    });
-    notify("Conversation deleted.");
-  }
-
-  async function renameConversation(conversationId: string) {
-    const target = conversations.find(
-      (conversation) => conversation.id === conversationId,
-    );
-    const answer = await askFor({
-      title: "Rename conversation",
-      field: {
-        label: "Title",
-        value: target?.title ?? "",
-        placeholder: "New subject",
-        maxLength: 80,
-      },
-      confirmLabel: "Rename",
-    });
-    const nextTitle = typeof answer === "string" ? answer.trim() : "";
-    if (!nextTitle) return;
-    setConversations((previous) =>
-      previous.map((conversation) =>
-        conversation.id === conversationId
-          ? { ...conversation, title: deriveTitle(nextTitle) }
-          : conversation,
-      ),
-    );
-  }
 
   function exportActiveConversation() {
     if (!activeConversation?.messages.length) {
@@ -3078,12 +3008,6 @@ function FreyaApp() {
     void pumpReplies();
   }
 
-  /** The open chat's last few messages, for how a quiet chat leaves her mood (lib/mood idleMood). */
-  function recentTurns() {
-    const open = conversationsRef.current.find((conversation) => conversation.id === activeIdRef.current);
-    return (open?.messages ?? []).filter((message) => !message.command).slice(-6).map((message) => ({ role: message.role, content: message.content }));
-  }
-
   /** What she owes, saved as it changes, so a refresh picks it back up (lib/resume). */
   function persistInflight(lastPostedId?: string) {
     if (lastPostedId) lastPostedIdRef.current = lastPostedId;
@@ -3468,7 +3392,18 @@ function FreyaApp() {
           sinceLastPosted,
           moodRef.current.energy,
         );
-        if (wait > 0) await delay(wait);
+        if (wait > 0) {
+          // Between texts she stops typing for a beat (sent one, glances at it), then starts the next:
+          // the dots used to stay on from her first text to her last.
+          if (posted.length > 0 && wait > 900) {
+            setTypingIn("");
+            const beat = Math.min(700, wait * 0.35);
+            await delay(beat);
+            if (controller.signal.aborted) return;
+            setTypingIn(job.conversationId);
+            await delay(wait - beat);
+          } else await delay(wait);
+        }
         if (controller.signal.aborted) return;
         // A reply that turns out long switches to text for the rest: nobody wants five minutes of voice notes.
         if (voiceTurn && spokenChars + text.length > 900) voiceTurn = false;
@@ -3769,10 +3704,8 @@ function FreyaApp() {
       finishStream(truncated);
       setOffline(false);
       await finishPiece();
-      // Her own feelings: what her reply shows sets her mood (lib/mood moodFromReply), and one more
-      // unanswered text if she went first.
-      if (received.trim())
-        setMood((current) => moodFromReply(current, extractHerReaction(extractMoodTag(received).text).text || received, Date.now()));
+      // One more unanswered text if she went first. (How she feels after her own reply is worked out
+      // on the server, with the next message: lib/heart.)
       if (initiative)
         setMood((current) => ({
           ...current,
@@ -3882,19 +3815,12 @@ function FreyaApp() {
     };
   }, [hydrated]);
 
-  /** A message from them arriving: their being here, and sometimes a new thing to wonder about. */
-  function feel(text: string) {
-    setMood((current) => {
-      // That they're here. What they said is judged with the reply (lib/mood-appraisal).
-      let next = arrive(current);
-      const words = contentWords(text).filter((word) => word.length >= 6);
-      if (words.length && Math.random() < 0.35)
-        next = addCuriosity(
-          next,
-          words[Math.floor(Math.random() * words.length)],
-        );
-      return next;
-    });
+  /**
+   * A message from them arriving: that they're here (glad if they've been gone a while). What they
+   * said is read on the server, with the reply (lib/mood-appraisal), and her heart comes back in it.
+   */
+  function feel() {
+    setMood((current) => arrive(current));
   }
 
   function sendMessage(event?: FormEvent) {
@@ -4001,7 +3927,7 @@ function FreyaApp() {
       void runPicture(ask.prompt, text, { quiet: true, askedBy: message.id, ...(ask.from ? { from: ask.from } : {}) });
     }
     updateActiveMessages((previous) => [...previous, ...fileMessages, message]);
-    feel(text);
+    feel();
     const asked = requestedExpression(text);
     if (asked)
       offerFace(
@@ -4306,18 +4232,29 @@ function FreyaApp() {
     });
   }
 
-  /** Asks how a started picture is going until it's done or failed (pictures can take many minutes). */
+  /**
+   * Asks how a started picture is going until it's done or failed (pictures can take minutes). The
+   * first check is quick, then it follows the server's estimate: often near the end, rarely before.
+   * If her server stops answering altogether for a couple of minutes, it says so instead of waiting
+   * out the hour.
+   */
   async function pollPicture(job: string): Promise<Record<string, unknown>> {
     const deadline = Date.now() + PICTURE_WAIT_MS;
+    let wait = 2000;
+    let unreachableSince = 0;
     while (Date.now() < deadline) {
-      await delay(5000);
+      await delay(wait);
       const payload = await fetch(`/api/image?job=${job}`, { cache: "no-store" })
         .then((response) => (response.ok ? response.json() : null))
         .catch(() => null);
-      // A dropped check (the server or the tunnel blinked): the picture carries on; ask again.
-      if (!payload) continue;
-      if (payload.failed) throw new Error(typeof payload.error === "string" ? payload.error : "That picture couldn't be made.");
-      if (payload.kind) return payload;
+      const lost = !payload || payload.unreachable === true;
+      unreachableSince = lost ? unreachableSince || Date.now() : 0;
+      if (unreachableSince && Date.now() - unreachableSince > PICTURE_UNREACHABLE_MS)
+        throw new Error("Her image server stopped answering (a new Colab session has a new address).");
+      if (payload?.failed) throw new Error(typeof payload.error === "string" ? payload.error : "That picture couldn't be made.");
+      if (payload?.kind) return payload;
+      const eta = typeof payload?.eta === "number" ? payload.eta * 1000 : 0;
+      wait = eta ? Math.min(5000, Math.max(1500, eta / 4)) : 3000;
     }
     throw new Error("The picture took too long.");
   }
@@ -4330,7 +4267,12 @@ function FreyaApp() {
     const { conversationId, cardId, quiet, askedBy, fullPrompt } = ticket;
     const place = async (patch: Partial<Message>) => {
       if (!quiet) return patchMessage(conversationId, cardId, patch);
-      while (activeJobRef.current?.conversationId === conversationId || jobsRef.current.some((job) => job.conversationId === conversationId && job.targetId === askedBy)) await delay(600);
+      // Sent like a real photo: after she's said she's taking it (her reply to the ask), and not in the
+      // middle of a text she's typing. It doesn't wait behind everything else she has to say.
+      const answering = () => (activeJobRef.current?.conversationId === conversationId && activeJobRef.current.targetId === askedBy)
+        || jobsRef.current.some((job) => job.conversationId === conversationId && job.targetId === askedBy);
+      const typingLimit = Date.now() + 20_000;
+      while (answering() || (typingInRef.current === conversationId && Date.now() < typingLimit)) await delay(400);
       patchConversation(conversationId, (messages) => messages.some((message) => message.id === cardId) ? messages : [...messages, { id: cardId, role: "assistant", content: "", at: new Date().toISOString(), ...(askedBy ? { replyTo: askedBy } : {}), ...patch } as Message]);
       if (conversationId === activeIdRef.current) setBubbleBeat((count) => count + 1);
     };
@@ -4465,13 +4407,8 @@ function FreyaApp() {
       ),
     );
     setReactingToId("");
-    // A reaction is part of how the conversation is going, so it can move her mood like a message.
-    if (next)
-      setMood((current) =>
-        reactToMessage(resumeMood(current), next, Date.now(), {
-          intimate: intimateMode && switches.sexTalk !== false,
-        }),
-      );
+    // A tap-back is part of how the conversation is going: a small nudge to how she feels (lib/heart).
+    if (next) setMood((current) => feelReaction(passTime(current), next, Date.now()));
   }
 
   async function copyMessage(message: Message) {
@@ -4710,7 +4647,7 @@ function FreyaApp() {
         },
       };
       patchConversation(conversationId, (current) => [...current, message]);
-      feel(transcript);
+      feel();
       shouldAutoScroll.current = true;
       atBottomRef.current = true;
       setAtBottom(true);
@@ -4727,7 +4664,14 @@ function FreyaApp() {
 
   function jumpToMessage(messageId: string) {
     const element = document.getElementById(`message-${messageId}`);
-    if (!element) return;
+    if (!element) {
+      // Further back than what's on screen: show enough of the chat to reach it, then go there.
+      const index = messages.findIndex((message) => message.id === messageId);
+      if (index < 0) return;
+      setShownCount(messages.length - index + 10);
+      window.setTimeout(() => jumpToMessage(messageId), 60);
+      return;
+    }
     const reduceMotion = window.matchMedia(
       "(prefers-reduced-motion: reduce)",
     ).matches;
@@ -4752,39 +4696,6 @@ function FreyaApp() {
     setSearchOpen(false);
     setSearchQuery("");
     setSearchIndex(0);
-  }
-
-  /**
-   * Asks for another take on her latest answer: her messages for that turn are dropped and the
-   * message she was answering gets a fresh reply. Pictures and visualisations stay.
-   */
-  function regenerateReply(message: Message) {
-    if (replyingHere) {
-      notify("Wait for her to finish replying first.", "info");
-      return;
-    }
-    const conversationId = activeIdRef.current;
-    const index = messages.findIndex((item) => item.id === message.id);
-    let answered = -1;
-    for (let position = index; position >= 0; position -= 1) {
-      if (messages[position].role === "user" && !messages[position].command) {
-        answered = position;
-        break;
-      }
-    }
-    if (answered < 0) return;
-    const targetId = messages[answered].id;
-    patchConversation(conversationId, (current) =>
-      current.filter(
-        (item, position) =>
-          position <= answered ||
-          item.role !== "assistant" ||
-          item.visualization ||
-          item.picture,
-      ),
-    );
-    setTruncatedReplyId("");
-    enqueueReply({ conversationId, targetId });
   }
 
   function handleKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
@@ -4814,20 +4725,11 @@ function FreyaApp() {
         newConversation();
         return;
       }
-      if (modifier && event.key.toLowerCase() === "b") {
-        event.preventDefault();
-        setDrawerOpen((open) => !open);
-        return;
-      }
       // Ctrl/Cmd+Shift+F searches this conversation; plain Ctrl+F stays the browser's own find.
       if (modifier && event.shiftKey && event.key.toLowerCase() === "f") {
         event.preventDefault();
         setSearchOpen(true);
         window.requestAnimationFrame(() => searchInputRef.current?.focus());
-        return;
-      }
-      if (event.key === "Escape" && !settingsOpen && window.innerWidth <= 700) {
-        setDrawerOpen(false);
         return;
       }
       if (event.key === "/" && !typing && !settingsOpen) {
@@ -4913,10 +4815,6 @@ function FreyaApp() {
   const latestUserText =
     [...messages].reverse().find((message) => message.role === "user")
       ?.content || "";
-  const latestAssistantText =
-    [...messages].reverse().find((message) => message.role === "assistant")
-      ?.content || "";
-  const remainingChars = MAX_INPUT_CHARS - input.length;
   const thread = useMemo(() => describeThread(messages), [messages]);
   /** Ids of the messages containing the search text, oldest first. */
   const searchMatches = useMemo(() => {
@@ -4964,7 +4862,7 @@ function FreyaApp() {
     return <main className="access-lock" aria-busy="true" />;
 
   return (
-    <main className="app-shell single-chat">
+    <main className="app-shell single-chat" style={themeStyle}>
       <ToastStack
         toasts={toasts}
         onDismiss={(id) =>
@@ -5778,7 +5676,7 @@ function FreyaApp() {
                           ? "replying in another chat"
                           : offline
                             ? "offline"
-                            : `online · ${mood.name}`}
+                            : `online · ${herDoingNow()}`}
             </span>
             <span className="status-trailing" title={activeConversation?.title}>
               {activeConversation?.title ?? UNTITLED}
@@ -6061,8 +5959,14 @@ function FreyaApp() {
                 </div>
               ) : (
                 <div className="message-list">
+                  {!searchOpen && messages.length > shownCount && (
+                    <button type="button" className="earlier-messages" onClick={() => setShownCount((count) => count + MESSAGE_PAGE)}>
+                      earlier messages
+                    </button>
+                  )}
                   {messages.map((message, index) => {
                     if (message.hiddenForMe) return null;
+                    if (!searchOpen && index < messages.length - shownCount) return null;
                     const info = thread[index];
                     const clock = info.endsRun ? formatClock(message.at) : "";
                     return (
@@ -6556,7 +6460,7 @@ function FreyaApp() {
           <div className="profile-name-row">
             <h2>FREYA, 20</h2>
             <span className={`profile-state ${offline ? "is-offline" : ""}`}>
-              {offline ? "OFFLINE" : `ONLINE · ${mood.name.toUpperCase()}`}
+              {offline ? "OFFLINE" : `ONLINE · ${heartLabel(mood).toUpperCase()}`}
             </span>
           </div>
           <p className="profile-description">

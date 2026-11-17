@@ -67,14 +67,16 @@ your message ─┬─ casual chat ───────────────
 - **Reasoning panel** (`lib/council.ts`): for maths, code, logic and decisions, two models from
   different families solve the question independently; FREYA answers from both. Settings →
   Deep reasoning: Auto / Always / Off.
-- **Inner state** (`lib/mood.ts`, `lib/mood-appraisal.ts`): a mood kept per account in the browser, across
-  conversations and restarts. A cloud model judges it from the conversation with each reply; intimate
-  and Local-only chat use word rules instead, and never reach the cloud. It holds while it's being fed and she
-  knows why she feels it. Left alone it expires in steps, she's sad after 8 hours without you, and it resets
-  after 5 days. She tires of very long chats, and hearing from you after a while makes her happy or excited.
-  `horny` needs the 18+ switch. It shapes her tone; she may text first after you've been quiet a while (Settings → FREYA texts first). The
+- **Her heart** (`lib/heart.ts`, `lib/mood-appraisal.ts`): fourteen feelings at once (joy, affection,
+  amusement, hurt, irritation, missing you...), each fading at its own pace, under a slow mood, with
+  what's on her mind and her last private thought. A model reads each message in context and says how
+  it moves her (no word lists); intimate turns are read only by her own server, Local-only by nothing.
+  Time and her own day do the rest: things happen to her (a customer at work, burnt rice), she misses
+  you while you're away, she's groggy if you wake her. Kept with your account in Supabase and worked
+  out on the server; how it works and every rule around it: `docs/HOW-FREYA-WORKS.md`. The
   canvas shows it (`app/components/EmotionCanvas.tsx`): its particle body (layered noise on the GPU, lit,
-  with a core and haze) takes the mood's shape, energy and warmth over a few seconds, leans in while you
+  with a core and haze) blends the shapes of what she feels, and the light around her portrait follows
+  her mood; it leans in while you
   type, draws in while she thinks and brightens slightly while she talks. Her portrait's face is decided
   by `lib/expression-director.ts`: neutral at rest, brief reactions only to what was actually said, held
   and then eased back, with cooldowns so nothing repeats; Settings → Expressions sets how much shows.
@@ -127,7 +129,14 @@ Settings in the browser decides instead.
 ## Her model on a server
 
 The laptop's 4B model is too small to be good, and it's the heavy part. Run a far larger one somewhere
-else and your laptop only runs the app:
+else and your laptop only runs the app.
+
+**Through Puter (her usual voice):** upload `training/freya_puter_server.ipynb` to Colab (an L4 or A100
+if you want fast pictures), add your `PUTER_AUTH_TOKEN` secret, run it, and run the line it prints here:
+`start.bat --remote https://….trycloudflare.com --key … --ctx 16384`. Then `freya check` tests her
+speed, pictures and behaviour against it (see `docs/HOW-FREYA-WORKS.md`).
+
+**On Colab's own GPU:**
 
 1. Upload `training/freya_server.ipynb` to [Colab](https://colab.research.google.com), choose a T4 GPU and run it.
    It serves her voice (Dark Forest 20B, uncensored roleplay), a helper model (fallback voice, reads

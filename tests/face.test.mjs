@@ -53,14 +53,14 @@ test("another photo of the same expression is never the one already showing", ()
   assert.equal(pickVariation([], "a"), null);
 });
 
-test("she reads for one to five seconds, longer for longer messages", () => {
+test("she reads about as fast as a person: half a second for hi, up to three for a long one", () => {
   for (const random of [0, 0.5, 0.999]) {
     for (const text of ["hi", "x".repeat(100), "x".repeat(5000)]) {
       const wait = readingDelay(text, () => random);
-      assert.ok(wait >= 1000 && wait <= 5000, `${text.length}: ${wait}`);
+      assert.ok(wait >= 400 && wait <= 3000, `${text.length}: ${wait}`);
     }
   }
-  assert.equal(readingDelay("hi", () => 0) < 1200, true);
+  assert.equal(readingDelay("hi", () => 0) < 800, true);
   assert.ok(readingDelay("x".repeat(500), () => 0) > readingDelay("hi", () => 0));
 });
 

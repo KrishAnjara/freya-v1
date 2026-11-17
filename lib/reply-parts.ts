@@ -154,7 +154,7 @@ export function takeCompleteParts(buffer: string, final = false): { parts: strin
  * reading speed, and a burst of six bubbles at once reads as a dump, not a conversation.
  */
 export function typingDelay(part: string, energy?: number) {
-  return Math.round(Math.min(1600, 320 + part.length * 3) * paceFactor(energy));
+  return Math.round(Math.min(1300, 260 + part.length * 2.4) * paceFactor(energy));
 }
 
 /** The energy of the neutral mood: at this level (or with none given) timing is unchanged. */
@@ -171,24 +171,24 @@ export function paceFactor(energy?: number) {
 }
 
 /**
- * How long she takes to pick up when she's in the middle of something (lib/her-day): a person at
- * work doesn't answer in three seconds, but nobody should wait long enough to think it broke.
+ * How long she takes to pick up when she's in the middle of something (lib/her-day: a lecture, her
+ * shift): a person at work doesn't answer in a second, but it shouldn't feel like waiting either.
  */
 export function busyDelay(random: () => number = Math.random) {
-  return 8000 + random() * 37_000;
+  return 4000 + random() * 8000;
 }
 
 /**
- * How long she spends reading their message before she starts typing: one to five seconds, leaning
- * longer for a longer message. The reply is already being written meanwhile.
+ * How long she spends reading their message before she starts typing: about half a second for "hi",
+ * up to three for a long one, as fast as a person actually reads. The reply is being written meanwhile.
  */
 export function readingDelay(text: string, random: () => number = Math.random, energy?: number) {
-  const least = Math.min(4000, 1000 + text.length * 12);
-  return Math.round((least + random() * (5000 - least)) * paceFactor(energy));
+  const read = Math.min(2500, 600 + text.length * 10);
+  return Math.round(read * (0.8 + random() * 0.4) * paceFactor(energy));
 }
 
 /** Consecutive bubbles never land closer than this: a person sends one text, then the next. */
-export const MIN_BUBBLE_GAP_MS = 1000;
+export const MIN_BUBBLE_GAP_MS = 800;
 
 /** Delay before posting a bubble; a follow-up bubble waits at least MIN_BUBBLE_GAP_MS. */
 export function bubbleDelay(part: string, followUp: boolean, energy?: number) {

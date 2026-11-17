@@ -92,7 +92,3 @@ export async function checkAccess(headers: Headers, options: AccessOptions, fetc
   return { ok: true, userId: user.id };
 }
 
-/** A new sign-in claimed the account: forget the cached session so the change applies at once. */
-export function forgetSession(userId: string) {
-  sessions.delete(userId);
-}

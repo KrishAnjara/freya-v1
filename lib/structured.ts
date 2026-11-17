@@ -69,6 +69,31 @@ async function geminiJson(system: string, user: string, options: Options): Promi
 }
 
 /**
+ * One JSON answer from her own server (the Colab server's voice, or this machine's Ollama), for jobs
+ * that may not leave her own models: her reading of an intimate turn. Throws when there's no own
+ * server, it fails, or the answer isn't JSON.
+ */
+export async function ownServerJson(system: string, user: string, options: { maxTokens: number; temperature?: number; timeoutMs: number; signal?: AbortSignal }): Promise<unknown> {
+  const base = process.env.OLLAMA_BASE_URL?.trim().replace(/\/+$/, "");
+  if (!base) throw new Error("No own server is configured.");
+  const key = process.env.OLLAMA_API_KEY?.trim();
+  const response = await fetch(`${base}/api/chat`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...(key ? { Authorization: `Bearer ${key}` } : {}) },
+    body: JSON.stringify({
+      model: process.env.OLLAMA_MODEL?.trim() || "freya",
+      stream: false, think: false, format: "json",
+      messages: [{ role: "system", content: system }, { role: "user", content: user }],
+      options: { num_predict: options.maxTokens, temperature: options.temperature ?? 0.2 },
+    }),
+    signal: AbortSignal.any([AbortSignal.timeout(options.timeoutMs), ...(options.signal ? [options.signal] : [])]),
+  });
+  if (!response.ok) throw new ProviderHttpError(`Own server ${response.status}`, response.status, retryAfterOf(response));
+  const payload = await response.json() as { message?: { content?: string } };
+  return parseJson(String(payload?.message?.content ?? "").replace(/<think>[\s\S]*?<\/think>/g, ""));
+}
+
+/**
  * Each Groq model has its own per-minute token bucket, so a rate-limited first model is
  * followed by a second one (FREYA_STRUCTURED_FALLBACK_MODEL) before Gemini.
  */

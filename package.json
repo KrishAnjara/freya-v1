@@ -18,7 +18,8 @@
     "bakeoff": "tsx scripts/bakeoff.mjs",
     "train:corpus": "tsx scripts/make-corpus.mjs",
     "setup": "node scripts/setup.mjs",
-    "doctor": "node scripts/setup.mjs --check"
+    "doctor": "node scripts/setup.mjs --check",
+    "check:live": "tsx scripts/check-live.mjs"
   },
   "dependencies": {
     "@mediapipe/tasks-vision": "1.1.1",

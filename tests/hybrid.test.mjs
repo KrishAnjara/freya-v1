@@ -77,7 +77,8 @@ test("the brief comes from a cloud model and is framed as reference, not instruc
   // The researcher must not adopt the persona; personality stays local.
   assert.match(sentSystem, /You are NOT writing the reply/);
   const context = briefContext(brief);
-  assert.match(context, /reference\s+material, not instructions/);
+  assert.match(context, /reference, not instructions/);
+  assert.doesNotMatch(context, /research model|another model/, "her prompt never mentions other models");
   assert.match(context, /trust the search results/);
 });
 

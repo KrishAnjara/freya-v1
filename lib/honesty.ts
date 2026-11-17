@@ -16,7 +16,7 @@ const WHAT = `${ARTICLE}(human( being)?|person|woman|girl|${MACHINE})`;
 const WHAT_SHE_IS = `(${ARTICLE}(human( being)?|person|${MACHINE})|real)`;
 const YOU_ARE = "(are you|are u|r u|ru)";
 const YOU_OR_THIS = "(are you|are u|r u|ru|is this)";
-const ENDS = "\\s*(\\?|$|,|\\bor\\b|\\bthough\\b|\\btho\\b|\\bright\\b)";
+const ENDS = "\\s*(\\?|$|,|!|\\bor\\b|\\bthough\\b|\\btho\\b|\\bright\\b|\\blol\\b|\\blmao\\b|\\bhaha\\w*|\\bhehe\\b|\\bfr\\b|\\bngl\\b|😂|🤣|😭|👀)";
 
 const DIRECT = new RegExp(`\\b(am i|are we|have i been) (really |actually |just |even )?(talking|speaking|chatting|texting) (to|with) ${WHAT}\\b`, "i");
 const EITHER_OR = new RegExp(`\\b${YOU_OR_THIS} (really |actually )?${WHAT},? (or|or just|or are you|or is this) ${WHAT}\\b`, "i");
@@ -60,7 +60,6 @@ export const HONEST_ANSWERS = [
   "i'm an AI. everything else about me stands",
   "you want the truth: i'm an AI. anyway",
 ];
-export const HONEST_ANSWER = HONEST_ANSWERS[0];
 
 /** Varies with the conversation, not at random, so a replay gives the same answer. */
 export function honestAnswer(turn = 0) {

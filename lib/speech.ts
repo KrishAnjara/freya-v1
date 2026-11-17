@@ -23,16 +23,6 @@ const state: SpeechStatus & { preferredVoice?: string; voiceName?: string } = {
   speaking: false, muted: false, supported: false, message: "",
 };
 
-/** Pins an explicit voice choice; empty restores automatic selection. */
-export function setPreferredVoice(name: string) {
-  state.preferredVoice = name || undefined;
-  emit();
-}
-
-/** The voice actually in use, once something has been spoken. */
-export function currentVoiceName() {
-  return state.voiceName ?? "";
-}
 let revision = 0;
 const listeners = new Set<() => void>();
 

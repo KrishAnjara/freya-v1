@@ -39,8 +39,10 @@ on the server and in Colab Secrets on the GPU side; nothing secret reaches the b
 - **Persona and character** (`lib/personality.ts`, `lib/canon.ts`, `lib/her-day.ts`,
   `lib/voice-examples.ts`, `lib/reply-guard.ts`). Already bans assistant voice ("great question",
   "I hope this helps"), repeats and copied lines. Not rewritten.
-- **Mood** (`lib/mood.ts`, `lib/mood-appraisal.ts`): a bounded state machine with reasons,
-  decay and cooldowns. Kept; it is now one input to expressions instead of driving them directly.
+- **Heart** (`lib/heart.ts`, `lib/mood-appraisal.ts`; `lib/mood.ts` keeps the old names): many
+  feelings at once with their own half-lives, a slow mood, what's on her mind and her thoughts,
+  moved by a model's reading of each message, by time and by her day. Worked out on the server;
+  the face label is derived from it for expressions.
 - **Memory extraction** (`lib/memory-reflection.ts`): typed notes (preference, person, event,
   project, interest, decision, open, joke), corrections by id, a forget list, credential filters,
   per-conversation recaps. Kept; it now feeds a real store.
@@ -185,14 +187,17 @@ The portrait's face is decided by a small state machine, not chosen at random:
 - **Intensity** (Settings → Expressions): off, subtle, natural (default), expressive. Off also
   stops glances and mood motion.
 
-## 6b. Two moods (`lib/mood.ts`, `lib/user-mood.ts`)
+## 6b. Her heart, and her read on them (`lib/heart.ts`, `lib/user-mood.ts`)
 
-- **Hers** reacts to what they say (as before) and has a day of her own (`ownMood`): once they've
-  been gone 20 minutes and nothing they did is behind her mood, it follows what she's doing
-  (`lib/her-day.ts`: a lecture, her shift, a late night) and the day's temper (bright, even, flat,
-  restless, soft; fixed per date). Woken by them at 5 am she's groggy, not delighted.
-- **Theirs** is her read on them (stressed, sad, playful, flirty…), from the same mood-model call
-  when the turn may leave the machine, otherwise word rules, otherwise (camera on) their face. It
+- **Hers** is fourteen feelings at once, each resting at her temperament's level and fading back to
+  it at its own pace (a laugh in minutes, a hurt over hours), under a slow mood. A model reads each
+  message in context (`lib/mood-appraisal.ts`) and returns how it moves her feelings, a private
+  thought, what she wants to do next, what happened (an insult, an apology, news) and anything that
+  will stay on her mind; all checked against fixed lists. What's on her mind keeps its feeling
+  simmering until it's settled. Her day (`lib/her-day.ts`) pulls on her feelings and things happen in
+  it on their own. Missing them builds while they're away; woken at 5 am she's groggy.
+- **Theirs** is her read on them (stressed, sad, playful, flirty…), from the same reading, otherwise
+  their words, otherwise (camera on) their face; a crisis in their words always counts. It
   goes into the prompt as a read she could have wrong, never as her own feeling, and fades in
   20-90 minutes. Real distress adds guidance to stay with them and point to real help.
 
@@ -206,9 +211,10 @@ friend, close, crush, together) moves one step at a time and doesn't flicker; "t
 needs them to ask, and she says "not yet" when she isn't there. Only fixed text reaches the prompt.
 It follows the "Use memories" setting; she texts first a little more as they get closer.
 
-**Where it's kept.** Her mood, her read on them and the relationship are saved per account in the
-browser and, when signed in, in Supabase (`supabase/freya-state.sql`, table `freya_state`, RLS per
-user); the newer copy wins when a browser opens. Memories and personality were already there.
+**Where it's kept.** Her heart (in the `mood` column), her read on them and the relationship are
+saved per account in Supabase (`supabase/freya-state.sql`, table `freya_state`, RLS per user), and
+the server works the heart out and writes it back with each message; the copy with more history
+wins. The browser keeps a copy only to show it. Memories and personality were already there.
 
 ## 6d. Timing (`lib/model-timing.ts`, `lib/reply-parts.ts`)
 

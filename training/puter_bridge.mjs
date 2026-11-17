@@ -29,7 +29,9 @@ const EYES = list(env.FREYA_PUTER_VISION, ["alibaba:qwen/qwen3-vl-plus"]);
 const LOCAL_VOICE = env.FREYA_LOCAL_VOICE || "";
 const LOCAL_EYES = env.FREYA_LOCAL_VISION || "";
 /** No first word in this long: that model is skipped for this reply. */
-const FIRST_WORD_MS = Number(env.FREYA_FIRST_WORD_MS || 90_000);
+// A model that hasn't said a word in this long is stuck: the next one takes over. Her usual first word
+// comes in 1-3 s, so this is generous; 90 s made a stuck model hold a reply for a minute and a half.
+const FIRST_WORD_MS = Number(env.FREYA_FIRST_WORD_MS || 30_000);
 
 const log = (area, message) => console.log(`[${new Date().toTimeString().slice(0, 8)}] ${area.padEnd(8)} ${message}`);
 const puter = init(env.PUTER_AUTH_TOKEN || "");

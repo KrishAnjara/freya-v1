@@ -9,13 +9,6 @@ import { join } from "node:path";
 import { EXPRESSION_FILE, expressionOfFile, imagesFor, type Expression } from "@/lib/expression";
 import type { MoodName } from "@/lib/mood";
 
-/** A picture that's of her: "a selfie", "a pic of you at the beach", "you in a red dress". */
-const OF_HER = /\b(selfie|freya)\b|\b(pic(ture)?|photo|image|shot|snap|one)s? of (you|u|yourself|urself)\b|\byour(self)? (face|body|outfit|look|selfie|pic|photo)\b|\b(you|u) (in|wearing|at|on|as|with|doing|posing|lying|sitting|standing|looking|dressed)\b|\b(show|send) (me )?(you|u|yourself)\b/i;
-
-export function isPictureOfHer(prompt: string) {
-  return OF_HER.test(prompt);
-}
-
 /** An expression named in the request. */
 const ASKED: [RegExp, Expression][] = [
   [/\b(laugh\w*|giggl\w*|cracking up)\b/i, "laugh"],
@@ -48,15 +41,38 @@ export function faceExpression(prompt: string, mood?: MoodName): Expression {
 
 const PORTRAIT_DIR = join(process.cwd(), "public", "portrait", "expressions");
 const BASE_PORTRAIT = join(process.cwd(), "app", "static", "freya.png");
-/** Small renders (glances, reading) aren't a good face to build a whole picture from. */
-const MIN_REFERENCE_BYTES = 200_000;
-
-/** When an expression's photos are only small renders, the nearest full-size face. */
-const LARGER: Partial<Record<Expression, Expression>> = { sultry: "playful", "sultry-thinking": "playful", reading: "neutral", "look-left": "neutral", "look-right": "neutral", "look-up": "neutral", "look-down": "neutral" };
 
 /**
- * One of her photos for this expression, as base64. The photo gives the model her face; the
- * expression itself is also named in the prompt, so a near match is fine.
+ * Glances and reading are her eyes moving, not a face to build a whole picture from: those take
+ * the nearest straight-on face instead.
+ */
+const STRAIGHT_ON: Partial<Record<Expression, Expression>> = { "sultry-thinking": "sultry", reading: "neutral", "look-left": "neutral", "look-right": "neutral", "look-up": "neutral", "look-down": "neutral" };
+
+/**
+ * The reference only has to show her face: the face pass reads it at 224 px. A 512 px JPEG is
+ * ~40 KB, where the portrait PNG was ~1.6 MB of base64 on every picture request, through the tunnel.
+ */
+const REFERENCE_SIDE = 512;
+const shrunk = new Map<string, string>();
+
+async function smallCopy(path: string): Promise<string> {
+  const known = shrunk.get(path);
+  if (known) return known;
+  const bytes = await readFile(path);
+  let data = bytes.toString("base64");
+  try {
+    const sharp = (await import("sharp")).default;
+    data = (await sharp(bytes).resize(REFERENCE_SIDE, REFERENCE_SIDE, { fit: "inside", withoutEnlargement: true }).jpeg({ quality: 85 }).toBuffer()).toString("base64");
+  } catch {
+    // No sharp on this machine: the full photo still works, it's just bigger.
+  }
+  shrunk.set(path, data);
+  return data;
+}
+
+/**
+ * One of her photos for this expression, as base64 (a small JPEG). The photo gives the model her
+ * face; the expression itself is also named in the prompt, so a near match is fine.
  */
 export async function faceReference(expression: Expression, random = Math.random): Promise<string | null> {
   try {
@@ -66,13 +82,11 @@ export async function faceReference(expression: Expression, random = Math.random
       const match = file.match(EXPRESSION_FILE);
       if (match) (grouped[expressionOfFile(match[1], match[2])] ??= []).push(file);
     }
-    for (let current: Expression | undefined = expression; current; current = LARGER[current]) {
-      for (const file of [...imagesFor(current, grouped)].sort(() => random() - 0.5)) {
-        const bytes = await readFile(join(PORTRAIT_DIR, file));
-        if (bytes.length >= MIN_REFERENCE_BYTES) return bytes.toString("base64");
-      }
+    for (let current: Expression | undefined = expression; current; current = STRAIGHT_ON[current]) {
+      const choices = [...imagesFor(current, grouped)];
+      if (choices.length) return await smallCopy(join(PORTRAIT_DIR, choices[Math.floor(random() * choices.length)]));
     }
-    return (await readFile(BASE_PORTRAIT)).toString("base64");
+    return await smallCopy(BASE_PORTRAIT);
   } catch {
     return null;
   }

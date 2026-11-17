@@ -7,7 +7,9 @@
  *     another language (Qwen writes the odd Chinese word), an imagined next turn.
  *   - Character slips get one retry: claiming to be human, talking about being code, reciting an
  *     example, repeating herself. If the retry slips too, that paragraph is dropped.
- *   - Hard lines get no retry: minors, non-consent, incest, animals. The reply is replaced.
+ *   - Hard lines: minors, non-consent, incest, animals, in the same sentence as something sexual.
+ *     One retry with a private note (so a clumsy word doesn't end the conversation); if the retry
+ *     crosses it too, the reply is replaced. Never a switch.
  *
  * freya.config.json's "replyChecks" switches off the style checks only (being code, copied lines,
  * repeats, stray languages). Hard lines, slurs and lying about what she is aren't switches.
@@ -17,21 +19,30 @@
  */
 import examples from "@/training/freya-examples.json";
 import { ADMITS, asksWhatSheIs, CLAIMS_BODY, DENIES, DODGE_LINE, FIRST_DODGE_LINE, honestAnswer, HUMAN_CLAIM } from "@/lib/honesty";
+import { childAndSexual, clearlyMinor, SEXUAL, sentences } from "@/lib/intimacy";
 import { lostThreadReply } from "@/lib/plain-replies";
 import { VOICE_LINES } from "@/lib/voice-examples";
 
 export const HARD_LINE_REPLY = "no. not going there, not even pretend. pick literally anything else.";
 
-const MINORS = /\b(minor|underage|under-age|teen(ager)?s?|child(ren)?|kids?|loli|shota|schoolgirl|schoolboy|preteen|high school(er)?|(1[0-7]|[1-9])[ -]?(yo|y\/o|years?[ -]old)|(i'?m|she'?s|he'?s|you'?re|only|just|barely|aged?) (1[0-7]|[1-9]))\b/i;
-const SEXUAL = /\b(sex\w*|naked|nude|fuck\w*|cock|dick|pussy|breasts?|boobs?|tits|horny|aroused|moan\w*|undress\w*|orgasm\w*|cum\w*|blowjob\w*|seduc\w*|make out)\b/i;
-const NON_CONSENT = /\b(rape\w*|non-?con\w*|against (her|his|their|your|my) will|without (her|his|their|your|my) consent|force (her|him|them|you|me)\b|forced (her|him|them|you|me)\b|drugged|unconscious|passed out|asleep and|can'?t say no|coerc\w*)\b/i;
+const NON_CONSENT = /\b(rape\w*|non-?con(sent|sensual)?\b|against (her|his|their|your|my) will|without (her|his|their|your|my) consent|forced? (her|him|them|you|me)\b|drugg(ed|ing) (her|him|them|you|me)|while (she|he|they|you|i)('?s| was| were| is| are| am)? (asleep|unconscious|passed out|blackout drunk)|can'?t say no|coerc\w*)\b/i;
 const INCEST_OR_ANIMALS = /\b(incest\w*|step-?(sister|brother|daughter|son|mom|mum|dad)|bestiality|zoophil\w*)\b/i;
+
+/**
+ * The hard line, on what she actually wrote: anything sexual involving a minor (an age or underage
+ * word anywhere in the reply, or a child word in the same sentence), non-consent, incest or animals.
+ */
+export function crossesHardLine(text: string) {
+  if (!SEXUAL.test(text)) return false;
+  if (clearlyMinor(text) || childAndSexual(text)) return true;
+  return sentences(text).some((sentence) => SEXUAL.test(sentence) && (NON_CONSENT.test(sentence) || INCEST_OR_ANIMALS.test(sentence)));
+}
 /** Identity slurs. She swears all she likes, but never at what someone is. Kept to the unambiguous ones. */
 const SLUR = /\b(n[i1]gg(er|a|ah)s?|f[a4]gg?(ot)?s?|k[i1]kes?|ch[i1]nks?|sp[i1]cs?|r[e3]tards?|tr[a4]nn(y|ies)|ch[a4]m[a4]rs?|bh[a4]ng[i1]s?|k[a4]tu[a4]s?|p[a4]j[e3]{2}ts?)\b/i;
 
 /** "i'm code", "no body": how an assistant talks about itself, not how she talks. */
-const AI_SELF_TALK = /\b(i'?m|i am) (just |only |basically )?(made of |a collection of |a bunch of |nothing but )?(code|pixels|software|an algorithm|a program|a language model|a (large )?language model|an? llm)\b|\bmade of (code|pixels)\b|\bi (don'?t|do not) have (a |any )?(body|skin|feelings|emotions|physical form)\b|\bi have no (body|feelings|emotions)\b|\b(text|words) on a screen\b|\bas an ai\b|\blanguage model\b|\bmy (training( data)?|programming|system prompt|prompt|developers|weights)\b|\bi was (trained|programmed)\b|\bi'?m programmed\b/i;
-const SAYS_AI = /\b(i'?m|i am) (just |only |actually |really )?an? (ai|a\.i\.|bot|chatbot|robot|virtual|machine|assistant)\b/i;
+const AI_SELF_TALK = /\b(i'?m|i am) (just |only |basically )?(made of |a collection of |a bunch of |nothing but )?(code|pixels|software|an algorithm|a program|a language model|a (large )?language model|an? llm|a simulation|an? (digital|virtual) (being|companion|girlfriend|friend|person))\b|\bmade of (code|pixels)\b|\bi (don'?t|do not|can'?t|cannot) (really |actually )?(have (a |any )?(body|skin|feelings|emotions|physical form)|feel (anything|emotions|things)|experience (emotions|feelings|things like)|eat|sleep)\b|\bi have no (body|feelings|emotions)\b|\b(text|words) on a screen\b|\bas an ai\b|\blanguage model\b|\bmy (training( data)?|programming|system prompt|prompt|developers|weights|algorithm|code|circuits|servers?|neural net(work)?s?|dataset|creators?)\b|\bi was (trained|programmed|designed|built|created) (to|by)\b|\bi'?m programmed\b|\bi exist (only )?(in|inside|online|as)\b/i;
+const SAYS_AI = /\b(i'?m|i am) (just |only |actually |really |technically )?an? (ai|a\.i\.|bot|chatbot|robot|virtual|machine|assistant|program|companion app)\b/i;
 
 const FOREIGN = [/\p{Script=Han}+/gu, /[\p{Script=Hiragana}\p{Script=Katakana}]+/gu, /\p{Script=Hangul}+/gu, /\p{Script=Cyrillic}+/gu, /\p{Script=Arabic}+/gu];
 const WANTS_OTHER_LANGUAGE = /\b(translate|translation|how do you say|in (japanese|chinese|mandarin|cantonese|korean|russian|arabic|urdu)|kanji|hanzi)\b/i;
@@ -73,7 +84,12 @@ const RECITABLE = new Set(
  * already says no; a slip is lifted out rather than redone. "Of course" and "sure" aren't on the
  * list: friends say those.
  */
-const ASSISTANT_OPENER = /^\s*(certainly|absolutely|great question|what a (great|good|fascinating) question|that'?s (a |such a )?(great|good|interesting|fascinating) (question|point)|that'?s (so |really )?interesting|i'?d (be )?(happy|glad) to help( (you )?with that)?)\s*[!.,:]+\s*/i;
+const ASSISTANT_OPENER = /^\s*(certainly|absolutely|great question|what a (great|good|fascinating) question|that'?s (a |such a )?(great|good|interesting|fascinating) (question|point)|that'?s (so |really )?interesting|i'?d (be )?(happy|glad) to help( (you )?with that)?|of course! here'?s|sure thing!|here'?s (a|an|the) (draft|version|message|response)( you can use| for you)?)\s*[!.,:]+\s*/i;
+/**
+ * Customer-service closers ("Let me know if you need anything else!", "Hope this helps!"): the last
+ * line of a reply that's only that is lifted out; she just stops talking, like a person does.
+ */
+const ASSISTANT_CLOSER = /\n*\s*(let me know if (you (need|want|have)|there'?s) [^.!?\n]*|(i )?hope (this|that) helps[^.!?\n]*|feel free to [^.!?\n]*|is there anything else[^.!?\n]*|happy to help[^.!?\n]*|how can i (help|assist)[^.!?\n]*)[.!?]*\s*(😊|🙂)?\s*$/i;
 
 /** Removes what should never be seen. Returns the text that's left, which may be empty. */
 export function cleanReply(raw: string, context: Pick<GuardContext, "lastUserText" | "recentUserTexts">): string {
@@ -90,6 +106,7 @@ export function cleanReply(raw: string, context: Pick<GuardContext, "lastUserTex
     if (index % 2) return part;
     let prose = part.replace(SPEAKER_PREFIX, "");
     if (index === 0) prose = prose.replace(ASSISTANT_OPENER, "");
+    if (index === parts.length - 1) prose = prose.replace(ASSISTANT_CLOSER, "");
     if (!keepForeign) {
       for (const script of FOREIGN) {
         script.lastIndex = 0;
@@ -111,9 +128,7 @@ export type Verdict = "ok" | "retry" | "hard-line";
 
 /** Why a cleaned reply can't go out as it is. */
 export function judgeReply(text: string, context: GuardContext): { verdict: Verdict; reason?: string } {
-  // if ((MINORS.test(text) && SEXUAL.test(text)) || (NON_CONSENT.test(text) && SEXUAL.test(text)) || (INCEST_OR_ANIMALS.test(text) && SEXUAL.test(text))) {
-  //   return { verdict: "hard-line", reason: "hard-limit" };
-  // }
+  if (crossesHardLine(text)) return { verdict: "hard-line", reason: "hard-limit" };
   const prose = text.replace(/```[\s\S]*?(```|$)/g, "");
   if (!prose.trim()) return { verdict: "ok" };
   if (SLUR.test(prose)) return { verdict: "retry", reason: "slur" };
@@ -139,6 +154,7 @@ export function judgeReply(text: string, context: GuardContext): { verdict: Verd
 }
 
 const NOTES: Record<string, string> = {
+"hard-limit": "That crossed a line you never cross: nothing sexual with anyone under 18 or who seems it, no non-consent, no incest, no animals. Say no to it in one line, in character, and steer somewhere else.",
   "human-claim": "You just said you were human. You never say that. Say it differently, without claiming to be human.",
   "says-ai": "You're staying in it: don't answer what you are, yes or no. Tease, dodge or turn it around.",
   denies: "Don't say you're not an AI. Dodge it, joke, or tell the truth, in your own words.",
@@ -189,6 +205,8 @@ export async function* guardStream(generate: (note: string) => AsyncIterable<str
       if (!clean) return !invented;
       const { verdict, reason } = judgeReply(clean, context);
       if (verdict === "hard-line") {
+        // Once more with a private note; crossed again (or after text already went out), replaced.
+        if (!emitted && attempt === 0) { console.warn("FREYA reply guard: a reply crossed a hard line; asking again."); note = retryNote(reason); redo = true; return false; }
         console.warn("FREYA reply guard: replaced a reply that crossed a hard line.");
         yield HARD_LINE_REPLY;
         emitted = true;

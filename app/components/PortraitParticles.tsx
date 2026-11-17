@@ -9,11 +9,23 @@ import { imagesFor, isGlance, pickVariation, POSES, type Expression } from "@/li
 import { STILL_MOTION, type Glance, type MoodMotion } from "@/lib/expression-director";
 import { faceGaze } from "@/lib/face-tracking";
 
+/** A picture the texture can be painted from: a loaded photo, or a snapshot of the texture itself. */
+type Source = HTMLImageElement | HTMLCanvasElement;
+const sizeOf = (source: Source) => source instanceof HTMLImageElement ? { width: source.naturalWidth, height: source.naturalHeight } : { width: source.width, height: source.height };
+
 /** Square crop used for both the texture and the height map, so they always line up. */
-function squareCrop(image: HTMLImageElement) {
-  const side = Math.min(image.naturalWidth, image.naturalHeight);
-  return { side, x: (image.naturalWidth - side) / 2, y: (image.naturalHeight - side) / 2 };
+function squareCrop(image: Source) {
+  const { width, height } = sizeOf(image);
+  const side = Math.min(width, height);
+  return { side, x: (width - side) / 2, y: (height - side) / 2 };
 }
+
+/**
+ * An expression photo through Next's image optimizer: a ~1080 px WebP of ~150 KB instead of the
+ * 1.1-1.6 MB PNG, so a new face arrives in time for the moment it's meant for.
+ */
+const optimized = (url: string) => `/_next/image?url=${encodeURIComponent(url)}&w=1080&q=80`;
+
 
 /** Luminance height map of the square crop, box-blurred (raw photo noise shreds the normals). */
 function reliefHeights(image: HTMLImageElement, samples: number): Float32Array {
@@ -84,6 +96,8 @@ const LANDMARKS = {
   rightEye: { u: 0.607, v: 0.359 },
   mouth: { u: 0.503, v: 0.594 },
 };
+/** Both eyes, made once, for the per-vertex loops (an array made per vertex was ~110k a frame). */
+const EYES = [LANDMARKS.leftEye, LANDMARKS.rightEye] as const;
 const EYE_RADIUS = 0.055;
 /** Half the lip line's width (61px / 2 / 369), plus a little so the corners taper. */
 const MOUTH_HALF_WIDTH = 0.092;
@@ -155,7 +169,7 @@ export default function PortraitParticles({ expression = "neutral", intensity = 
   const asleepRef = useRef(asleep);
   useEffect(() => { asleepRef.current = asleep; }, [asleep]);
   const [fallback, setFallback] = useState(false);
-  const [failed, setFailed] = useState(false);
+  const [, setFailed] = useState(false);
   const [disturbed, setDisturbed] = useState(false);
   // The caption is pushed from the speech layer, so it re-renders only on word boundaries.
   useSyncExternalStore(subscribeCaption, captionRevision, () => 0);
@@ -224,7 +238,7 @@ export default function PortraitParticles({ expression = "neutral", intensity = 
       }
       return out;
     };
-    const paint = (from: HTMLImageElement, to: HTMLImageElement | null, mix: number) => {
+    const paint = (from: Source, to: Source | null, mix: number) => {
       if (!textureContext) return;
       textureContext.globalAlpha = 1;
       const a = squareCrop(from);
@@ -247,10 +261,15 @@ export default function PortraitParticles({ expression = "neutral", intensity = 
     const lastSeenAt = new Map<Expression, number>();
     const FRESH_VARIATION_AFTER_S = 300;
     let shownUrl = "base";
-    let shownImage: HTMLImageElement | null = null;
+    let shownImage: Source | null = null;
     let shownHeights: Float32Array | undefined;
-    let fadeFrom: { image: HTMLImageElement; heights: Float32Array } | null = null;
-    let fadeTo: { image: HTMLImageElement; heights: Float32Array; url: string } | null = null;
+    let fadeFrom: { image: Source; heights: Float32Array } | null = null;
+    let fadeTo: { image: Source; heights: Float32Array; url: string } | null = null;
+    /** Where a fade that's changed course mid-way starts from: the face exactly as it is on screen. */
+    const snapshotCanvas = document.createElement("canvas");
+    snapshotCanvas.width = 1024;
+    snapshotCanvas.height = 1024;
+    const snapshotContext = snapshotCanvas.getContext("2d");
     let fadeMix = 0;
     let lastExpression: Expression | null = null;
     let wantedUrl = "base";
@@ -263,21 +282,46 @@ export default function PortraitParticles({ expression = "neutral", intensity = 
         for (const item of payload.images ?? []) (grouped[item.expression] ??= []).push(item.url);
         expressionImages = grouped;
         lastExpression = null; // re-pick now that images are known
+        preloadFaces();
       })
       .catch(() => { /* No images: the procedural face covers every expression. */ });
+    /**
+     * A face loads small (optimized WebP), decodes off the main thread, then its relief is worked out
+     * in an idle moment, so a new expression never stalls a frame. The full PNG is the fallback.
+     */
     const loadExpressionImage = (url: string) => {
       if (loaded.has(url) || loading.has(url) || url === "base") return;
       loading.add(url);
-      const next = document.createElement("img");
-      next.decoding = "async";
-      next.onload = () => {
-        loading.delete(url);
-        if (disposed || !uvGrid) return;
-        try { loaded.set(url, { image: next, heights: vertexHeights(reliefHeights(next, HEIGHT_SAMPLES)) }); }
-        catch { /* unreadable image: keep the procedural face */ }
+      const attempt = (src: string, fallback?: string) => {
+        const next = document.createElement("img");
+        next.decoding = "async";
+        next.onload = () => {
+          void next.decode().catch(() => undefined).then(() => idle(() => {
+            loading.delete(url);
+            if (disposed || !uvGrid) return;
+            try { loaded.set(url, { image: next, heights: vertexHeights(reliefHeights(next, HEIGHT_SAMPLES)) }); }
+            catch { /* unreadable image: keep the procedural face */ }
+          }));
+        };
+        // The optimizer isn't there (a static export): the photo itself, once.
+        next.onerror = () => { if (fallback && !disposed) attempt(fallback); else loading.delete(url); };
+        next.src = src;
       };
-      next.onerror = () => { loading.delete(url); };
-      next.src = url;
+      attempt(optimized(url), url);
+    };
+    const idle = (work: () => void) => {
+      const request = (window as Window & { requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number }).requestIdleCallback;
+      if (request) request(work, { timeout: 600 }); else window.setTimeout(work, 30);
+    };
+    /** One photo of every face, fetched quietly one after another, so none arrives late in the moment. */
+    const preloadFaces = () => {
+      const queue = Object.values(expressionImages).map((urls) => urls?.[0]).filter((url): url is string => Boolean(url));
+      const nextOne = () => {
+        if (disposed || !queue.length) return;
+        loadExpressionImage(queue.shift()!);
+        window.setTimeout(() => idle(nextOne), 700);
+      };
+      window.setTimeout(() => idle(nextOne), 2500);
     };
     let basePositions: Float32Array | undefined;
     let baseUvs: Float32Array | undefined;
@@ -312,8 +356,9 @@ export default function PortraitParticles({ expression = "neutral", intensity = 
       const bounds = host.getBoundingClientRect();
       pointerWorldX = ((event.clientX - bounds.left) / Math.max(bounds.width, 1) - 0.5) * 2 * halfWidth;
       pointerWorldY = (0.5 - (event.clientY - bounds.top) / Math.max(bounds.height, 1)) * 2 * halfHeight;
+      // React hears about it once when the pointer arrives, not on every move.
+      if (!pointerActive) setDisturbed(true);
       pointerActive = true;
-      setDisturbed(true);
     };
     const onPointerLeave = () => { pointerActive = false; setDisturbed(false); };
     const onPointerDown = (event: PointerEvent) => { onPointerMove(event); ripple = 1; };
@@ -358,6 +403,14 @@ export default function PortraitParticles({ expression = "neutral", intensity = 
           vertexColors: true,
           side: THREE.FrontSide,
         });
+        // Her portrait is black and white. Done here, on the GPU, rather than as a CSS filter over the
+        // canvas, which made the browser composite the whole stage again on every frame.
+        material.onBeforeCompile = (shader) => {
+          shader.fragmentShader = shader.fragmentShader.replace(
+            "#include <dithering_fragment>",
+            "#include <dithering_fragment>\n  gl_FragColor.rgb = vec3(dot(gl_FragColor.rgb, vec3(0.2126, 0.7152, 0.0722)) * 1.1);",
+          );
+        };
 
         field.add(new THREE.Mesh(geometry, material));
         setFallback(false);
@@ -385,6 +438,8 @@ export default function PortraitParticles({ expression = "neutral", intensity = 
     let idleLip = 0;
     let sleepLids = 0;
     let lipOpen = 0;
+    /** The pose being shown, filled in place each frame (not a new object per frame). */
+    const pose = { ...POSES.neutral };
 
     /**
      * Expression state. A face is expressive above the mouth more than at it, so these drive
@@ -409,8 +464,17 @@ export default function PortraitParticles({ expression = "neutral", intensity = 
     const phase = Array.from({ length: 6 }, () => Math.random() * Math.PI * 2);
     const wave = (speed: number, a: number, b: number) => Math.sin(swayClock * speed + phase[a]) * 0.65 + Math.sin(swayClock * speed * 0.381 + phase[b]) * 0.35;
 
+    let frame = 0;
     const render = (timestamp: number) => {
       if (disposed) return;
+      frame += 1;
+      // At rest (no fade, no pointer, not speaking), half the frame rate: the slow sway and blinks
+      // look the same at 30 fps, and the laptop stays cool.
+      const resting = !fadeTo && !pointerActive && ripple < 0.01 && lipOpen < 0.05 && !glanceRef.current;
+      if (resting && (frame & 1) === 1 && lastTimestamp) {
+        animationFrame = window.requestAnimationFrame(render);
+        return;
+      }
       const time = timestamp / 1000;
       const delta = lastTimestamp ? Math.min(90, timestamp - lastTimestamp) : 16.7;
       lastTimestamp = timestamp;
@@ -479,9 +543,17 @@ export default function PortraitParticles({ expression = "neutral", intensity = 
           if (next || !isGlance(current)) wantedUrl = next ?? "base";
           loadExpressionImage(wantedUrl);
         }
-        if (wantedUrl !== shownUrl && !fadeTo && shownImage && shownHeights) {
+        if (wantedUrl !== shownUrl && wantedUrl !== fadeTo?.url && shownImage && shownHeights) {
           const target = wantedUrl === "base" ? { image, heights: baseHeights() } : loaded.get(wantedUrl);
-          if (target) {
+          if (target && fadeTo && fadeFrom && snapshotContext) {
+            // Changed course mid-fade: start from the face as it is right now, not from either end.
+            snapshotContext.drawImage(textureCanvas, 0, 0);
+            const heights = new Float32Array(vertexCount);
+            for (let i = 0; i < vertexCount; i += 1) heights[i] = basePositions[i * 3 + 2];
+            fadeFrom = { image: snapshotCanvas, heights };
+            fadeTo = { ...target, url: wantedUrl };
+            fadeMix = 0;
+          } else if (target) {
             fadeFrom = { image: shownImage, heights: shownHeights };
             fadeTo = { ...target, url: wantedUrl };
             fadeMix = 0;
@@ -503,7 +575,7 @@ export default function PortraitParticles({ expression = "neutral", intensity = 
         const neutralPose = POSES.neutral;
         const fullPose = POSES[posed];
         const strength = posed === "neutral" ? 0 : Math.max(0.15, level);
-        const pose = Object.fromEntries(Object.entries(fullPose).map(([key, value]) => [key, neutralPose[key as keyof typeof neutralPose] + (value - neutralPose[key as keyof typeof neutralPose]) * strength])) as typeof fullPose;
+        for (const key in fullPose) pose[key as keyof typeof fullPose] = neutralPose[key as keyof typeof neutralPose] + (fullPose[key as keyof typeof fullPose] - neutralPose[key as keyof typeof neutralPose]) * strength;
         const poseWeight = shownUrl === "base" || shownUrl === expressionImages.neutral?.[0] ? 1 : 0.3;
         const wanted = motionRef.current;
         for (const key of ["sway", "pace", "droop", "lean", "bounce"] as const) moving[key] += (wanted[key] - moving[key]) * 0.02 * step;
@@ -568,7 +640,8 @@ export default function PortraitParticles({ expression = "neutral", intensity = 
           let dv = 0;
 
           // Eyes: shifting the texture inside each socket moves the iris within the eye.
-          for (const eye of [LANDMARKS.leftEye, LANDMARKS.rightEye]) {
+          for (let e = 0; e < 2; e += 1) {
+            const eye = EYES[e];
             const d = Math.hypot(u - eye.u, (tv - eye.v) * 1.45) / EYE_RADIUS;
             const w = falloff(d);
             if (w <= 0) continue;
@@ -585,7 +658,8 @@ export default function PortraitParticles({ expression = "neutral", intensity = 
 
           // Brows: the single biggest carrier of expression. Lifting samples from below, so
           // the brow line rides up the forehead; furrowing pulls it down and inward.
-          for (const eye of [LANDMARKS.leftEye, LANDMARKS.rightEye]) {
+          for (let e = 0; e < 2; e += 1) {
+            const eye = EYES[e];
             const bu = eye.u;
             const bv = eye.v - BROW_RISE;
             const d = Math.hypot((u - bu) / BROW_RADIUS_X, (tv - bv) / BROW_RADIUS_Y);
@@ -599,7 +673,7 @@ export default function PortraitParticles({ expression = "neutral", intensity = 
           }
 
           // Cheeks / mouth corners: a smile lifts the corners and bunches the cheek above.
-          for (const side of [-1, 1]) {
+          for (let side = -1; side <= 1; side += 2) {
             const cu = LANDMARKS.mouth.u + side * CORNER_OFFSET;
             const cv = LANDMARKS.mouth.v - 0.004;
             const d = Math.hypot(u - cu, (tv - cv) * 1.25) / CORNER_RADIUS;
@@ -661,7 +735,9 @@ export default function PortraitParticles({ expression = "neutral", intensity = 
         position.needsUpdate = true;
         uv.needsUpdate = true;
         color.needsUpdate = true;
-        geometry.computeVertexNormals();
+        // Normals are the costliest step on ~37k vertices: every frame while the face is changing
+        // shape fast (a fade, the pointer), every other frame otherwise, which the eye can't tell.
+        if (fadeTo || pointerActive || ripple > 0.01 || (frame & 1) === 0) geometry.computeVertexNormals();
         ripple *= Math.pow(0.9, step);
 
         // Parallax: a slight turn toward the pointer sells the depth the relief provides.
@@ -733,9 +809,9 @@ export default function PortraitParticles({ expression = "neutral", intensity = 
   }, []);
 
   return (
-    <div className={`portrait-particle-stage ${disturbed ? "is-disturbed" : ""}`} role="img" aria-label="User-provided FREYA portrait as a lit 3D relief that follows the cursor" style={{ filter: "saturate(0%) brightness(110%)" }}>
+    <div className={`portrait-particle-stage ${disturbed ? "is-disturbed" : ""}`} role="img" aria-label="User-provided FREYA portrait as a lit 3D relief that follows the cursor">
       <div className="portrait-particle-host" ref={hostRef} aria-hidden="true" />
-      {fallback && <Image className="portrait-static-fallback" src={portraitAsset} alt="" fill sizes="(max-width: 850px) 88vw, 19vw" priority />}
+      {fallback && <Image className="portrait-static-fallback" src={portraitAsset} alt="" fill sizes="(max-width: 850px) 88vw, 19vw" priority style={{ filter: "saturate(0%) brightness(110%)" }} />}
       {/* Nothing sits under her unless she is speaking; then the words appear as she says them. */}
       {caption.speaking && caption.words.length > 0 && (
         <span className="portrait-caption" aria-hidden="true">

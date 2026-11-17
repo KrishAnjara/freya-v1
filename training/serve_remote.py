@@ -432,25 +432,32 @@ def plan_fallback(text, has_reference):
     return {"shot": shot, "her": her, "face": face, "prompt": f"{PHONE_SHOTS[shot]}: {text.strip()}", "refined": False}
 
 
-def plan_picture(text, model, expression="", has_reference=True, timeout=120):
+def plan_picture(text, model, expression="", has_reference=True, timeout=120, ask=None):
     """
     The small uncensored prompt maker (the helper model, abliterated, on this machine): what kind of
     phone photo this is, whether she's in it, whether her face shows, and the full prompt. A refusal,
     or anything that crosses the hard limit, stops the picture; anything else it gets wrong falls back
-    to reading their words (plan_fallback).
+    to reading their words (plan_fallback). `ask(system, text, timeout)` answers instead of the local
+    Ollama model when given (the Puter server asks her voice).
     """
     fallback = plan_fallback(text, has_reference)
     if not model:
         return fallback
     system = PHONE_PLANNER_PROMPT.replace("{expression}", EXPRESSION_WORDS.get(expression, "relaxed and natural"))
     try:
-        reply = post("/api/chat", {
-            "model": model, "stream": False, "think": False, "format": "json", "keep_alive": "30s",
-            "messages": [{"role": "system", "content": system}, {"role": "user", "content": text}],
-            "options": {"temperature": 0.7, "num_predict": 400},
-        }, timeout=timeout)
-        content = re.sub(r"<think>[\s\S]*?</think>", "", reply.get("message", {}).get("content", "")).strip()
-        plan = json.loads(content)
+        if ask:
+            content = ask(system, text, timeout)
+        else:
+            reply = post("/api/chat", {
+                "model": model, "stream": False, "think": False, "format": "json", "keep_alive": "30s",
+                "messages": [{"role": "system", "content": system}, {"role": "user", "content": text}],
+                "options": {"temperature": 0.7, "num_predict": 400},
+            }, timeout=timeout)
+            content = reply.get("message", {}).get("content", "")
+        content = re.sub(r"<think>[\s\S]*?</think>", "", content or "").strip()
+        # A chat model may wrap the JSON in a code fence or a sentence: take the object itself.
+        start, end = content.find("{"), content.rfind("}")
+        plan = json.loads(content[start:end + 1] if start >= 0 and end > start else content)
     except (OSError, ValueError, AttributeError):
         return fallback
     if not isinstance(plan, dict):
@@ -726,8 +733,12 @@ class PictureJobs:
         log("picture", f"job {job_id} queued ({ahead} ahead) · {'of her' if request.get('reference') else 'edit' if request.get('image') else 'new'} · expression {request.get('expression') or '-'}")
         return {"job": job_id, "eta_s": int(self.estimate() * (1 + ahead)), "ahead": ahead}
 
+    def plan_seconds(self):
+        """How long planning takes on this server: measured where the engine keeps it, else a guess."""
+        return getattr(self.engine, "plan_seconds", self.REFINE_SECONDS)
+
     def estimate(self):
-        return self.REFINE_SECONDS + self.engine.draw_seconds
+        return self.plan_seconds() + self.engine.draw_seconds
 
     def waiting(self):
         """Pictures not finished yet (queued or in progress)."""
@@ -751,9 +762,10 @@ class PictureJobs:
                 in_stage = now - job["stage_at"]
                 draw = max(30.0, self.engine.draw_seconds)
                 # Progress is honest about what it is: an estimate from how long pictures take here.
-                progress = {"queued": 0.0, "refining": 0.02 + 0.06 * min(1.0, in_stage / self.REFINE_SECONDS), "waiting": 0.09,
+                plan = max(1.0, self.plan_seconds())
+                progress = {"queued": 0.0, "refining": 0.02 + 0.06 * min(1.0, in_stage / plan), "waiting": 0.09,
                             "drawing": 0.1 + 0.85 * min(0.98, in_stage / draw)}[stage]
-                remaining = {"queued": self.estimate(), "refining": draw + max(0.0, self.REFINE_SECONDS - in_stage), "waiting": draw,
+                remaining = {"queued": self.estimate(), "refining": draw + max(0.0, plan - in_stage), "waiting": draw,
                              "drawing": max(5.0, draw - in_stage)}[stage]
                 payload.update({"progress": round(progress, 3), "eta_s": int(remaining)})
             return payload
@@ -1063,15 +1075,15 @@ def model_can_see(name):
         return False
 
 
-def save_picture(folder, png, record):
-    """Keeps a finished picture on the server: <time>-<seed>.png and a .json beside it with the
+def save_picture(folder, png, record, ext="png"):
+    """Keeps a finished picture on the server: <time>-<seed>.<ext> and a .json beside it with the
     prompt as asked, the prompt drawn, the model and the seed. Never stops a picture if it fails."""
     if not folder:
         return ""
     try:
         os.makedirs(folder, exist_ok=True)
         name = f"{time.strftime('%Y%m%d-%H%M%S')}-{record.get('seed', 0)}"
-        with open(os.path.join(folder, f"{name}.png"), "wb") as handle:
+        with open(os.path.join(folder, f"{name}.{ext}"), "wb") as handle:
             handle.write(png)
         with open(os.path.join(folder, f"{name}.json"), "w", encoding="utf-8") as handle:
             json.dump(record, handle, ensure_ascii=False, indent=2)

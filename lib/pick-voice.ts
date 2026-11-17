@@ -89,11 +89,3 @@ export function resetVoiceChoice() {
   cachedSignature = "";
 }
 
-/** Voices worth offering in a picker: best first, novelty voices dropped. */
-export function listSelectableVoices(voices: SpeechSynthesisVoice[]) {
-  return voices
-    .filter((voice) => !POOR.test(voice.name ?? ""))
-    .map((voice) => ({ voice, score: scoreVoice(voice) }))
-    .sort((a, b) => b.score - a.score)
-    .map((entry) => entry.voice);
-}

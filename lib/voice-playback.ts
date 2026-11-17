@@ -25,10 +25,6 @@ export function subscribeVoice(listener: () => void) {
   return () => { listeners.delete(listener); };
 }
 
-export function voiceRevision() {
-  return revision;
-}
-
 export function playingVoiceId() {
   return playingId;
 }

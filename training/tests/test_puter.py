@@ -147,3 +147,84 @@ def test_the_face_pass_runs_in_its_own_process_so_running_out_of_memory_never_ta
     command, options = calls[0]
     assert command[1].endswith("serve_puter.py") and command[2] == "--face-pass"
     assert options["preexec_fn"] is serve_puter.expendable, "the system stops it first, never the server"
+
+
+def test_the_prompt_maker_asks_her_puter_voice_and_takes_its_json_even_in_a_code_fence(monkeypatch):
+    asked = []
+
+    def ask(system, text, timeout):
+        asked.append((text, timeout))
+        return 'sure:\n```json\n{"shot": "selfie", "her": true, "face": true, "prompt": "a selfie on her bed in warm lamp light, relaxed"}\n```'
+
+    monkeypatch.setattr(serve_puter, "ask_bridge", ask)
+    images = serve_puter.PuterImages(True, enhancer="puter")
+    request = serve_remote.parse_image_request({"prompt": "send me a selfie", "reference": "cmVm", "expression": "smile"})
+    plan = images.plan(request)
+    assert plan["refined"] and plan["shot"] == "selfie" and plan["face"]
+    assert asked and asked[0][1] == serve_puter.PLAN_S, "a few seconds, then the rules"
+
+
+def test_a_slow_or_broken_prompt_maker_falls_back_to_rules(monkeypatch):
+    def ask(system, text, timeout):
+        raise TimeoutError("slow")
+
+    monkeypatch.setattr(serve_puter, "ask_bridge", ask)
+    images = serve_puter.PuterImages(True, enhancer="puter")
+    plan = images.plan(serve_remote.parse_image_request({"prompt": "a cup of coffee"}))
+    assert not plan["refined"] and serve_remote.PHONE_LOOK in plan["prompt"]
+
+
+def test_pictures_go_out_as_jpeg_and_default_to_a_phone_size():
+    from io import BytesIO
+    from PIL import Image
+    png = BytesIO()
+    Image.new("RGB", (64, 64), (200, 30, 30)).save(png, "PNG")
+    jpeg = serve_puter.to_jpeg(png.getvalue())
+    assert jpeg[:3] == b"\xff\xd8\xff", "a JPEG"
+    assert serve_puter.PHOTO_SIZE == (768, 1024)
+
+
+def test_models_stay_loaded_only_where_there_is_room(monkeypatch):
+    images = serve_puter.PuterImages(True)
+    freed = []
+    monkeypatch.setattr(serve_puter, "comfy", lambda path, payload=None, timeout=30: freed.append(path) if path == "/free" else {"prompt_id": "x"})
+    monkeypatch.setattr(images, "wait_for", lambda prompt_id, limit_s=None: b"png")
+    request = serve_remote.parse_image_request({"prompt": "a lighthouse", "seed": 1})
+    images.keep_loaded = False
+    images.draw_comfy(request, "a lighthouse", "")
+    assert freed == ["/free"], "a small machine lets go after each picture"
+    freed.clear()
+    images.keep_loaded = True
+    images.draw_comfy(request, "a lighthouse", "")
+    assert freed == [], "with room, the next picture starts drawing at once"
+    images.lowvram = False
+    assert "--lowvram" not in images.comfy_command()
+    images.lowvram = True
+    assert "--lowvram" in images.comfy_command()
+
+
+def test_the_kept_face_worker_reports_failures_instead_of_hanging(monkeypatch, tmp_path):
+    worker = serve_puter.FaceWorker("", 14)
+
+    class Pipe:
+        def write(self, text):
+            pass
+
+        def flush(self):
+            pass
+
+    class Dead:
+        stdin = Pipe()
+
+        def poll(self):
+            return None
+
+    def start():
+        worker.process = Dead()
+        worker.lines = serve_puter.queue.Queue()
+        worker.lines.put(None)
+
+    monkeypatch.setattr(worker, "start", start)
+    worker.process = None
+    answer = worker.run(str(tmp_path / "job.json"), 1)
+    assert answer.startswith("error") and "stopped" in answer

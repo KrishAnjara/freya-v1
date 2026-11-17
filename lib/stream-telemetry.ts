@@ -109,6 +109,11 @@ export function telemetryRevision() {
   return state.revision;
 }
 
+/** Just the phase (waiting, streaming, done...): for things that only need to know when that changes. */
+export function telemetryPhase() {
+  return state.phase;
+}
+
 function now() {
   return typeof performance !== "undefined" ? performance.now() : Date.now();
 }

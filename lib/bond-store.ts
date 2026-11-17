@@ -1,10 +1,12 @@
 /**
- * The relationship, kept in Supabase by the server as well as the browser (freya_state.bond):
- * each message the chat route reads the account's saved bond, uses the newer of that and the
- * browser's copy (so a stale or cleared browser can't reset it, and one device can't drift from
- * another), and writes the result back. Uses the caller's own token, so row-level security still
- * limits it to their own row; no service key. Failing to reach Supabase never stops a reply.
+ * Her heart and the relationship, kept in Supabase by the server as well as the browser
+ * (freya_state.mood and .bond): each message the chat route reads the account's saved copies, uses
+ * whichever of those and the browser's has more history (so a stale or cleared browser can't reset
+ * her, and one device can't drift from another), and writes the result back. The server is where her
+ * heart is worked out; the browser shows it. Uses the caller's own token, so row-level security
+ * still limits it to their own row; no service key. Failing to reach Supabase never stops a reply.
  */
+import { normalizeHeart, type HeartState } from "@/lib/heart";
 import { normalizeBond, type Bond } from "@/lib/relationship";
 
 const config = () => {
@@ -27,22 +29,48 @@ async function userId(token: string, fetchImpl: typeof fetch): Promise<string | 
   return body.id;
 }
 
-/** The account's saved bond, or null (not signed in, no row yet, table missing, unreachable). */
-export async function loadCloudBond(token: string, fetchImpl: typeof fetch = fetch): Promise<{ userId: string; bond: Bond | null } | null> {
+export type CloudState = { userId: string; bond: Bond | null; heart: HeartState | null };
+
+/** The account's saved heart and bond, or null (not signed in, no row yet, table missing, unreachable). */
+export async function loadCloudState(token: string, fetchImpl: typeof fetch = fetch): Promise<CloudState | null> {
   const supabase = config();
   if (!supabase || !token) return null;
   try {
     const id = await userId(token, fetchImpl);
     if (!id) return null;
-    const response = await fetchImpl(`${supabase.url}/rest/v1/freya_state?select=bond&user_id=eq.${encodeURIComponent(id)}`, {
+    const response = await fetchImpl(`${supabase.url}/rest/v1/freya_state?select=bond,mood&user_id=eq.${encodeURIComponent(id)}`, {
       headers: { apikey: supabase.key, Authorization: `Bearer ${token}`, Accept: "application/json" }, cache: "no-store",
       signal: AbortSignal.timeout(3000),
     });
     if (!response.ok) return null;
-    const rows = await response.json().catch(() => []) as { bond?: unknown }[];
-    return { userId: id, bond: Array.isArray(rows) ? normalizeBond(rows[0]?.bond) : null };
+    const rows = await response.json().catch(() => []) as { bond?: unknown; mood?: unknown }[];
+    const row = Array.isArray(rows) ? rows[0] : undefined;
+    return { userId: id, bond: normalizeBond(row?.bond), heart: normalizeHeart(row?.mood) };
   } catch {
     return null;
+  }
+}
+
+/** The bond alone: for older callers and tests. */
+export async function loadCloudBond(token: string, fetchImpl: typeof fetch = fetch): Promise<{ userId: string; bond: Bond | null } | null> {
+  const state = await loadCloudState(token, fetchImpl);
+  return state ? { userId: state.userId, bond: state.bond } : null;
+}
+
+/** Writes her heart and/or the bond back, leaving the row's other columns as they are. */
+export async function saveCloudState(token: string, userIdValue: string, state: { bond?: Bond | null; heart?: HeartState | null }, fetchImpl: typeof fetch = fetch) {
+  const supabase = config();
+  if (!supabase) return false;
+  try {
+    const response = await fetchImpl(`${supabase.url}/rest/v1/freya_state?on_conflict=user_id`, {
+      method: "POST",
+      headers: { apikey: supabase.key, Authorization: `Bearer ${token}`, "Content-Type": "application/json", Prefer: "resolution=merge-duplicates,return=minimal" },
+      body: JSON.stringify({ user_id: userIdValue, ...(state.bond ? { bond: state.bond } : {}), ...(state.heart ? { mood: state.heart } : {}), updated_at: new Date().toISOString() }),
+      signal: AbortSignal.timeout(5000),
+    });
+    return response.ok;
+  } catch {
+    return false;
   }
 }
 

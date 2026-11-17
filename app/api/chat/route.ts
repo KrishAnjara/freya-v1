@@ -23,12 +23,12 @@ import type { FreyaStyle } from "@/lib/personality";
 import { consumeChatRateLimit, isSelfHosted, RateLimitUnavailableError, type ChatIdentity } from "@/lib/rate-limit";
 import { normalizeCharacterProfile } from "@/lib/character-profile";
 import { containsSensitiveCredential, redactSensitiveCredentials } from "@/lib/sensitive-data";
-import { applyAppraisal, initiativePrompt, moodPrompt, normalizeMood, reactToMessage } from "@/lib/mood";
-import { appraiseMood } from "@/lib/mood-appraisal";
-import { faceReading, nextUserMood, normalizeUserMood, readUserMood, userMoodSection } from "@/lib/user-mood";
+import { applyAppraisal, arrive, desireLine, heartPrompt, initialHeart, initiativePrompt, newerHeart, normalizeHeart, passTime } from "@/lib/heart";
+import { appraiseHeart } from "@/lib/mood-appraisal";
+import { crisisReading, faceReading, nextUserMood, normalizeUserMood, readUserMood, userMoodSection } from "@/lib/user-mood";
 import { homeTimeReply, noSearchReply, timeReply, unknownZoneReply } from "@/lib/plain-replies";
 import { asksOut, bondSection, initialBond, nextBond, normalizeBond } from "@/lib/relationship";
-import { loadCloudBond, newerBond, saveCloudBond } from "@/lib/bond-store";
+import { loadCloudState, newerBond, saveCloudState } from "@/lib/bond-store";
 import { INTIMACY_PROMPT, PLAYFUL_HEAT_PROMPT, PRIVATE_VOICE_DOWN, isIntimateTone, mentionsMinors, romanticMinorRequest, soundsUpset } from "@/lib/intimacy";
 import { canonSection, closenessOf, normalizeTotals } from "@/lib/canon";
 import { herMoment } from "@/lib/her-day";
@@ -54,9 +54,15 @@ const MAX_REQUEST_MESSAGES = 24;
 const HISTORY_MAX_CHARS = 12_000;
 const SEARCH_TEXT_MAX_CHARS = 6_000;
 
-/** Keeps the newest turns that fit the budget; the latest message is always kept whole. */
 /** The local model's window is 4,096 tokens and the persona takes ~1,900: keep its history shorter. */
 const LOCAL_HISTORY_MAX_CHARS = 6_000;
+/**
+ * Her server with a big window (start --ctx 16384 or more): she remembers more of the chat. Kept
+ * below what a free cloud fallback accepts in one request, in case her server goes down mid-chat.
+ */
+const WIDE_HISTORY_MAX_CHARS = 18_000;
+
+/** Keeps the newest turns that fit the budget; the latest message is always kept whole. */
 
 function fitHistory<T extends { content: string }>(turns: T[], maxChars = HISTORY_MAX_CHARS): T[] {
   const kept: T[] = [];
@@ -286,7 +292,7 @@ function rateLimitResponse(result: Awaited<ReturnType<typeof consumeChatRateLimi
   );
 }
 
-async function getUserMemories(request: Request): Promise<MemoryItem[]> {
+async function getUserMemories(request: Request, knownUserId?: string): Promise<MemoryItem[]> {
   const authorization = request.headers.get("authorization");
   const token = authorization?.match(/^Bearer\s+(.+)$/i)?.[1];
 
@@ -315,18 +321,19 @@ async function getUserMemories(request: Request): Promise<MemoryItem[]> {
     },
   });
 
-  const { data: authData, error: authError } =
-    await supabase.auth.getUser(token);
-
-  if (authError || !authData.user) {
+  // The chat route has already checked the sign-in (getChatIdentity): no second round trip for it.
+  let userId = knownUserId;
+  if (!userId) {
+    const { data: authData, error: authError } = await supabase.auth.getUser(token);
     // Invalid or expired sessions must not load anyone's memories.
-    return [];
+    if (authError || !authData.user) return [];
+    userId = authData.user.id;
   }
 
   const { data, error } = await supabase
     .from("memories")
     .select("id, content, created_at")
-    .eq("user_id", authData.user.id)
+    .eq("user_id", userId)
     .order("created_at", { ascending: false })
     .limit(30);
 
@@ -420,6 +427,11 @@ export async function POST(request: Request) {
       throw new ChatInputError(`A conversation can contain at most ${MAX_REQUEST_MESSAGES} messages.`);
     }
 
+    // Her heart and where the two of them are, as saved with the account (lib/bond-store): fetched
+    // while everything else is checked, not after it.
+    const bearer = request.headers.get("authorization")?.match(/^Bearer\s+(\S+)$/i)?.[1] ?? "";
+    const cloudStatePromise = !privacyMode && bearer ? loadCloudState(bearer) : Promise.resolve(null);
+
     // Protect auth verification itself using a shared IP bucket. Every valid
     // request consumes this bucket even if its bearer token is invalid.
     const trustedIp = getTrustedClientIp(request);
@@ -460,7 +472,7 @@ export async function POST(request: Request) {
     // Signed-in users' memories come from their account (never from the request). Without an
     // account, the browser keeps them and sends them along: the user's own notes, used as
     // bounded untrusted text. Local-only mode skips the cloud lookup, not the browser's notes.
-    const cloudMemories = useMemories && !privacyMode ? await getUserMemories(request) : [];
+    const cloudMemories = useMemories && !privacyMode ? await getUserMemories(request, identity.type === "authenticated" ? identity.subject : undefined) : [];
     const memories = useMemories
       ? [...cloudMemories, ...normalizeLocalMemories(requestData.localMemories, containsSensitiveCredential)]
       : [];
@@ -505,7 +517,23 @@ export async function POST(request: Request) {
       return NextResponse.json({ reply: homeTimeReply(userTexts.length), sources: [], searchStatus: "not-needed", memoryCount: memories.length });
     }
 
-    
+        // Her heart (lib/heart): the account's saved copy or the browser's, whichever has more history,
+    // brought up to now (feelings fade, she misses them, her day goes on), then their message
+    // arrives. Her reading of it (lib/mood-appraisal) starts here and runs while the rest is prepared.
+    // An intimate turn is read only by her own server; Local-only isn't read by a model at all.
+    const now = new Date();
+    const textingFirst = requestData.initiative === true;
+    const cloudState = await cloudStatePromise;
+    const bondBefore = useMemories ? newerBond(normalizeBond(requestData.bond), cloudState?.bond ?? null) ?? (cloudState ? initialBond(now.getTime()) : null) : null;
+    const heartIn = newerHeart(normalizeHeart(requestData.mood), cloudState?.heart ?? null) ?? initialHeart(now.getTime());
+    let heart = passTime(heartIn, now.getTime(), { attachment: bondBefore?.affection });
+    if (!textingFirst) heart = arrive(heart, now.getTime());
+    const judges = requestData.appraise === true && !textingFirst;
+    const ownReadingOnly = intimateMode && (intimateTurn || heart.feelings.desire >= 0.25);
+    const readingPromise = judges && !privacyMode
+      ? appraiseHeart(heart, messages, { intimate: intimateMode, own: ownReadingOnly, signal: request.signal })
+      : Promise.resolve(null);
+
     // When the local model is the one speaking, a cloud model researches the question first so
     // a small model can answer beyond what it knows. Privacy mode never leaves the machine,
     // so it never runs there.
@@ -640,8 +668,6 @@ export async function POST(request: Request) {
       ? turnMemory.notes.map((note) => ({ id: note.id, text: note.text, createdAt: note.createdAt }))
       : selectRelevantMemories(memories, userTexts.slice(-4), userTexts.length <= 2);
 
-    const now = new Date();
-
     const currentDate = new Intl.DateTimeFormat("en-IN", {
       timeZone: "Asia/Kolkata",
       dateStyle: "full",
@@ -656,39 +682,35 @@ export async function POST(request: Request) {
     CURRENT DATE AND TIME
     The current date is ${currentDate}.
     The current time in India is ${currentTime} (Asia/Kolkata).
-    Use this as the authoritative current date and time.
-    Never substitute dates from your training data for the current date.
-    For time-sensitive questions, search for current information when needed.
+    That's today. Don't go by any other date you think it is.
     `;
 
     const autonomyInput = requestData.autonomyLevel;
     const autonomyLevel: 0 | 1 | 2 = autonomyInput === 0 || autonomyInput === 2 ? autonomyInput : 1;
-    // The browser keeps FREYA's mood; it is validated and rendered from a fixed table here.
-    const moodBefore = normalizeMood(requestData.mood);
-    // Their latest message moves her mood here, so this reply already feels it. A model reads the
-    // conversation; anything intimate or local stays off the cloud and uses the rules in lib/mood.
-    const judges = requestData.appraise === true && Boolean(moodBefore);
-    const reading = judges && !privacyMode && !intimateTurn && moodBefore!.name !== "horny" ? await appraiseMood(moodBefore!, messages, request.signal) : null;
-    const appraisal = reading?.her ?? null;
-    const mood = !judges ? moodBefore : appraisal ? applyAppraisal(moodBefore!, appraisal, now.getTime()) : reactToMessage(moodBefore!, lastText, now.getTime(), { intimate: intimateMode });
-    // How THEY seem, kept apart from her mood (lib/user-mood): the same model's read when there was
-    // one, else their words, else (camera on) their face. It guides how she meets them; it isn't hers.
+    // The research for this reply starts now too, alongside her reading of the message: the panel for
+    // a hard question, else the brief (lib/brief) when her own model speaks. Attachments are read
+    // first (below) and only then can a brief be needed for them, so those don't start early.
+    const turns = withAttachments(messages, turnAttachments);
+    const panelPromise = deliberate ? convenePanel(turns, request.signal, searchMaterial) : Promise.resolve(null);
+    const briefPromise = localVoice && !deliberate && !visual
+      ? buildBrief(turns, request.signal, briefProviderFor(lastText, Boolean(searchMaterial)), searchMaterial)
+      : Promise.resolve(null);
+
+    // Their message lands: her reading of it moves how she feels, so this reply already feels it.
+    const reading = await readingPromise;
+    if (reading?.her) heart = applyAppraisal(heart, reading.her, now.getTime(), { intimate: intimateMode });
+    // How THEY seem, kept apart from her feelings (lib/user-mood): a crisis in their words first,
+    // always; then her reading of them; else their words; else (camera on) their face.
     const seen = config.camera === false ? null : normalizeSeen(requestData.seen);
     const userMoodBefore = normalizeUserMood(requestData.userMood);
-    const theirReading = reading?.them ?? readUserMood(lastText) ?? faceReading(seen);
+    const theirReading = crisisReading(lastText) ?? reading?.them ?? readUserMood(lastText) ?? faceReading(seen);
     const userMood = judges ? nextUserMood(userMoodBefore, theirReading, now.getTime(), reading?.them ? "model" : "words") : userMoodBefore;
-    // Where the two of them are (lib/relationship): moved by this message, from the same reads as
-    // her mood. It's remembered history, so it follows the "Use memories" setting.
-    // Signed in: the bond saved with the account is checked too (lib/bond-store), and the newer copy
-    // wins, so a cleared or stale browser can't reset where the two of them are.
-    const bearer = request.headers.get("authorization")?.match(/^Bearer\s+(\S+)$/i)?.[1] ?? "";
-    const cloudBond = useMemories && !privacyMode && bearer ? await loadCloudBond(bearer) : null;
-    const bondBefore = useMemories ? newerBond(normalizeBond(requestData.bond), cloudBond?.bond ?? null) ?? (cloudBond ? initialBond(now.getTime()) : null) : null;
+    // Where the two of them are (lib/relationship): moved by what happened in this message, as her
+    // reading saw it. It's remembered history, so it follows the "Use memories" setting.
     const askedOut = judges && Boolean(bondBefore) && asksOut(lastText) && bondBefore!.stage !== "together";
-    const moodReason = appraisal?.reason ?? (mood && moodBefore && (mood.name !== moodBefore.name || mood.why !== moodBefore.why) ? mood.why : undefined);
-    const bond = judges && bondBefore ? nextBond(bondBefore, { text: lastText, now: now.getTime(), reason: moodReason, feeling: theirReading?.feeling }) : bondBefore;
+    const bond = judges && bondBefore ? nextBond(bondBefore, { text: lastText, now: now.getTime(), events: reading?.her?.events ?? [], feeling: theirReading?.feeling }) : bondBefore;
     // Saved back with the account straight away; the browser gets the same in the reply's meta.
-    if (cloudBond && bond && bond !== cloudBond.bond) void saveCloudBond(bearer, cloudBond.userId, bond);
+    if (cloudState) void saveCloudState(bearer, cloudState.userId, { heart, ...(bond && bond !== cloudState.bond ? { bond } : {}) });
     const summaryInput = requestData.historySummary;
     const historySummary = typeof summaryInput === "string" ? redactSensitiveCredentials(summaryInput.trim().slice(0, 1800)) : "";
     const summaryContext = historySummary ? `
@@ -699,10 +721,9 @@ ${historySummary}
     // The brief runs after search so the cloud model can read the raw results. A local CPU
     // reads ~50 tokens/sec, so pasting thousands of tokens of web text into the local prompt
     // cost over a minute per reply; the cloud reads it in a second and distils it instead.
-    const turns = withAttachments(messages, turnAttachments);
     // The panel covers what the brief would (facts, terms, a checked answer) and more, so a
     // reasoning question gets the panel and everything else keeps the lighter brief.
-    const panel = deliberate ? await convenePanel(turns, request.signal, searchMaterial) : null;
+    const panel = await panelPromise;
     // What they attached (lib/vision). Her own model looks for itself when it has vision; a
     // describer adds notes in FREYA_VISION_ORDER (Grok, her server's vision model, Gemini). Grok
     // and Gemini only when external file processing is allowed: freya.config.json's
@@ -720,9 +741,10 @@ ${historySummary}
       : null;
     const attachmentNotes = described?.text ?? null;
     const localSpeaks = localVoice && (!visual || Boolean(attachmentNotes) || ownSees);
-    const brief = localSpeaks && !panel && !visual
+    // Started earlier for ordinary turns; a hard question whose panel failed gets one now instead.
+    const brief = (await briefPromise) ?? (localSpeaks && !panel && !visual && deliberate
       ? await buildBrief(turns, request.signal, briefProviderFor(lastText, Boolean(searchMaterial)), searchMaterial)
-      : null;
+      : null);
     // With a brief built from the results, the local model needs only the source list. Without
     // one (the brief failed), it falls back to the raw results: slow, but still grounded.
     const evidence = searchMaterial && ((localSpeaks && brief) || panel) ? compactSearchContext(sources) : searchContext;
@@ -744,8 +766,7 @@ ${historySummary}
       : "";
     // How much of her life they've earned, and where she is right now (lib/canon, lib/her-day).
     const totals = useMemories ? normalizeTotals(requestData.totals) : { messages: 0, since: "" };
-    const closeness = closenessOf({ messages: Math.max(userTexts.length, totals.messages), since: totals.since, warmth: mood?.warmth, now: now.getTime() });
-    const textingFirst = requestData.initiative === true;
+    const closeness = closenessOf({ messages: Math.max(userTexts.length, totals.messages), since: totals.since, warmth: heart.warmth, now: now.getTime() });
     // Sexting needs the switch and, unless they've started it, her being in the mood. Someone upset
     // or saying no gets none of it. An ordinary playful turn can still fall back to a cloud model,
     // which never sees this: only the user's own model does.
@@ -760,12 +781,11 @@ ${historySummary}
         : privacyMode ? { provider: "ollama" as const, privacy: true } : { cloud: cloudFallback };
     const voice = resolveProviders(providerOptions).primary;
     const ownVoice = voice === "ollama" || voice === "server";
-    const playfulHeat = intimateMode && !visual && ownVoice && (mood?.name === "playful" || mood?.name === "horny") && !soundsUpset(lastText);
-    // "horny" only reaches her own model, with the switch on. The rest of the prompt can go to a cloud
-    // fallback, so there it reads as playful.
-    const sharedMood = mood?.name === "horny" ? { ...mood, name: "playful" as const, why: "laughing" as const } : mood;
+    const playfulHeat = intimateMode && !visual && ownVoice && (heart.name === "playful" || heart.name === "horny" || heart.feelings.desire >= 0.25) && !soundsUpset(lastText);
+    // Desire only reaches her own model, with the switch on: the rest of the prompt can go to a cloud
+    // fallback, so heartPrompt leaves it out there and it's added here.
     const intimateGuidance = !soundsUpset(lastText) && (intimateTurn || playfulHeat)
-      ? `\n\n${INTIMACY_PROMPT}${playfulHeat ? `\n\n${PLAYFUL_HEAT_PROMPT}` : ""}${playfulHeat && mood?.name === "horny" ? `\n\n${moodPrompt(mood)}` : ""}`
+      ? `\n\n${INTIMACY_PROMPT}${playfulHeat ? `\n\n${PLAYFUL_HEAT_PROMPT}` : ""}${desireLine(heart)}`
       : "";
     const system = persona +
       canonSection(closeness) +
@@ -779,19 +799,15 @@ ${historySummary}
       panelContext(panel) +
       evidence +
       (turnAttachments.size && !attachmentNotes ? VISION_NOTE : "") +
-      (mood ? `
-
-${moodPrompt(sharedMood!)}` : "") +
+      `\n\n${heartPrompt(heart, { now: now.getTime() })}` +
       userMoodSection(userMood) +
       bondSection(bond, now.getTime(), askedOut) +
       // Texting first is an autonomy feature: level 0 means reply-only.
-      (mood && requestData.initiative === true && autonomyLevel > 0 ? `
-
-${initiativePrompt(mood)}` : "") +
+      (textingFirst && autonomyLevel > 0 ? `\n\n${initiativePrompt(heart, now.getTime())}` : "") +
       (config.unhinged ? `\n\n${UNHINGED_PROMPT}` : "") +
       seenSection(seen, textingFirst) +
       // A picture they asked for, being taken now: she answers in her mood, and keeps talking.
-      (requestData.pictureNote && typeof requestData.pictureNote === "object" && !textingFirst ? PICTURE_TAKING_NOTE(requestData.pictureNote as { mode?: unknown; ofHer?: unknown }, mood?.name ?? "neutral") : "") +
+      (requestData.pictureNote && typeof requestData.pictureNote === "object" && !textingFirst ? PICTURE_TAKING_NOTE(requestData.pictureNote as { mode?: unknown; ofHer?: unknown }, heart.name) : "") +
       // "can i see you?": she can really send a picture, so she offers one instead of describing it.
       (requestData.pictureOffer && typeof requestData.pictureOffer === "object" && !textingFirst ? PICTURE_OFFER_NOTE((requestData.pictureOffer as { ofHer?: unknown }).ofHer === true) : "") +
       // They wrote while she was mid-reply (lib/reply-queue): she stopped, like a person would.
@@ -802,7 +818,8 @@ ${initiativePrompt(mood)}` : "") +
     // A 4,096-token window (this laptop's model, or Dark Forest on the server) holds the persona and
     // only a short history; a longer one would push the persona out of what the model reads.
     const tightWindow = smallVoice || ollamaContextLength() <= 4096;
-    const promptMessages = fitHistory(turns, tightWindow && (localSpeaks || privacyMode || intimateTurn) ? LOCAL_HISTORY_MAX_CHARS : HISTORY_MAX_CHARS);
+    const wideWindow = (localSpeaks || intimateTurn) && !smallVoice && ollamaContextLength() >= 16_384;
+    const promptMessages = fitHistory(turns, tightWindow && (localSpeaks || privacyMode || intimateTurn) ? LOCAL_HISTORY_MAX_CHARS : wideWindow ? WIDE_HISTORY_MAX_CHARS : HISTORY_MAX_CHARS);
     const guardContext: GuardContext = {
       lastUserText: lastText,
       recentUserTexts: userTexts.slice(-4),
@@ -831,7 +848,7 @@ ${initiativePrompt(mood)}` : "") +
         ...optionsFor(note),
         onProvider: (selected) => { provider = selected; },
       }), guardContext);
-      return NextResponse.json({ reply, provider: label(provider), sources, searchStatus, memoryCount: recalledCount });
+      return NextResponse.json({ reply, provider: label(provider), sources, searchStatus, memoryCount: recalledCount, mood: heart, ...(judges ? { userMood } : {}), ...(bond ? { bond } : {}) });
     }
 
     const encoder = new TextEncoder();
@@ -841,7 +858,7 @@ ${initiativePrompt(mood)}` : "") +
     const stream = new ReadableStream<Uint8Array>({
       async start(controller) {
         // Metadata first so the client can render sources before any text arrives.
-        controller.enqueue(send("meta", { sources, searchStatus, memoryCount: recalledCount, reasoned: panel?.analyses.map((analysis) => analysis.analyst) ?? [], herBusy: herMoment(now).busy, ...(judges ? { mood, userMood, ...(bond ? { bond } : {}) } : {}) }));
+        controller.enqueue(send("meta", { sources, searchStatus, memoryCount: recalledCount, reasoned: panel?.analyses.map((analysis) => analysis.analyst) ?? [], herBusy: herMoment(now).busy, mood: heart, ...(judges ? { userMood } : {}), ...(bond ? { bond } : {}) }));
         const outcome: { truncated: boolean; parts: number; provider?: ProviderName } = { truncated: false, parts: 1 };
         try {
           for await (const delta of guardStream((note) => streamReply(fullSystem + note, promptMessages, request.signal, outcome, optionsFor(note)), guardContext)) {

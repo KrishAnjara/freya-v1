@@ -116,15 +116,6 @@ export function stopSpeaking() {
   emit();
 }
 
-/** Back-compat alias; `beginUtterance` carries the text the caption needs. */
-export function startSpeaking() {
-  if (!state.speaking) {
-    state.speaking = true;
-    state.startedAt = performance.now();
-    emit();
-  }
-}
-
 /**
  * A real boundary event arrived. Treat it as ground truth and rescale the estimate toward it
  * rather than jumping, which would make the caption stutter.
@@ -201,7 +192,3 @@ export function isSpeaking() {
   return state.speaking;
 }
 
-/** Legacy entry point retained for callers that push one word at a time. */
-export function speakWord(word: string, charLength: number, following?: string) {
-  if (!state.speaking) beginUtterance([word, following ?? ""].join(" "));
-}

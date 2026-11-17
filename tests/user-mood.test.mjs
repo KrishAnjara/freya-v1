@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { faceReading, nextUserMood, normalizeUserMood, readUserMood, userMoodSection } from "../lib/user-mood.ts";
+import { crisisReading, faceReading, nextUserMood, normalizeUserMood, readUserMood, userMoodSection } from "../lib/user-mood.ts";
 import { parseThem } from "../lib/mood-appraisal.ts";
-import { arrive, initialMood, ownDayMood, ownMood, passTime, resumeMood, OWN_DAY_AFTER_MS } from "../lib/mood.ts";
+import { initialHeart, passTime, TEMPERAMENT } from "../lib/heart.ts";
 import { dayTemper, herMoment } from "../lib/her-day.ts";
 
 const MIN = 60_000;
@@ -63,73 +63,20 @@ test("each day has one temper, the same all day, and the days differ", () => {
   assert.equal(herMoment(new Date(ist("2026-11-02", "10:00"))).name, "lecture");
 });
 
-test("left alone, her mood becomes her own: it follows her day, not them", () => {
-  const monday = ist("2026-11-02", "10:00");
-  const idle = { ...initialMood(monday - 3 * HOUR), talked: 4, name: "content", why: "cooling" };
-  const own = ownMood(idle, monday);
-  assert.equal(own.name, ownDayMood(monday).name);
-  assert.equal(own.why, "herDay");
-  assert.equal(own.warmth, idle.warmth, "her day doesn't change how warm she is toward them");
-  assert.equal(ownMood(own, monday + MIN), own, "nothing new: the same state, so nothing re-renders");
-  // Not while they're talking, and not over something they caused.
-  assert.equal(ownMood({ ...idle, lastUserAt: monday - 5 * MIN }, monday).name, "content");
-  assert.ok(OWN_DAY_AFTER_MS >= 10 * MIN);
-  const annoyed = { ...idle, name: "annoyed", why: "pestered" };
-  assert.equal(ownMood(annoyed, monday), annoyed);
-  const missing = { ...idle, name: "melancholy", why: "missed" };
-  assert.equal(ownMood(missing, monday), missing);
+test("left alone, her own day moves how she feels: a lecture, a shift, a late night", () => {
+  // A Monday morning lecture: bored, or on a bright day, curious. Either way, not where she rests.
+  const monday = ist("2026-11-02", "10:30");
+  const state = passTime({ ...initialHeart(monday - 3 * HOUR), talked: 4, lastUserAt: monday - 3 * HOUR }, monday);
+  const lifted = state.feelings.boredom - TEMPERAMENT.rest.boredom + state.feelings.curiosity - TEMPERAMENT.rest.curiosity;
+  assert.ok(lifted > 0.05, `her lecture shows (${lifted.toFixed(2)})`);
+  // Asleep: low energy, whatever the day.
+  const night = passTime({ ...initialHeart(ist("2026-11-02", "01:00")), talked: 4, lastUserAt: ist("2026-11-02", "01:00") }, ist("2026-11-02", "05:00"));
+  assert.ok(night.energy < 0.3);
 });
 
-test("her day's mood isn't on a timer, and doesn't flicker with the clock", () => {
-  const start = ist("2026-11-02", "10:00");
-  const fresh = { ...initialMood(start - HOUR), talked: 0 };
-  let state = passTime(fresh, start);
-  assert.equal(state.why, "herDay");
-  // Ticks a minute apart, for hours: the mood changes only when her day does.
-  let changes = 0;
-  for (let minute = 1; minute <= 6 * 60; minute += 1) {
-    const next = passTime(state, start + minute * MIN);
-    if (next !== state) changes += 1;
-    state = next;
-  }
-  assert.ok(changes <= 3, `changes only as her day moves on (${changes})`);
-  // Someone she knows, gone for a day: she misses them, rather than carrying on with her day.
-  const known = passTime({ ...initialMood(start - HOUR), talked: 12 }, start);
-  assert.equal(resumeMood(known, start + 9 * HOUR).name, "melancholy");
-  assert.equal(passTime(known, start + 9 * HOUR).why, "missed");
-});
-
-test("woken up by them she's groggy, not delighted; otherwise she's glad they're back", () => {
-  const night = ist("2026-11-02", "05:00");
-  const asleep = passTime({ ...initialMood(night - 6 * HOUR), talked: 30, lastUserAt: night - 6 * HOUR }, night);
-  assert.equal(asleep.name, "tired");
-  assert.equal(asleep.why, "sleepy");
-  assert.notEqual(arrive(asleep, night).why, "back");
-  const evening = ist("2026-11-02", "20:00");
-  const home = passTime({ ...initialMood(evening - 2 * HOUR), talked: 30, lastUserAt: evening - 2 * HOUR }, evening);
-  assert.equal(home.why, "herDay");
-  assert.equal(arrive(home, evening).why, ["content", "tired", "restless", "melancholy"].includes(home.name) ? "back" : home.why);
-});
-
-test("her own reply sets her mood: what she already feels is fed, a new mood needs a strong sign", async () => {
-  const { moodFromReply, idleMood, IDLE_AFTER_MS } = await import("../lib/mood.ts");
-  const now = Date.parse("2026-11-04T12:00:00Z");
-  const neutral = { ...initialMood(now), lastUserAt: now };
-  assert.equal(moodFromReply(neutral, "lmao stop 😂", now).name, "playful", "from no mood in particular, one sign is enough");
-  const warm = { ...neutral, name: "warm", why: "kind" };
-  assert.equal(moodFromReply(warm, "haha ok", now).name, "warm", "one passing laugh doesn't change a mood");
-  assert.equal(moodFromReply(warm, "LMAO 😂😂 i'm dead", now).name, "playful", "a real laugh does");
-  assert.equal(moodFromReply(warm, "aww 🥺", now).quiet, 0, "more of the same feeds it");
-  assert.equal(moodFromReply(neutral, "k", now).name, "bored", "a one-word answer from her is her being bored");
-  assert.equal(moodFromReply(neutral, "the capital of mongolia is ulaanbaatar", now), neutral, "an ordinary answer changes nothing");
-  // Half an hour of quiet: the moment's over, and how it ended decides where she lands.
-  const later = now + IDLE_AFTER_MS + 60_000;
-  const playful = { ...neutral, name: "playful", why: "laughing", talked: 5 };
-  assert.equal(idleMood(playful, now + 10 * MIN), playful, "not yet");
-  assert.equal(idleMood(playful, later, [{ role: "user", content: "haha that was great, night!" }]).name, "content");
-  const dry = [{ role: "user", content: "ok" }, { role: "assistant", content: "so what's new" }, { role: "user", content: "nm" }, { role: "user", content: "k" }];
-  assert.equal(idleMood(playful, later, dry).name, "bored", "a dry ending leaves her bored");
-  assert.equal(idleMood({ ...neutral, name: "annoyed", why: "pestered" }, later).name, "neutral", "annoyance doesn't outlast the chat");
-  const settled = idleMood(playful, later);
-  assert.equal(idleMood(settled, later + MIN), settled, "and then it stays put");
+test("someone in crisis is always noticed, whatever a model read", () => {
+  assert.deepEqual(crisisReading("honestly i want to die"), { feeling: "sad", strength: "strong" });
+  assert.deepEqual(crisisReading("having a panic attack rn"), { feeling: "anxious", strength: "strong" });
+  assert.equal(crisisReading("i'm so tired lol"), null);
+  assert.match(userMoodSection({ feeling: "sad", strength: "strong", since: 1, source: "words" }), /crisis line/);
 });

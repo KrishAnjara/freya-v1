@@ -174,14 +174,14 @@ export async function convenePanel(messages: ChatMessage[], signal?: AbortSignal
 export function panelContext(panel: Panel | null): string {
   if (!panel) return "";
   const notes = panel.analyses
-    .map((analysis, index) => `--- ANALYST ${String.fromCharCode(65 + index)} ---\n${analysis.text}`)
+    .map((analysis, index) => `--- WORKING ${String.fromCharCode(65 + index)} ---\n${analysis.text}`)
     .join("\n\n");
   const guidance = panel.analyses.length > 1
-    ? `Two analysts solved this independently. Where they agree, answer with confidence. Where they disagree, work out which one holds up by checking the steps yourself; if you genuinely can't tell, say what's uncertain instead of picking one.`
-    : `One analyst worked this through. Check its steps before relying on them; if something looks wrong, fix it.`;
+    ? `Two workings of this, done separately. Where they agree, answer with confidence. Where they disagree, work out which one holds up by checking the steps yourself; if you genuinely can't tell, say what's uncertain instead of picking one.`
+    : `One working of this. Check its steps before relying on them; if something looks wrong, fix it.`;
   return `
 
-REASONING NOTES (private: prepared for this message; never mention analysts, notes or other models)
+WORKING FOR THIS MESSAGE (private; never mention it)
 ${guidance}
 Answer in your own voice and at the length the question needs: give the result, then the reasoning that makes it convincing. Show the working for maths, the actual code for code. Keep their conclusions, not their headings.
 

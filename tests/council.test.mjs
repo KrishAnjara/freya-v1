@@ -69,10 +69,11 @@ test("two analysts work the problem in parallel; the writer gets both, without p
   assert.ok(calls.groqAnalyst[0].reasoning_effort);
   assert.doesNotMatch(calls.groqAnalyst[0].messages[0].content, /FREYA/, "analysts never see the persona");
   const context = panelContext(panel);
-  assert.match(context, /Two analysts solved this independently/);
-  assert.match(context, /ANALYST A/);
-  assert.match(context, /ANALYST B/);
-  assert.match(context, /never mention analysts/);
+  assert.match(context, /Two workings of this, done separately/);
+  assert.match(context, /WORKING A/);
+  assert.match(context, /WORKING B/);
+  assert.doesNotMatch(context, /analyst|model/i, "her prompt never mentions analysts or models");
+  assert.match(context, /never mention it/);
 });
 
 test("a failed analyst leaves the other; none leaves FREYA answering alone", async () => {
@@ -80,7 +81,7 @@ test("a failed analyst leaves the other; none leaves FREYA answering alone", asy
   mockUpstreams({ geminiFails: true });
   const one = await convenePanel([{ role: "user", content: "what's 17 * 23?" }]);
   assert.equal(one.analyses.length, 1);
-  assert.match(panelContext(one), /One analyst worked this through/);
+  assert.match(panelContext(one), /One working of this/);
   resetProviderHealthForTests();
   env();
   mockUpstreams({ groqAnalystFails: true, geminiFails: true });
@@ -95,7 +96,7 @@ test("the route convenes the panel for a hard question and hands the notes to FR
   assert.equal(calls.groqAnalyst.length, 1);
   assert.equal(calls.voice.length, 1);
   const system = calls.voice[0].messages[0].content;
-  assert.match(system, /REASONING NOTES/);
+  assert.match(system, /WORKING FOR THIS MESSAGE/);
   assert.match(system, /ANSWER: 391/);
 });
 

@@ -146,16 +146,3 @@ export function answersOffer(text: string): "yes" | "no" | null {
   return null;
 }
 
-/** How long a picture is likely to take from where it's made, in seconds (measured averages first). */
-export function expectedPictureSeconds(measured: number | undefined, viaOwnServer: boolean) {
-  if (measured && Number.isFinite(measured) && measured > 0) return Math.round(measured);
-  return viaOwnServer ? 360 : 30;
-}
-
-/** "about 6 minutes", "under a minute": how she'd put it. */
-export function roughDuration(seconds: number) {
-  if (seconds < 50) return "under a minute";
-  if (seconds < 90) return "about a minute";
-  const minutes = Math.round(seconds / 60);
-  return minutes <= 10 ? `about ${minutes} minutes` : "a good while";
-}

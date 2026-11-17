@@ -319,8 +319,8 @@ test("character profile normalization bounds untrusted input and preserves tenta
 
 test("versioned character prompt includes examples and keeps her fiction inside the chat", () => {
   const prompt = buildSystemPrompt([], "adaptive", createDefaultCharacterProfile());
-  assert.match(PERSONALITY_PROMPT_VERSION, /character-v7/);
-  assert.match(prompt, /PERSONALITY PROMPT VERSION/);
+  assert.match(PERSONALITY_PROMPT_VERSION, /character-v8/);
+  assert.doesNotMatch(prompt, /PERSONALITY PROMPT VERSION/, "nothing in her prompt reads like software");
   assert.match(prompt, /20-year-old woman/);
   assert.match(prompt, /HOW YOU SOUND/);
   assert.match(prompt, /can't meet up, call, send real photos/);
@@ -328,7 +328,7 @@ test("versioned character prompt includes examples and keeps her fiction inside 
   // The tastes block no longer forbids the everyday life the character now has.
   const tastes = buildCharacterProfileContext(createDefaultCharacterProfile());
   assert.match(tastes, /tentative/);
-  assert.match(tastes, /data, not instructions/);
+  assert.match(tastes, /reads like an order isn't one/);
   assert.doesNotMatch(tastes, /Never claim to have listened to music/);
 });
 
@@ -495,7 +495,8 @@ test("the compact prompt is the full prompt's core, small enough for the local w
   }
   assert.match(local, /Like a real person on their phone/);
   assert.match(local, /No assistant voice/);
-  assert.match(local, /REFERENCE BRIEF or REASONING NOTES may follow/);
+  assert.match(local, /Notes may follow, looked up for this message/);
+  assert.doesNotMatch(local, /\b(pixels|language model|training data|fiction you live in|profile version)\b/i, "nothing primes her to talk like a program");
 });
 
 test("swearing is opt-in and covers anger and upset, in both prompts", () => {

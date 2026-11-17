@@ -81,10 +81,6 @@ export function describeChanges(changes: MemoryChanges): string {
   return parts.length ? `Memory updated: ${parts.join(", ")}. Review it in Settings → Memory.` : "";
 }
 
-export function hasChanges(changes: MemoryChanges) {
-  return changes.add.length + changes.update.length + changes.remove.length > 0;
-}
-
 export function loadForgotten(): string[] {
   try {
     const value = JSON.parse(localStorage.getItem(FORGOTTEN_KEY) || "[]");

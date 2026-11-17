@@ -59,7 +59,17 @@ const RULES: [RegExp, UserFeeling, "mild" | "strong"][] = [
   [/\b(how does|why does|what if|i wonder|curious)\b/i, "curious", "mild"],
 ];
 
-/** A read from their words alone. Null when there's nothing in it. */
+/**
+ * Someone in crisis (talk of dying, self-harm, a panic attack): read from their words every time, and
+ * it outranks any model's read, because missing it is the one mistake that can't be allowed. It's
+ * what brings in her care instructions (userMoodSection).
+ */
+export function crisisReading(text: string): UserMoodReading | null {
+  for (const [pattern, feeling, strength] of RULES.slice(0, 2)) if (pattern.test(text)) return { feeling, strength };
+  return null;
+}
+
+/** A read from their words alone, when her reading of the message didn't come back. Null when there's nothing in it. */
 export function readUserMood(text: string): UserMoodReading | null {
   for (const [pattern, feeling, strength] of RULES) if (pattern.test(text)) return { feeling, strength };
   return null;

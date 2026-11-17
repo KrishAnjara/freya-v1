@@ -12,7 +12,10 @@ export function readEnv() {
     if (!existsSync(path)) continue;
     for (const line of readFileSync(path, "utf8").split(/\r?\n/)) {
       const match = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*?)\s*$/);
-      if (match) values[match[1]] = match[2].replace(/^["']|["']$/g, "");
+      if (!match) continue;
+      // As Next.js reads it: a quoted value is taken whole; an unquoted one ends at " #" (a comment).
+      const quoted = match[2].match(/^(["'])(.*)\1/);
+      values[match[1]] = quoted ? quoted[2] : match[2].replace(/\s+#.*$/, "");
     }
   }
   return values;

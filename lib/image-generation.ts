@@ -87,6 +87,9 @@ function promptText(request: ImageRequest) {
   return request.style ? `${base}, ${IMAGE_STYLES[request.style].prompt}` : base;
 }
 
+/** Every picture is a phone photo, upright. 768x1024 draws about a quarter faster than 832x1216. */
+export const PHOTO_SIZE = { width: 768, height: 1024 } as const;
+
 /** Where her own image server is: FREYA_IMAGE_URL, or the Colab gateway that serves her voice. */
 export function imageServer(): { url: string; key?: string } | null {
   if ((process.env.FREYA_IMAGE_GENERATION || "true").toLowerCase() === "false") return null;
@@ -123,15 +126,17 @@ export async function startPicture(request: ImageRequest, signal?: AbortSignal):
 }
 
 /** How a started picture is going: still working (with an estimate), done, or failed. */
-export async function pictureStatus(job: string, signal?: AbortSignal): Promise<{ status: "working"; progress?: number; eta?: number } | ImageResult | { status: "error"; error: string; refused?: boolean }> {
+export async function pictureStatus(job: string, signal?: AbortSignal): Promise<{ status: "working"; progress?: number; eta?: number; unreachable?: boolean } | ImageResult | { status: "error"; error: string; refused?: boolean }> {
   const server = imageServer();
   if (!server || !/^[a-f0-9]{16}$/.test(job)) return { status: "error", error: "no such picture" };
   const headers = server.key ? { Authorization: `Bearer ${server.key}` } : undefined;
   const response = await fetch(`${server.url}/v1/images/${job}`, { headers, cache: "no-store", signal: AbortSignal.any([AbortSignal.timeout(30_000), ...(signal ? [signal] : [])]) }).catch(() => null);
-  // The server didn't answer this time (a dropped poll, a tunnel blip): still working, as far as anyone knows.
-  if (!response) return { status: "working" };
+  // No answer this time (a dropped check, a tunnel blip, the server restarting): probably still
+  // working, but the browser gives up if it stays like this for a couple of minutes.
+  if (!response || response.status >= 500) return { status: "working", unreachable: true };
   if (response.status === 404) return { status: "error", error: "The image server lost the picture (it may have restarted)." };
-  if (!response.ok) return { status: "working" };
+  if (response.status === 401 || response.status === 403) return { status: "error", error: "Her image server refused the key (a new Colab session has a new key or address)." };
+  if (!response.ok) return { status: "error", error: `Her image server answered ${response.status}.` };
   const payload = await response.json().catch(() => null) as Record<string, unknown> | null;
   if (payload?.status === "done") return pictureResult(payload);
   if (payload?.status === "error") {
@@ -163,6 +168,7 @@ async function ownImage(request: ImageRequest, signal?: AbortSignal, startOnly =
       headers,
       body: JSON.stringify({
         prompt: promptText(request),
+        ...PHOTO_SIZE,
         ...(reference && expression ? { reference, expression } : {}),
         negative_prompt: request.style ? `${IMAGE_STYLES[request.style].negative}, ${NEGATIVE_PROMPT}` : NEGATIVE_PROMPT,
         // How far from the last picture: a variation stays close, a restyle needs room to change.
@@ -197,7 +203,7 @@ async function ownImage(request: ImageRequest, signal?: AbortSignal, startOnly =
   }
 }
 
-const POLL_MS = 4000;
+const POLL_MS = 2500;
 const PICTURE_LIMIT_MS = 20 * 60_000;
 
 class PictureRefused extends Error {}

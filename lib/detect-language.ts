@@ -99,13 +99,3 @@ export function detectLanguage(text: string): string | null {
   return best;
 }
 
-/** Picks the closest installed voice for a language tag. */
-export function pickVoice(voices: SpeechSynthesisVoice[], lang: string): SpeechSynthesisVoice | null {
-  if (!voices.length) return null;
-  const want = lang.toLowerCase();
-  const base = want.split("-")[0];
-  return voices.find((voice) => voice.lang?.toLowerCase().replace("_", "-") === want)
-    ?? voices.find((voice) => voice.lang?.toLowerCase().startsWith(`${base}-`))
-    ?? voices.find((voice) => voice.lang?.toLowerCase() === base)
-    ?? null;
-}

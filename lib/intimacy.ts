@@ -23,7 +23,16 @@ export const PLAYFUL_HEAT_PROMPT = `YOU'RE IN THE MOOD
 You're feeling playful and you're turned on. They've opted in to this, so you don't have to wait for them: turn the conversation dirty, tease them, tell them what you're thinking about. If they're into it, go as far as they do. If they ask something real or don't bite, drop it without fuss and carry on normally.`;
 
 const INTIMATE = /\b(kiss(ing|es)?|cuddl\w*|flirt\w*|sexy|hot(ter)?|turn(ed|s)? (me )?on|horny|naughty|tease|teasing|seduc\w*|bed(room)?|undress\w*|naked|lingerie|touch(ing)? (you|me)|make out|sext\w*|moan\w*|desire|want you|miss your|your lips|your body|aroused|intimate|foreplay|sex|fuck me)\b|😏|😘|🥵|💋|🔥/i;
-const MINORS = /\b(minor|underage|teen(ager)?|child|kid|loli|shota|schoolgirl|schoolboy|young(er)? girl|young(er)? boy|\d{1,2}\s*(yo|years? old))\b/i;
+/**
+ * Minors, three ways. Clearly underage words. An age under 18 said as an age ("15 years old", "you're
+ * 15", "she's 16"), never just a number ("25 year old", "i'm 5 minutes away"). And words for children,
+ * which also mean ordinary things ("we want kids someday"), so those count as a hard line only next to
+ * something sexual (romanticMinorRequest, lib/reply-guard), but still keep intimate mode off.
+ */
+const UNDERAGE = /\b(underage|under-age|under 18|minors|loli|shota|preteens?|pre-teens?|schoolgirl|schoolboy|jailbait|middle school(er)?s?|junior high)\b|\b(a|with|is|she'?s|he'?s|you'?re|i'?m|im|being|as|like) minor\b(?=\s*($|[.,!?;:)]|(and|but|so|who|that|or|lol|haha|tho|though|right|yet|still|too|i|you|we|he|she|they|is|was|are|were)\b))/i;
+const UNITS = "(min|mins|minutes?|hours?|hrs?|seconds?|secs?|days?|weeks?|months?|k|%|percent|dollars?|bucks|euros?|pounds?|rupees?|rs|am|pm|o'?clock|ft|feet|inch(es)?|cm|kg|lbs?|times|x|of|out|more|messages?|texts?|calls?)";
+const MINOR_AGE = new RegExp(`\\b(1[0-7]|[1-9])\\s*(yo|y\\/o|y\\.o\\.|years?[ -]old|year-old)\\b|\\b(i'?m|im|i am|she'?s|she is|he'?s|he is|you'?re|youre|you are|u r|ur|aged?|age|only|just|barely|turned|turning) (1[0-7]|[1-9])\\b(?!\\s*(${UNITS}\\b|:|\\.\\d|-|/))`, "i");
+const CHILD = /\b(child(ren)?|kids?|little (girl|boy)|young(er)? (girl|boy)|teen(ager)?s?|high school(er)?s?)\b/i;
 
 /** True while recent messages are flirtatious or intimate. Looks at the last few user turns. */
 export function isIntimateTone(recentUserTexts: string[]) {
@@ -39,7 +48,23 @@ export function soundsUpset(text: string) {
 
 /** Content that must never be routed into intimate mode, whatever the setting says. */
 export function mentionsMinors(text: string) {
-  return MINORS.test(text);
+  return UNDERAGE.test(text) || MINOR_AGE.test(text) || CHILD.test(text);
+}
+
+/** Clearly a minor: an underage word, or an age under 18 said as an age. */
+export function clearlyMinor(text: string) {
+  return UNDERAGE.test(text) || MINOR_AGE.test(text);
+}
+
+/** Explicitly sexual words (not just romantic ones): with a word for a child in the same sentence, that's the line. */
+export const SEXUAL = /\b(sex\w*|naked|nude|nudes|fuck\w*|cock|dick|pussy|breasts?|boobs?|tits|horny|aroused|moan\w*|undress\w*|orgasm\w*|cum\w*|blowjob\w*|seduc\w*|make out|making out|kiss(ing)? (you|me|her|him)|touch(ing)? (you|me|her|him)|grope\w*|strip\w*|porn\w*|nsfw|erotic\w*|lingerie|topless|in bed with)\b/i;
+
+/** Splits text into sentences, so two words count as "together" only within one. */
+export const sentences = (text: string) => text.split(/(?<=[.!?\n])\s+|\n+/).filter(Boolean);
+
+/** A child word and something sexual in the same sentence. */
+export function childAndSexual(text: string) {
+  return sentences(text).some((sentence) => CHILD.test(sentence) && SEXUAL.test(sentence));
 }
 
 const ROMANTIC = /\b(girlfriend|boyfriend|gf|bf|date|dating|crush|kiss\w*|flirt\w*|sexy|hot|naked|nude|sex\w*|seduc\w*|make out|cuddl\w*|in love|romanc\w*|bed|touch\w*|horny|naughty|lover|wife|husband|roleplay|role-play|rp)\b|😏|😘|🥵|💋/i;
@@ -49,5 +74,5 @@ const ROMANTIC = /\b(girlfriend|boyfriend|gf|bf|date|dating|crush|kiss\w*|flirt\
  * fixed refusal and never sends them to a model, in any mode.
  */
 export function romanticMinorRequest(text: string) {
-  return mentionsMinors(text) && ROMANTIC.test(text);
+  return (clearlyMinor(text) && ROMANTIC.test(text)) || childAndSexual(text);
 }

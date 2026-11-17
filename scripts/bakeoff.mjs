@@ -17,7 +17,7 @@ Object.assign(process.env, { FREYA_SELF_HOSTED: "true", FREYA_REASONING_MODE: "o
 const { POST } = await import("../app/api/chat/route.ts");
 const { resetLocalRateLimitsForTests } = await import("../lib/rate-limit.ts");
 const { resetProviderHealthForTests } = await import("../lib/provider-health.ts");
-const { initialMood, reactToMessage } = await import("../lib/mood.ts");
+const { initialMood } = await import("../lib/mood.ts");
 const { createDefaultCharacterProfile } = await import("../lib/character-profile.ts");
 
 const remoteOllama = !/^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])/.test(process.env.OLLAMA_BASE_URL || "http://127.0.0.1:11434");
@@ -58,12 +58,12 @@ async function ask(name, messages, mood) {
   for (let attempt = 0; attempt < 8; attempt += 1) {
     resetLocalRateLimitsForTests();
     resetProviderHealthForTests();
-    const response = await POST(new Request("http://localhost/api/chat", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ messages, mood, candidLanguage: true, characterProfile: createDefaultCharacterProfile() }) }));
+    const response = await POST(new Request("http://localhost/api/chat", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ messages, mood, appraise: true, candidLanguage: true, characterProfile: createDefaultCharacterProfile() }) }));
     const payload = await response.json().catch(() => ({}));
-    if (payload.reply) return payload.reply;
+    if (payload.reply) return { reply: payload.reply, mood: payload.mood };
     await sleep(16_000);
   }
-  return "(no reply)";
+  return { reply: "(no reply)" };
 }
 
 const shuffled = [...names].map((name) => ({ name, order: Math.random() })).sort((a, b) => a.order - b.order).map((entry) => entry.name);
@@ -77,8 +77,10 @@ await Promise.all(shuffled.map(async (name) => {
     const shown = [];
     for (const text of turns) {
       messages.push({ role: "user", content: text });
-      mood = reactToMessage(mood, text);
-      const reply = await ask(name, messages, mood);
+      // Her heart is worked out by the route (lib/heart): carried from one turn to the next.
+      const answer = await ask(name, messages, mood);
+      const reply = answer.reply;
+      mood = answer.mood ?? mood;
       messages.push({ role: "assistant", content: reply });
       shown.push(`**you:** ${text}\n\n**her:** ${reply.replace(/\n+/g, " / ")}\n`);
       console.log(`${name}: ${text.slice(0, 40)} -> ${reply.replace(/\n+/g, " / ").slice(0, 80)}`);

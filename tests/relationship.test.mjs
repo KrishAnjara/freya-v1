@@ -18,7 +18,7 @@ function talk(bond, count, days, say, start = START) {
 }
 
 test("a stranger's flirting is teased, not returned; she has to like them first", () => {
-  const flirty = talk(initialBond(START), 10, 1, () => ({ text: "you're so cute 😘", feeling: "flirty", reason: "flirting" }));
+  const flirty = talk(initialBond(START), 10, 1, () => ({ text: "you're so cute 😘", feeling: "flirty", events: ["flirted"] }));
   assert.ok(flirty.attraction < 0.15, `barely moved (${flirty.attraction.toFixed(2)})`);
   assert.equal(flirty.stage, "stranger");
   assert.ok(flirty.moments.some((moment) => moment.kind === "firstFlirt"));
@@ -29,7 +29,7 @@ test("kindness and time make friends, then close; one step at a time", () => {
   const stages = [];
   let bond = initialBond(START);
   for (let day = 0; day < 30; day += 1) {
-    bond = talk(bond, 20, 1, (index) => index % 3 === 0 ? { text: "thanks, you're the best", reason: "kind" } : index % 5 === 0 ? { text: "honestly i feel like nobody gets me, i've never told anyone this", feeling: "sad" } : { text: "haha", reason: "laughing" }, START + day * DAY);
+    bond = talk(bond, 20, 1, (index) => index % 3 === 0 ? { text: "thanks, you're the best", events: ["kind"] } : index % 5 === 0 ? { text: "honestly i feel like nobody gets me, i've never told anyone this", feeling: "sad", events: ["openedUp"] } : { text: "haha", events: ["joked"] }, START + day * DAY);
     if (stages.at(-1) !== bond.stage) stages.push(bond.stage);
   }
   assert.deepEqual(stages, ["stranger", "acquaintance", "friend", "close"].slice(stages[0] === "stranger" ? 0 : 1));
@@ -39,7 +39,7 @@ test("kindness and time make friends, then close; one step at a time", () => {
 });
 
 test("flirting with someone she likes becomes a crush; asking out works only when she's there", () => {
-  let bond = talk(initialBond(START), 300, 12, (index) => index % 2 ? { text: "thank you, you're amazing", reason: "kind" } : { text: "i've never told anyone this but", feeling: "sad" });
+  let bond = talk(initialBond(START), 300, 12, (index) => index % 2 ? { text: "thank you, you're amazing", events: ["kind"] } : { text: "i've never told anyone this but", feeling: "sad", events: ["openedUp"] });
   assert.equal(bond.stage, "close");
   // Asked out before there's anything romantic: not yet, and the prompt says so.
   const early = nextBond(bond, { text: "will you be my girlfriend?", now: START + 13 * DAY });
@@ -47,7 +47,7 @@ test("flirting with someone she likes becomes a crush; asking out works only whe
   assert.equal(early.moments[0].kind, "notYet");
   assert.match(bondSection(early, START + 13 * DAY, true), /not there yet/);
   // Weeks of flirting with someone she's close to.
-  bond = talk(bond, 120, 10, () => ({ text: "you're cute when you're annoyed 😏", feeling: "flirty", reason: "flirting" }), START + 14 * DAY);
+  bond = talk(bond, 120, 10, () => ({ text: "you're cute when you're annoyed 😏", feeling: "flirty", events: ["flirted"] }), START + 14 * DAY);
   assert.equal(bond.stage, "crush");
   assert.ok(bond.moments.some((moment) => moment.kind === "fellForThem"));
   const asked = nextBond(bond, { text: "ok. be my girlfriend?", now: START + 25 * DAY });
@@ -60,15 +60,15 @@ test("flirting with someone she likes becomes a crush; asking out works only whe
 });
 
 test("rudeness costs her, leaves friction an apology and time ease; one bad day doesn't end anything", () => {
-  const friends = talk(initialBond(START), 200, 10, () => ({ text: "thanks!", reason: "kind" }));
+  const friends = talk(initialBond(START), 200, 10, () => ({ text: "thanks!", events: ["kind"] }));
   assert.ok(["friend", "close"].includes(friends.stage));
-  const fight = nextBond(friends, { text: "you're useless", reason: "insulted", now: START + 11 * DAY });
+  const fight = nextBond(friends, { text: "you're useless", events: ["insulted"], now: START + 11 * DAY });
   assert.ok(fight.affection < friends.affection && fight.trust < friends.trust);
   assert.ok(fight.tension >= 0.35);
   assert.equal(fight.stage, friends.stage, "one insult isn't the end of a friendship");
   assert.equal(fight.moments[0].kind, "fight");
   assert.match(bondSection(fight, START + 11 * DAY), /upset you/);
-  const sorry = nextBond(fight, { text: "sorry, that was shitty of me", reason: "sorry", now: START + 11 * DAY + HOUR });
+  const sorry = nextBond(fight, { text: "sorry, that was shitty of me", events: ["apologized"], now: START + 11 * DAY + HOUR });
   assert.ok(sorry.tension < fight.tension - 0.2);
   assert.equal(sorry.moments[0].kind, "madeUp");
   const later = nextBond(fight, { text: "hey", now: START + 13 * DAY });
@@ -76,11 +76,11 @@ test("rudeness costs her, leaves friction an apology and time ease; one bad day 
 });
 
 test("stages don't flicker on the line", () => {
-  let bond = talk(initialBond(START), 200, 10, () => ({ text: "thanks!", reason: "kind" }));
+  let bond = talk(initialBond(START), 200, 10, () => ({ text: "thanks!", events: ["kind"] }));
   const stage = bond.stage;
   let changes = 0;
   for (let index = 0; index < 60; index += 1) {
-    const next = nextBond(bond, { text: index % 2 ? "you're useless" : "sorry", reason: index % 2 ? "insulted" : "sorry", now: START + 11 * DAY + index * HOUR });
+    const next = nextBond(bond, { text: index % 2 ? "you're useless" : "sorry", events: [index % 2 ? "insulted" : "apologized"], now: START + 11 * DAY + index * HOUR });
     if (next.stage !== bond.stage) changes += 1;
     bond = next;
   }

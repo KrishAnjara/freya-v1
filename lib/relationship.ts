@@ -12,10 +12,12 @@
  * The stage (stranger, acquaintance, friend, close, crush, together) follows from those, one step
  * at a time, and doesn't flicker: it only drops when things have clearly fallen well below it.
  * "Together" also needs them to have asked: she says yes when she's there, and isn't pushed into
- * it when she isn't. Everything here is numbers and fixed keys, so nothing a message says goes
- * into the prompt as text. Kept per account in the browser and in Supabase (freya_state). Pure.
+ * it when she isn't. What happened in a message (an insult, an apology, flirting, opening up) comes
+ * from her reading of it in context (lib/mood-appraisal), not from word lists. Everything here is
+ * numbers and fixed keys, so nothing a message says goes into the prompt as text. Kept per account in
+ * the browser and in Supabase (freya_state). Pure.
  */
-import type { MoodReason } from "@/lib/mood";
+import type { HeartEvent } from "@/lib/heart";
 import type { UserFeeling } from "@/lib/user-mood";
 
 export const STAGES = ["stranger", "acquaintance", "friend", "close", "crush", "together"] as const;
@@ -62,17 +64,13 @@ export function familiarity(bond: Pick<Bond, "messages" | "days">) {
 
 const istDay = (now: number) => new Date(now + 19_800_000).toISOString().slice(0, 10);
 
-const FLIRT = /\b(you'?re (so )?(cute|hot|pretty|beautiful|gorgeous|sexy|adorable)|kiss(es)?|cuddle|date me|crush on you|into you|thinking about you|miss your (face|voice)|flirt\w*)\b|😘|😍|😏|😉|🥰|❤️/i;
-const OPENS_UP = /\b(never told (anyone|anybody)|honestly,? i('m| am| feel)|i don'?t usually (talk|say)|can i tell you something|i('ve| have) been struggling|i feel like (nobody|no one)|between us)\b/i;
+/** Asking her to be together: a plain request, which the stage rules answer (yes, or not yet). */
 const ASKS_OUT = /\b(be my (girlfriend|gf|girl|partner)|go out with me|will you date me|be (together|mine)|date me for real|(wanna|want to) be (together|official)|make (it|this) official)\b/i;
-const KIND_WORDS = /\b(thank(s| you)|appreciate (you|it)|you'?re (the best|amazing|sweet|kind|funny)|proud of you|love talking to you|glad (i met|you'?re here))\b/i;
-const APOLOGY = /\b(sorry|my bad|apologi[sz]e|forgive me)\b/i;
-
 export type BondSignals = {
   text: string;
   now: number;
-  /** Why her mood moved with this message (lib/mood-appraisal or lib/mood's rules), if it did. */
-  reason?: MoodReason;
+  /** What happened in this message, as her reading of it saw it (lib/mood-appraisal). */
+  events?: HeartEvent[];
   /** How they seem in this message (lib/user-mood), if anything showed. */
   feeling?: UserFeeling;
 };
@@ -93,7 +91,8 @@ function remember(bond: Bond, kind: MomentKind, now: number, once = false): Mome
 }
 
 /** What one message from them does. */
-export function nextBond(previous: Bond, { text, now, reason, feeling }: BondSignals): Bond {
+export function nextBond(previous: Bond, { text, now, events = [], feeling }: BondSignals): Bond {
+  const happened = (event: HeartEvent) => events.includes(event);
   let bond: Bond = { ...previous, moments: previous.moments };
   // Time first: friction fades, and a long absence cools attraction a little (not affection).
   const gone = Math.max(0, now - previous.updatedAt);
@@ -105,31 +104,31 @@ export function nextBond(previous: Bond, { text, now, reason, feeling }: BondSig
   if (today !== bond.lastDay) { bond.days += 1; bond.lastDay = today; }
   bond.affection = clamp(bond.affection + (bond.tension < 0.2 ? 0.002 * (1 - bond.affection) : 0));
 
-  const rude = reason === "insulted";
-  const flirting = !rude && (reason === "flirting" || reason === "turnedOn" || feeling === "flirty" || FLIRT.test(text));
+  const rude = happened("insulted");
+  const flirting = !rude && (happened("flirted") || feeling === "flirty");
   if (rude) {
     bond.affection = clamp(bond.affection - 0.06);
     bond.trust = clamp(bond.trust - 0.06);
     bond.attraction = clamp(bond.attraction - 0.05);
     bond.tension = clamp(bond.tension + 0.35);
     if (previous.tension < 0.2) bond.moments = remember(bond, "fight", now);
-  } else if (reason === "pestered") {
+  } else if (happened("pestered")) {
     bond.tension = clamp(bond.tension + 0.12);
     bond.affection = clamp(bond.affection - 0.01);
   }
-  if (!rude && (reason === "sorry" || APOLOGY.test(text)) && previous.tension >= 0.15) {
+  if (!rude && happened("apologized") && previous.tension >= 0.15) {
     bond.tension = clamp(bond.tension - 0.25);
     bond.trust = clamp(bond.trust + 0.01);
     if (previous.tension >= 0.3) bond.moments = remember(bond, "madeUp", now);
   }
-  if (!rude && (reason === "kind" || KIND_WORDS.test(text) || feeling === "affectionate")) {
+  if (!rude && (happened("kind") || feeling === "affectionate")) {
     bond.affection = clamp(bond.affection + 0.03 * (1 - bond.affection));
     bond.trust = clamp(bond.trust + 0.01 * (1 - bond.trust));
   }
-  if (!rude && (reason === "laughing" || feeling === "playful")) bond.affection = clamp(bond.affection + 0.012 * (1 - bond.affection));
-  if (!rude && reason === "news") { bond.affection = clamp(bond.affection + 0.01); bond.trust = clamp(bond.trust + 0.01); }
+  if (!rude && (happened("joked") || feeling === "playful")) bond.affection = clamp(bond.affection + 0.012 * (1 - bond.affection));
+  if (!rude && happened("news")) { bond.affection = clamp(bond.affection + 0.01); bond.trust = clamp(bond.trust + 0.01); }
   // Telling her something real, or how they're really doing.
-  const opened = !rude && (OPENS_UP.test(text) || ((feeling === "sad" || feeling === "anxious" || feeling === "lonely") && text.length > 80) || reason === "hurting");
+  const opened = !rude && (happened("openedUp") || happened("hurting") || ((feeling === "sad" || feeling === "anxious" || feeling === "lonely") && text.length > 80));
   if (opened) {
     bond.trust = clamp(bond.trust + 0.04 * (1 - bond.trust));
     bond.affection = clamp(bond.affection + 0.015 * (1 - bond.affection));
@@ -144,7 +143,7 @@ export function nextBond(previous: Bond, { text, now, reason, feeling }: BondSig
   // The stage: up one step at a time when the feelings are there, down only when far below.
   const supported = stageFor(bond);
   let stage = previous.stage;
-  if (ASKS_OUT.test(text) && stage !== "together") {
+  if ((happened("askedOut") || ASKS_OUT.test(text)) && stage !== "together") {
     bond.moments = remember(bond, "askedOut", now);
     if (supported === "together") stage = "together";
     bond.moments = remember(bond, supported === "together" ? "saidYes" : "notYet", now);

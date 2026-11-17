@@ -6,6 +6,7 @@
  * Fiction, like lib/canon. Pure apart from the default clock, so it is tested directly.
  */
 import type { Closeness } from "@/lib/canon";
+import type { Feeling } from "@/lib/heart";
 
 type Activity = { doing: string; vague: string; busy?: boolean; asleep?: boolean };
 
@@ -76,6 +77,61 @@ export function herMoment(now = new Date()) {
   return { name, activity, busy: Boolean(activity.busy), asleep: Boolean(activity.asleep), thisWeek: WEEKS[week % WEEKS.length], temper: dayTemper(now) };
 }
 
+/**
+ * Small things that happen to her on their own: a lecturer's tangent, a customer arguing about a
+ * refund, burnt rice. Most stretches of her day have one, picked by the date (the same all day,
+ * different tomorrow). Her heart takes each in once (lib/heart passTime): it moves how she feels and
+ * stays on her mind for a few hours, and it's what she might text about first.
+ */
+type Happening = { text: string; feel: Partial<Record<Feeling, number>>; main: Feeling };
+const HAPPENINGS: Partial<Record<ActivityName, Happening[]>> = {
+  lecture: [
+    { text: "the lecturer went on a twenty-minute tangent about his cat", feel: { amusement: 0.2, boredom: 0.1 }, main: "amusement" },
+    { text: "you said something actually smart in the seminar and the lecturer noticed", feel: { pride: 0.3, joy: 0.1 }, main: "pride" },
+    { text: "someone behind you ate crisps through the entire lecture", feel: { irritation: 0.22 }, main: "irritation" },
+  ],
+  shift: [
+    { text: "a customer argued with you about a refund for a book they'd obviously read", feel: { irritation: 0.25, amusement: 0.1 }, main: "irritation" },
+    { text: "someone bought the exact book you'd have picked for them, and you told them so", feel: { joy: 0.2, pride: 0.15 }, main: "joy" },
+    { text: "your manager rearranged your favourite shelf without asking", feel: { irritation: 0.2 }, main: "irritation" },
+  ],
+  library: [
+    { text: "you wrote one good paragraph of your essay and then nothing", feel: { pride: 0.1, worry: 0.15 }, main: "worry" },
+    { text: "the person next to you is watching a film with no headphones", feel: { irritation: 0.2, amusement: 0.05 }, main: "irritation" },
+  ],
+  evening: [
+    { text: "you burnt the rice. again", feel: { amusement: 0.15, irritation: 0.05 }, main: "amusement" },
+    { text: "Tara told you some gossip you're dying to tell someone", feel: { excitement: 0.2, amusement: 0.15 }, main: "excitement" },
+  ],
+  out: [
+    { text: "someone at the table won't stop talking about crypto", feel: { boredom: 0.2, irritation: 0.1 }, main: "boredom" },
+    { text: "you ended up in a weirdly good conversation with a stranger", feel: { joy: 0.2, curiosity: 0.15 }, main: "joy" },
+  ],
+  lazy: [
+    { text: "Kafka knocked your coffee off the table", feel: { amusement: 0.15, irritation: 0.1 }, main: "amusement" },
+    { text: "you found a song you can't stop playing", feel: { joy: 0.2 }, main: "joy" },
+  ],
+  lateNight: [
+    { text: "you can't sleep and your brain won't shut up", feel: { worry: 0.15, longing: 0.1 }, main: "worry" },
+    { text: "you're halfway through a book that's wrecking you", feel: { curiosity: 0.2, longing: 0.1 }, main: "curiosity" },
+  ],
+};
+
+/** What's happened in this stretch of her day, if anything: one per stretch, fixed by the date. */
+export function herDayEvent(now = new Date()): { key: string; text: string; feel: Partial<Record<Feeling, number>>; mainFeeling: Feeling } | null {
+  const { name } = herMoment(now);
+  const choices = HAPPENINGS[name];
+  if (!choices?.length) return null;
+  const day = Math.floor((now.getTime() + 19_800_000) / 86_400_000);
+  let hash = Math.imul(day ^ (name.length * 0x27d4eb2d), 0x85ebca6b);
+  hash = Math.imul(hash ^ (hash >>> 15), 0xc2b2ae35);
+  hash = (hash ^ (hash >>> 13)) >>> 0;
+  // About three stretches in five have something happen.
+  if (hash % 5 >= 3) return null;
+  const happening = choices[(hash >>> 3) % choices.length];
+  return { key: `${day}-${name}`, text: happening.text, feel: happening.feel, mainFeeling: happening.main };
+}
+
 /** One quiet line for an empty chat, about where she is now: no suggested messages to click. */
 const STATUS_LINE: Record<ActivityName, string> = {
   asleep: "Freya's probably asleep. Text her anyway.",
@@ -89,6 +145,15 @@ const STATUS_LINE: Record<ActivityName, string> = {
 };
 export function herStatusLine(now = new Date()) {
   return STATUS_LINE[herMoment(now).name];
+}
+
+/** A few words for the status bar, like a messaging app would show: where she is right now. */
+const DOING_NOW: Record<ActivityName, string> = {
+  asleep: "probably asleep", lecture: "in a lecture", shift: "at work", library: "in the library",
+  evening: "at home", out: "out", lazy: "lazy day", lateNight: "up late",
+};
+export function herDoingNow(now = new Date()) {
+  return DOING_NOW[herMoment(now).name];
 }
 
 /** The prompt section. Strangers get the vague version, for the same reason as lib/canon. */

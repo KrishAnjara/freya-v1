@@ -54,28 +54,6 @@ export function installApiAuth() {
   };
 }
 
-/** A fresh sign-in: this browser becomes the account's one session. */
-export async function claimSession(client: SupabaseClient, userId: string) {
-  const id = crypto.randomUUID().replace(/-/g, "");
-  try { localStorage.setItem(sessionKey(userId), id); } catch { /* still claimed for this page */ }
-  sessionId = id;
-  const { error } = await client.from("freya_sessions").upsert({ user_id: userId, session_id: id, updated_at: new Date().toISOString() }, { onConflict: "user_id" });
-  // No table yet: one-session can't be enforced, and the app carries on as before.
-  return !error || error.code === "PGRST205" || error.code === "42P01";
-}
-
-/**
- * Is this browser still the account's session? "replaced" when another browser signed in since;
- * "unclaimed" when there's no row (or table) yet, so this one should claim it.
- */
-export async function checkSession(client: SupabaseClient, userId: string): Promise<"current" | "replaced" | "unclaimed"> {
-  sessionId = localSessionId(userId);
-  const { data, error } = await client.from("freya_sessions").select("session_id").eq("user_id", userId).maybeSingle();
-  if (error || !data?.session_id) return "unclaimed";
-  // Only a fresh sign-in takes the account over; a browser that merely still had a sign-in doesn't.
-  return data.session_id === sessionId ? "current" : "replaced";
-}
-
 export function forgetLocalSession(userId: string) {
   sessionId = "";
   try { localStorage.removeItem(sessionKey(userId)); } catch { /* nothing kept */ }

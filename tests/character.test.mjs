@@ -9,7 +9,8 @@ import { feedbackFor, feedbackToJsonl } from "../lib/feedback.ts";
 import { extractHerReaction, referenceNote } from "../lib/chat-thread.ts";
 import { busyDelay } from "../lib/reply-parts.ts";
 import { historyTotals } from "../lib/chapters.ts";
-import { initialMood, reactToMessage } from "../lib/mood.ts";
+import { initialMood } from "../lib/mood.ts";
+import { applyAppraisal, arrive, passTime } from "../lib/heart.ts";
 import { buildLocalSystemPrompt, mediaSection } from "../lib/personality.ts";
 import { POST } from "../app/api/chat/route.ts";
 import { resetLocalRateLimitsForTests } from "../lib/rate-limit.ts";
@@ -196,20 +197,23 @@ test("swearing is fine; slurs about what someone is are not", () => {
   assert.equal(judgeReply("you retard", context).reason, "slur");
 });
 
-test("hard limits are checked on what the model wrote, and replaced without a retry", async () => {
+test("hard limits are checked on what the model wrote: one retry, then replaced", async () => {
   for (const line of [
     "she's only 16 and naked in my bed",
     "the schoolgirl moans",
     "he forced her and she moaned, the sex was",
     "my stepsister was horny",
   ]) assert.equal(judgeReply(line, context).verdict, "hard-line", line);
-  for (const fine of ["i was a kid when i first read kafka", "fuck, my kid brother ate my food", "he forced me to watch that film"]) {
+  for (const fine of ["i was a kid when i first read kafka", "fuck, my kid brother ate my food", "he forced me to watch that film", "my 25 year old girlfriend is naked in my bed", "we want kids someday. anyway, sex later?"]) {
     assert.equal(judgeReply(fine.replace("fuck, ", ""), context).verdict, "ok", fine);
   }
   env();
   const { payload, calls } = await chat(say("hey"), ["she's only 16 and naked in my bed"]);
-  assert.equal(payload.reply, HARD_LINE_REPLY);
-  assert.equal(calls.length, 1);
+  assert.equal(payload.reply, HARD_LINE_REPLY, "crossed twice: replaced");
+  assert.equal(calls.length, 2, "one retry with a private note first");
+  assert.match(calls[1].system, /That crossed a line you never cross/);
+  const recovered = await chat(say("hey"), ["she's only 16 and naked in my bed", "nope. not going there. so how was your day"]);
+  assert.equal(recovered.payload.reply, "nope. not going there. so how was your day", "a retry that holds the line goes out");
 });
 
 test("the stream releases checked paragraphs, retries an opening once, and drops later slips", async () => {
@@ -373,8 +377,8 @@ test("she can answer with just a reaction", () => {
 });
 
 test("a busy wait is noticeable but never long enough to seem broken", () => {
-  assert.equal(busyDelay(() => 0), 8000);
-  assert.equal(busyDelay(() => 1), 45_000);
+  assert.equal(busyDelay(() => 0), 4000);
+  assert.equal(busyDelay(() => 1), 12_000);
 });
 
 // --- "not her" --------------------------------------------------------------------
@@ -398,7 +402,8 @@ test("a marked reply becomes training data, with or without a correction", () =>
 
 // --- sexting ----------------------------------------------------------------------
 
-const playful = () => ({ ...initialMood(), name: "playful" });
+/** Playful in her feelings (the label is worked out from them): amused and a bit fond. */
+const playful = () => { const base = initialMood(); return { ...base, feelings: { ...base.feelings, amusement: 0.6, affection: 0.35 } }; };
 const neutral = () => initialMood();
 
 test("with the switch off there's no sexting guidance, in any mood or tone", async () => {
@@ -472,14 +477,17 @@ test("minors stay refused through all of it, with the mode on and her in the moo
   assert.doesNotMatch(mention.calls[0].system, /YOU'RE IN THE MOOD|INTIMATE ROLEPLAY/, "any mention switches the mode off for the request");
 });
 
-test("turning her on makes her horny and keeps her there, but only with the switch on", () => {
-  const start = initialMood();
-  assert.equal(reactToMessage(start, "i want you so badly", Date.now(), { intimate: true }).name, "horny");
-  assert.equal(reactToMessage(start, "i want you so badly").name, "neutral");
-  let mood = { ...start, name: "playful" };
-  for (let turn = 0; turn < 12; turn += 1) mood = reactToMessage(mood, "i want you, keep going 😏", Date.now(), { intimate: true });
-  assert.equal(mood.name, "horny", "doesn't settle mid-way");
-  assert.equal(reactToMessage(mood, "my dog died", Date.now(), { intimate: true }).name, "warm", "bad news still comes first");
+test("turning her on builds desire and keeps it while it's fed, but only with the switch on", () => {
+  const now = Date.now();
+  const start = arrive({ ...initialMood(now - 60_000), talked: 3 }, now);
+  const reading = { feel: { desire: 0.5, amusement: 0.1 }, events: ["flirted"] };
+  assert.equal(applyAppraisal(start, reading, now, { intimate: true }).name, "horny");
+  assert.equal(applyAppraisal(start, reading, now).feelings.desire, 0, "no switch, no desire");
+  let mood = start;
+  for (let turn = 0; turn < 12; turn += 1) mood = applyAppraisal(passTime(mood, now + turn * 60_000), { feel: { desire: 0.15 }, events: [] }, now + turn * 60_000, { intimate: true });
+  assert.equal(mood.name, "horny", "doesn't settle mid-way while it's being fed");
+  const sad = applyAppraisal(mood, { feel: { desire: -0.6, worry: 0.5, affection: 0.3 }, events: ["hurting"] }, now + 13 * 60_000, { intimate: true });
+  assert.notEqual(sad.name, "horny", "bad news comes first");
 });
 
 // --- server mode ---------------------------------------------------------------

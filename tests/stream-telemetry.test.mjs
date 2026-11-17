@@ -77,14 +77,16 @@ test("geometry stays bounded on very long replies", () => {
 test("the presence canvas is driven by real signals and labels the mood as simulated", async () => {
   const canvas = await readFile(new URL("../app/components/EmotionCanvas.tsx", import.meta.url), "utf8");
   assert.match(canvas, /this shows that simulation, not feelings or\s+\* model internals/);
-  assert.match(canvas, /simulated mood and conversation state/, "the accessible label says so too");
+  assert.match(canvas, /simulated feelings and conversation state/, "the accessible label says so too");
   // Speaking comes only from real streamed text, smoothed: never a pulse per token.
   assert.match(canvas, /a smoothed envelope of how fast it comes \(not a pulse per\s+\*\s+token\)/);
   assert.match(canvas, /telemetry\.fragments\[seenFragments\]\.text\.length/);
   assert.doesNotMatch(canvas, /ripple/i, "no per-chunk ripples");
   assert.doesNotMatch(canvas, /Math\.random\(\)/, "no random behaviour anywhere in the canvas");
-  // Mood drives the body: every mood has a style, and energy and warmth are read from state.
-  assert.match(canvas, /MOOD_STYLE\[currentMood\.name\]/);
+  // Her feelings drive the body: a blend of each feeling's style by how strongly she feels it, and
+  // energy and warmth are read from state.
+  assert.match(canvas, /styleFor\(currentMood\)/);
+  assert.match(canvas, /TEMPERAMENT\.rest\[name\]/, "blended by how far each feeling stands out");
   assert.match(canvas, /currentMood\.energy/);
   assert.match(canvas, /currentMood\.warmth/);
   assert.doesNotMatch(canvas, /dog|bike|bicycle|graph/i, "no preset shapes");

@@ -15,8 +15,12 @@ login, tunnel, picture jobs and logging, so the laptop connects to it the same w
     on Linux), the same model as GGUF Q4_K_M in a headless ComfyUI. Where her face shows, SDXL
     (RealVisXL + IP-Adapter Face) redraws just her face from her real photo for her mood, so it is
     her. A picture with a doubled face is drawn again once. Every picture is kept here with its prompt.
-  - the prompt maker: a small uncensored model on the CPU (Ollama, never the GPU) plans the shot
-    and expands the request; if it's off or fails, rules do it. Memory embeddings run on the CPU too.
+  - the prompt maker: her Puter voice plans the shot and expands the request in a few seconds; if
+    it's off, slow or fails, rules do it. (--enhancer NAME uses a CPU model here instead, which is
+    much slower.) Memory embeddings run on the CPU.
+  - speed: on a machine with room (an L4 or A100, or High-RAM) the models stay loaded between
+    pictures and SDXL's face pass stays loaded in its own worker; on a standard T4 they're let go of
+    after each picture so nothing runs out of memory. Pictures go out as JPEG, 768x1024 by default.
 
 Every provider is a switch (the notebook's form, or the arguments below). Puter's key comes from
 the PUTER_AUTH_TOKEN Colab secret (puter.com, Account), never from the notebook.
@@ -26,11 +30,11 @@ Sexual content involving anyone under 18 is refused, before and after the prompt
   --vision-models A,B,...  Puter models that read pictures ("none": off)
   --local-voice NAME       a model on this machine's Ollama as her last voice ("none": off)
   --local-vision NAME      a model here that reads pictures, last ("none": off)
-  --enhancer NAME          the CPU prompt maker ("none": rules only)
+  --enhancer NAME          the prompt maker: "puter" (default, her voice), a CPU model name, or "none" (rules)
   --embed-model NAME       memory embeddings ("none": off)
   --images                 pictures on
   --no-face-fix            pictures without SDXL's face pass
-  --image-steps N          steps for SDXL's face pass (Qwen-Image Turbo always takes 8)
+  --image-steps N          steps for SDXL's face pass, default 14 (Qwen-Image Turbo always takes 8)
   --token KEY              the login key (default: the one saved from the last run)
   --state-dir PATH         where the key, kept pictures and (with --cache-on-drive) downloads live
 """
@@ -42,6 +46,7 @@ import base64
 import contextlib
 import json
 import os
+import queue
 import re
 import shutil
 import subprocess
@@ -66,7 +71,10 @@ PUTER_MODELS = [
 ]
 PUTER_VISION = ["alibaba:qwen/qwen3-vl-plus", "alibaba:qwen/qwen3.8-27b"]
 LOCAL_VISION = "gemma3:4b"
-ENHANCER = "huihui_ai/qwen3-abliterated:1.7b"
+#: The prompt maker: her Puter voice, through the bridge. A model name here means a CPU model instead.
+ENHANCER = "puter"
+#: How long the Puter prompt maker may take before the rules plan the picture instead.
+PLAN_S = 15
 BRIDGE_PORT = 11500
 BRIDGE = f"http://127.0.0.1:{BRIDGE_PORT}"
 BRIDGE_DIR = os.environ.get("FREYA_BRIDGE_DIR", "/content/freya-puter")
@@ -93,6 +101,15 @@ TURBO_STEPS = 8
 #: picture, this long, before its runtime is given up on for that picture.
 WARM_UP_S = 900
 PICTURE_S = 420
+#: A phone photo, upright. 768x1024 draws about a quarter faster than 832x1216 and looks the same on a phone.
+PHOTO_SIZE = (768, 1024)
+JPEG_QUALITY = 90
+#: With this much GPU memory, or this much RAM, the picture models stay loaded between pictures
+#: (an L4, an A100, or High-RAM); below it (a standard T4, ~13 GB RAM) they're let go of after each.
+KEEP_WARM_GPU_GB = 22
+KEEP_WARM_RAM_GB = 40
+#: ComfyUI runs without --lowvram from here (an L4 or A100).
+FULL_VRAM_GB = 22
 #: MLX's preparation loads the official text encoder in bf16 (~17 GB) into system memory: on a
 #: runtime with less RAM than this (a standard T4 has ~13 GB) it runs Colab out of memory and takes the
 #: whole server down, so ComfyUI (an int8 text encoder) is used there instead.
@@ -256,6 +273,73 @@ def face_box(face, size):
     return left, top, left + side, top + side
 
 
+#: SDXL's face pass redraws only part of the face (strength 0.42), so few steps are enough.
+FACE_MIN_STEPS = 10
+
+
+def to_jpeg(png):
+    from PIL import Image
+    out = BytesIO()
+    Image.open(BytesIO(png)).convert("RGB").save(out, "JPEG", quality=JPEG_QUALITY, optimize=True)
+    return out.getvalue()
+
+
+def ask_bridge(system, text, timeout):
+    """One short answer from her Puter voice (the prompt maker uses it): plain text, or raises."""
+    request = urllib.request.Request(f"{BRIDGE}/api/chat", json.dumps({
+        "model": "freya", "stream": False, "messages": [{"role": "system", "content": system}, {"role": "user", "content": text}],
+        "options": {"num_predict": 320, "temperature": 0.7},
+    }).encode(), {"Content-Type": "application/json"})
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return json.loads(response.read()).get("message", {}).get("content", "")
+
+
+class FaceWorker:
+    """
+    SDXL's face pass, kept loaded in its own long-lived process on a machine with room: loading
+    SDXL took most of a minute for every picture. Still its own process, so running out of memory
+    can only stop it (it's started again for the next picture), never this server. One job at a
+    time: a job file's path in on stdin, one line out ("done", "no face" or "error: why").
+    """
+
+    def __init__(self, token, steps, on_gpu=False):
+        self.config = json.dumps({"token": token or "", "steps": steps, "on_gpu": on_gpu})
+        self.process = None
+        self.lines = queue.Queue()
+        self.lock = threading.Lock()
+
+    def start(self):
+        self.process = subprocess.Popen([sys.executable, os.path.abspath(__file__), "--face-worker", self.config], stdin=subprocess.PIPE,
+                                        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1, preexec_fn=expendable)
+        lines = self.lines = queue.Queue()
+        stream = self.process.stdout
+
+        def read():
+            for line in stream:
+                lines.put(line.strip())
+            lines.put(None)
+
+        threading.Thread(target=read, daemon=True).start()
+
+    def run(self, job, timeout):
+        with self.lock:
+            if not self.process or self.process.poll() is not None:
+                self.start()
+            try:
+                self.process.stdin.write(job + "\n")
+                self.process.stdin.flush()
+                while True:
+                    line = self.lines.get(timeout=timeout)
+                    if line is None:
+                        return "error: the face worker stopped (out of memory?)"
+                    if line in ("done", "no face") or line.startswith("error"):
+                        return line
+            except (queue.Empty, OSError):
+                with contextlib.suppress(OSError):
+                    self.process.kill()
+                return "error: the face worker didn't answer in time"
+
+
 class PuterImages:
     """
     Qwen-Image 2.1 Turbo draws, then SDXL redraws her face from her real photo. Two ways to run the
@@ -281,6 +365,12 @@ class PuterImages:
         self.comfy_started = False
         self.lock = threading.Lock()
         self.draw_seconds = 90.0
+        #: How long planning a picture takes here (the bridge, or the rules), for the app's estimate.
+        self.plan_seconds = 6.0
+        #: Models stay loaded between pictures (decided in prepare(), from this machine's memory).
+        self.keep_loaded = False
+        self.lowvram = True
+        self.face_worker = None
 
     @property
     def model_name(self):
@@ -289,7 +379,11 @@ class PuterImages:
     def prepare(self):
         """Sets up the Turbo model (MLX, else ComfyUI) and SDXL's face pass, in the background."""
         try:
-            log("pictures", f"this runtime: {ram_gigabytes():.0f} GB RAM, {base.gpu_gigabytes():.0f} GB GPU")
+            ram, gpu = ram_gigabytes(), base.gpu_gigabytes()
+            self.keep_loaded = gpu >= KEEP_WARM_GPU_GB or ram >= KEEP_WARM_RAM_GB
+            self.lowvram = gpu < FULL_VRAM_GB
+            log("pictures", f"this runtime: {ram:.0f} GB RAM, {gpu:.0f} GB GPU: models "
+                f"{'stay loaded between pictures (fast)' if self.keep_loaded else 'are let go of after each picture (a standard T4 has no room to keep them)'}")
             log("pictures", "installing huggingface_hub[hf_xet] for the downloads")
             subprocess.run([sys.executable, "-m", "pip", "install", "-q", "huggingface_hub[hf_xet]"], check=True)
             # Each runtime proves itself with one real picture before any request waits on it: the
@@ -311,7 +405,7 @@ class PuterImages:
 
     def warm_up(self, runtime):
         """One test picture at the real size: loads (and for MLX compiles) the model, and measures."""
-        request = {"seed": 1, "width": 832, "height": 1216}
+        request = {"seed": 1, "width": PHOTO_SIZE[0], "height": PHOTO_SIZE[1]}
         started = time.time()
         try:
             with base.GPU.picture():
@@ -370,6 +464,10 @@ class PuterImages:
             log("pictures", f"MLX unavailable: {str(error)[:240]}; using the GGUF in ComfyUI instead")
             return False
 
+    def comfy_command(self):
+        """ComfyUI's command line: --lowvram only where the GPU is small."""
+        return [sys.executable, "main.py", "--listen", "127.0.0.1", "--port", "8188", *(["--lowvram"] if self.lowvram else [])]
+
     def prepare_comfy(self):
         """ComfyUI with the GGUF loader, and the Turbo model's three files, then starts it."""
         with self.lock:
@@ -391,7 +489,7 @@ class PuterImages:
             os.makedirs(os.path.dirname(target), exist_ok=True)
             if not os.path.exists(target):
                 os.symlink(path, target)
-        self.process = subprocess.Popen([sys.executable, "main.py", "--listen", "127.0.0.1", "--port", "8188", "--lowvram"], cwd=COMFY_DIR,
+        self.process = subprocess.Popen(self.comfy_command(), cwd=COMFY_DIR,
                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, preexec_fn=expendable)
         for _ in range(180):
             try:
@@ -408,20 +506,27 @@ class PuterImages:
     def prepare_face(self):
         try:
             subprocess.run([sys.executable, "-m", "pip", "install", "-q", "diffusers>=0.38", "transformers", "accelerate", "safetensors", "opencv-python-headless"], check=True)
-            face = base.FaceModel(self.token, max(20, self.steps), keep=False)
+            face = base.FaceModel(self.token, self.steps, keep=False)
             log("pictures", f"downloading {FACE_FIX_NAME} (~8 GB)...")
             face.download()
             self.face = face
-            log("pictures", f"{FACE_FIX_NAME} ready")
+            if self.keep_loaded:
+                self.face_worker = FaceWorker(self.token, self.steps, on_gpu=base.gpu_gigabytes() >= 40)
+            log("pictures", f"{FACE_FIX_NAME} ready{' (kept loaded in its own worker)' if self.face_worker else ''}")
         except Exception as error:  # noqa: BLE001 - pictures still work, without the face pass
             log("pictures", f"{FACE_FIX_NAME} unavailable ({type(error).__name__}: {str(error)[:160]}); pictures go without it")
 
     def plan(self, request):
-        """The CPU prompt maker: what kind of phone photo, whether she's in it and her face shows, the full prompt."""
-        asked = request["prompt"]
-        plan = base.plan_picture(asked, self.enhancer if request["refine"] else "", request["expression"], has_reference=bool(request["reference"]))
+        """The prompt maker: what kind of phone photo, whether she's in it and her face shows, the full
+        prompt. Her Puter voice by default (a few seconds), a CPU model if one was named, else rules."""
+        started = time.time()
+        maker = self.enhancer if request["refine"] else ""
+        bridge = maker == "puter"
+        plan = base.plan_picture(request["prompt"], maker, request["expression"], has_reference=bool(request["reference"]),
+                                 timeout=PLAN_S if bridge else 120, ask=ask_bridge if bridge else None)
         if not plan["refined"]:
             plan = enhance_by_rules(plan, request["expression"])
+        self.plan_seconds = 0.6 * self.plan_seconds + 0.4 * (time.time() - started)
         return plan
 
     def draw(self, request, prompt, negative):
@@ -467,7 +572,7 @@ class PuterImages:
     def draw_comfy(self, request, prompt, negative):
         if self.process and self.process.poll() is not None:
             log("picture", f"ComfyUI had stopped (exit {self.process.returncode}; out of memory?); starting it again")
-            self.process = subprocess.Popen([sys.executable, "main.py", "--listen", "127.0.0.1", "--port", "8188", "--lowvram"], cwd=COMFY_DIR,
+            self.process = subprocess.Popen(self.comfy_command(), cwd=COMFY_DIR,
                                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, preexec_fn=expendable)
             for _ in range(90):
                 with contextlib.suppress(OSError):
@@ -481,8 +586,11 @@ class PuterImages:
                 raise RuntimeError(f"ComfyUI refused the workflow: {error.read().decode(errors='replace')[:300]}") from error
             return self.wait_for(queued.get("prompt_id"))
         finally:
-            with contextlib.suppress(OSError):
-                comfy("/free", {"unload_models": True, "free_memory": True})
+            # On a small machine the models go, so the face pass and her voice have room; with room
+            # to spare they stay, and the next picture starts drawing at once instead of reloading.
+            if not self.keep_loaded:
+                with contextlib.suppress(OSError):
+                    comfy("/free", {"unload_models": True, "free_memory": True})
 
     def wait_for(self, prompt_id, limit_s=None):
         limit_s = limit_s or PICTURE_S
@@ -500,7 +608,7 @@ class PuterImages:
                     for item in output.get("images", []):
                         query = urlencode({"filename": item["filename"], "subfolder": item.get("subfolder", ""), "type": item.get("type", "output")})
                         return comfy(f"/view?{query}", timeout=60)
-            time.sleep(2)
+            time.sleep(0.5)
         raise RuntimeError("the picture took longer than 15 minutes")
 
     def fix_face(self, png, reference, expression, negative, seed):
@@ -517,27 +625,34 @@ class PuterImages:
             with open(job, "w", encoding="utf-8") as handle:
                 json.dump({"folder": folder, "reference": reference, "expression": expression, "negative": negative, "seed": seed,
                            "steps": self.steps, "token": self.token or ""}, handle)
-            result = subprocess.run([sys.executable, os.path.abspath(__file__), "--face-pass", job], capture_output=True, text=True,
-                                    timeout=PICTURE_S, preexec_fn=expendable)
             out = os.path.join(folder, "out.png")
-            if result.returncode != 0 or not os.path.exists(out):
-                killed = result.returncode in (-9, 137)
-                raise RuntimeError("ran out of memory" if killed else (result.stderr or result.stdout).strip()[-200:] or f"exit {result.returncode}")
-            if "no face" in result.stdout:
+            if self.face_worker:
+                answer = self.face_worker.run(job, PICTURE_S)
+                if answer.startswith("error") or not os.path.exists(out):
+                    raise RuntimeError(answer[6:].strip() or "the face worker stopped")
+                found = answer != "no face"
+            else:
+                result = subprocess.run([sys.executable, os.path.abspath(__file__), "--face-pass", job], capture_output=True, text=True,
+                                        timeout=PICTURE_S, preexec_fn=expendable)
+                if result.returncode != 0 or not os.path.exists(out):
+                    killed = result.returncode in (-9, 137)
+                    raise RuntimeError("ran out of memory" if killed else (result.stderr or result.stdout).strip()[-200:] or f"exit {result.returncode}")
+                found = "no face" not in result.stdout
+            if not found:
                 log("picture", "no face found for the face pass; kept as drawn")
             with open(out, "rb") as handle:
                 return handle.read()
 
     def fix_face_here(self, png, reference, expression, negative, seed):
-        """SDXL redraws her face (only her face) from her real photo, and it's blended back in."""
+        """SDXL redraws her face (only her face) from her real photo, and it's blended back in.
+        Returns the picture and whether a face was found."""
         import torch
         from diffusers import StableDiffusionXLImg2ImgPipeline
         from PIL import Image, ImageDraw, ImageFilter
         image = Image.open(BytesIO(png)).convert("RGB")
         faces = faces_in(image)
         if not faces:
-            print("no face", flush=True)
-            return png
+            return png, False
         box = face_box(faces[0], image.size)
         crop = image.crop(box)
         self.face.load()
@@ -545,7 +660,7 @@ class PuterImages:
             self.face.pipe.set_ip_adapter_scale(FACE_FIX_SCALE)
             refine = StableDiffusionXLImg2ImgPipeline.from_pipe(self.face.pipe)
             redrawn = refine(prompt=face_prompt(expression), negative_prompt=negative, image=crop.resize((1024, 1024), Image.LANCZOS),
-                             ip_adapter_image=base.decode_picture(reference), strength=FACE_FIX_STRENGTH, num_inference_steps=max(20, self.steps),
+                             ip_adapter_image=base.decode_picture(reference), strength=FACE_FIX_STRENGTH, num_inference_steps=max(FACE_MIN_STEPS, self.steps),
                              guidance_scale=5.0, generator=torch.Generator("cpu").manual_seed(seed)).images[0]
         finally:
             self.face.release()
@@ -558,7 +673,7 @@ class PuterImages:
         image.paste(redrawn, box[:2], mask)
         out = BytesIO()
         image.save(out, "PNG")
-        return out.getvalue()
+        return out.getvalue(), True
 
     def generate(self, request, report=lambda stage: None):
         if not self.enabled:
@@ -581,7 +696,7 @@ class PuterImages:
         # The hard limit, once more on exactly what will be drawn.
         if base.blocked(drawn_prompt):
             raise ValueError("not something I'll draw")
-        width, height = (832, 1216) if request["width"] == request["height"] == 1024 else (request["width"], request["height"])
+        width, height = PHOTO_SIZE if request["width"] == request["height"] == 1024 else (request["width"], request["height"])
         request = {**request, "width": width, "height": height}
         report("waiting")
         with base.GPU.picture():
@@ -607,14 +722,19 @@ class PuterImages:
                     base.free_memory()
             seconds = time.time() - started
             self.draw_seconds = 0.6 * self.draw_seconds + 0.4 * seconds
-        kept = base.save_picture(self.save_dir, png, {
-            "asked": asked, "prompt": drawn_prompt, "negative_prompt": negative, "model": model, "seed": request["seed"],
-            "expression": request["expression"], "shot": plan["shot"], "at": time.strftime("%Y-%m-%d %H:%M:%S"),
-        })
-        if kept:
-            log("picture", f"kept as pictures/{kept}.png (+ .json with the prompt)")
-        return {"image": base64.b64encode(png).decode(), "mime": "image/png", "model": model, "seed": request["seed"],
+        # A JPEG is a fraction of the PNG's size and looks the same on a phone: it crosses the tunnel faster.
+        jpeg = to_jpeg(png)
+        record = {"asked": asked, "prompt": drawn_prompt, "negative_prompt": negative, "model": model, "seed": request["seed"],
+                  "expression": request["expression"], "shot": plan["shot"], "at": time.strftime("%Y-%m-%d %H:%M:%S")}
+        # Kept on the server in the background: the picture goes out without waiting for the disk (or Drive).
+        threading.Thread(target=self.keep, args=(jpeg, record), daemon=True).start()
+        return {"image": base64.b64encode(jpeg).decode(), "mime": "image/jpeg", "model": model, "seed": request["seed"],
                 "ms": int(seconds * 1000), **({"refined": drawn_prompt} if plan["refined"] else {})}
+
+    def keep(self, jpeg, record):
+        kept = base.save_picture(self.save_dir, jpeg, record, ext="jpg")
+        if kept:
+            log("picture", f"kept as pictures/{kept}.jpg (+ .json with the prompt)")
 
 
 # --- the login: Puter names to the bridge, the rest to Ollama -----------------------------------
@@ -658,6 +778,7 @@ class PuterLogin(base.Login):
             payload = base.health_payload(self.models, self.images, self.capabilities(), self.started_at)
             if self.images:
                 payload["images"].update({"runtime": (self.images.runtimes or ["none"])[0], "seconds_per_picture": int(self.images.draw_seconds),
+                                          "plan_seconds": round(self.images.plan_seconds, 1), "warm": self.images.keep_loaded,
                                           "queued": self.jobs.waiting() if self.jobs else 0})
             return self.reply_json(200, {**payload, "puter": bridge_state()})
         if job:
@@ -761,7 +882,7 @@ def main():
     parser.add_argument("--embed-model", default=base.DEFAULT_EMBED)
     parser.add_argument("--images", action="store_true")
     parser.add_argument("--no-face-fix", action="store_true")
-    parser.add_argument("--image-steps", type=int, default=20)
+    parser.add_argument("--image-steps", type=int, default=14)
     parser.add_argument("--token", default="")
     parser.add_argument("--no-tunnel", action="store_true")
     parser.add_argument("--port", type=int, default=base.PROXY_PORT)
@@ -792,7 +913,7 @@ def main():
         log("puter", "Puter didn't accept the key (PUTER_AUTH_TOKEN): only local models will answer" if local_voice else "Puter didn't accept the key (PUTER_AUTH_TOKEN)")
 
     files_dir = os.path.join(args.state_dir if args.cache_on_drive else "/content", "Qwen-Image-2.1-Turbo-Quantized")
-    images = PuterImages(args.images, hf_token, enhancer=enhancer, steps=max(4, min(50, args.image_steps)), face_fix=not args.no_face_fix, files_dir=files_dir)
+    images = PuterImages(args.images, hf_token, enhancer=enhancer, steps=max(FACE_MIN_STEPS, min(50, args.image_steps)), face_fix=not args.no_face_fix, files_dir=files_dir)
     images.save_dir = os.path.join(args.state_dir, "pictures")
     if args.images:
         if not base.gpu_gigabytes():
@@ -801,10 +922,10 @@ def main():
         else:
             threading.Thread(target=images.prepare, daemon=True).start()
 
-    base.step("2/5 Ollama, on the CPU (prompt maker, memory, local fallbacks)")
+    base.step("2/5 Ollama, on the CPU (memory, local fallbacks)")
     start_cpu_ollama()
     models = {"voice": "freya", **({"fallback": "freya-fallback"} if len(voices) > 1 or local_voice else {}), **({"vision": "freya-vision"} if eyes or local_vision else {})}
-    for name, label in ((enhancer, "Prompt maker (CPU)"), (local_voice, "Local voice (CPU)"), (local_vision, "Local eyes (CPU)")):
+    for name, label in ((enhancer if enhancer != "puter" else "", "Prompt maker (CPU)"), (local_voice, "Local voice (CPU)"), (local_vision, "Local eyes (CPU)")):
         if name:
             base.pull_in_background(name, label)
     if embed:
@@ -850,7 +971,7 @@ def main():
                 tunnel, url = base.open_tunnel(args.port)
                 print(f"\nThe tunnel dropped and came back at a new address. On your laptop run:\n\n    start.bat --remote {url} --key {token} --ctx 16384\n", flush=True)
     except KeyboardInterrupt:
-        for process in (tunnel, bridge, images.process):
+        for process in (tunnel, bridge, images.process, images.face_worker.process if images.face_worker else None):
             if process:
                 process.terminate()
         print("\nStopped.", flush=True)
@@ -861,16 +982,43 @@ def face_pass_main(job_path):
     with open(job_path, encoding="utf-8") as handle:
         job = json.load(handle)
     images = PuterImages(True, job["token"], steps=job["steps"])
-    images.face = base.FaceModel(images.token, max(20, images.steps), keep=False)
+    images.face = base.FaceModel(images.token, images.steps, keep=False)
+    if not run_face_job(images, job):
+        print("no face", flush=True)
+
+
+def run_face_job(images, job):
+    """One face pass from a job file's contents; writes out.png. Returns whether a face was found."""
     with open(os.path.join(job["folder"], "in.png"), "rb") as handle:
         png = handle.read()
-    fixed = images.fix_face_here(png, job["reference"], job["expression"], job["negative"], job["seed"])
+    fixed, found = images.fix_face_here(png, job["reference"], job["expression"], job["negative"], job["seed"])
     with open(os.path.join(job["folder"], "out.png"), "wb") as handle:
         handle.write(fixed)
+    return found
+
+
+def face_worker_main(config):
+    """FaceWorker's process: SDXL loads once, then one face pass per job path read from stdin."""
+    config = json.loads(config)
+    images = PuterImages(True, config["token"], steps=config["steps"])
+    images.face = base.FaceModel(images.token, images.steps, keep=bool(config.get("on_gpu")))
+    images.face.release = lambda: None  # the point of this process: SDXL stays loaded between pictures
+    for line in sys.stdin:
+        path = line.strip()
+        if not path:
+            continue
+        try:
+            with open(path, encoding="utf-8") as handle:
+                job = json.load(handle)
+            print("done" if run_face_job(images, job) else "no face", flush=True)
+        except Exception as error:  # noqa: BLE001 - reported to the server, which sends the picture as drawn
+            print(f"error: {type(error).__name__}: {str(error)[:200]}".replace("\n", " "), flush=True)
 
 
 if __name__ == "__main__":
     if len(sys.argv) > 2 and sys.argv[1] == "--face-pass":
         face_pass_main(sys.argv[2])
+    elif len(sys.argv) > 2 and sys.argv[1] == "--face-worker":
+        face_worker_main(sys.argv[2])
     else:
         main()

@@ -21,7 +21,7 @@ const { canonSection } = await import("../lib/canon.ts");
 const { lastWord, momentSections } = await import("../lib/moment-prompt.ts");
 const { guardText } = await import("../lib/reply-guard.ts");
 const { honestAnswer, honestySection, needsTheTruth, sincerelyAsksIfHuman, topicIsLive } = await import("../lib/honesty.ts");
-const { initialMood, moodPrompt, reactToMessage } = await import("../lib/mood.ts");
+const { arrive, initialMood, moodPrompt } = await import("../lib/mood.ts");
 const { mentionsMinors } = await import("../lib/intimacy.ts");
 
 function option(name, fallback) {
@@ -149,7 +149,8 @@ async function conversation(index) {
     const text = await nextUserMessage(person, situation, turns, turn === 0);
     if (!text || mentionsMinors(text)) return { dropped: "unusable message" };
     turns.push({ role: "user", content: text });
-    mood = reactToMessage(mood, text, now.getTime());
+    // No model reads the message here: time and her day move her, as when her reading is unavailable.
+    mood = arrive(mood, now.getTime());
     // The app answers these itself, so they aren't something to train on.
     if (sincerelyAsksIfHuman(text) || needsTheTruth(text, turns.filter((item) => item.role === "user").map((item) => item.content))) {
       turns.push({ role: "assistant", content: honestAnswer(turn) });
