@@ -43,7 +43,7 @@ Then run `npm run bakeoff` and read the sheet before you look at the key. Keep i
 
 `training/freya_puter_server.ipynb` (built by `node scripts/build-puter-notebook.mjs` from
 `serve_puter.py`, `puter_bridge.mjs` and `serve_remote.py`) is a second Colab server, separate from
-the GPU one. Her voice goes through Puter.js: Qwen3.8 27B Uncensored, then uncensored fallbacks, so
+the GPU one. Her voice goes through Puter.js: Qwen3.8 27B abliterated, then uncensored fallbacks, so
 it needs no GPU and she keeps talking while a picture draws. The GPU draws: Qwen-Image 2.1 Turbo
 (`abenzerps/Qwen-Image-2.1-Turbo-Quantized`, 8 steps) on MLX through MFLUX, set up as the model
 card says; MLX on Linux needs CUDA 13, so when it can't use Colab's GPU the same model runs as GGUF

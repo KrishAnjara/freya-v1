@@ -18,7 +18,7 @@ def test_switches_turn_each_provider_off_and_keep_the_order():
     assert serve_puter.names("", ["a", "b"]) == ["a", "b"], "empty: the defaults"
     assert serve_puter.names("none", ["a"]) == [], "none: off"
     assert serve_puter.names(" x , y ", ["a"]) == ["x", "y"]
-    assert serve_puter.PUTER_MODELS[0] == "infron:qwen/qwen3.8-27b:free", "Qwen3.8 27B Uncensored first"
+    assert serve_puter.PUTER_MODELS[0] == "infron:qwen/qwen3.8-27b-abliterated", "Qwen3.8 27B abliterated first"
 
 
 def test_the_prompt_maker_without_a_model_still_writes_a_full_phone_photo():

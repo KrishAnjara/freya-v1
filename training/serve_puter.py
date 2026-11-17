@@ -6,7 +6,7 @@ login, tunnel, picture jobs and logging, so the laptop connects to it the same w
 
     start.bat --remote https://<address>.trycloudflare.com --key <key>
 
-  - her voice: Puter.js (puter_bridge.mjs, on Node), Qwen3.8 27B Uncensored first, then the
+  - her voice: Puter.js (puter_bridge.mjs, on Node), Qwen3.8 27B abliterated first, then the
     fallback models in order; optionally a model on this machine's Ollama last. Chats go to
     Puter's cloud, never to this GPU, so she keeps talking while a picture draws.
   - her eyes (what they send): a Puter model that can see, then optionally Gemma 3 4B here.
@@ -65,8 +65,8 @@ import serve_remote as base  # noqa: E402 - the login, tunnel, jobs and prompt m
 log = base.log
 
 PUTER_MODELS = [
+    "infron:qwen/qwen3.8-27b-abliterated",                 # her voice: Qwen3.8 27B abliterated
     "infron:qwen/qwen3.8-27b:free",                        # Qwen3.8 27B Uncensored (free), 256k context
-    "infron:qwen/qwen3.8-27b-abliterated",
     "infron:qwen/qwen3.5-27b-bluestar-v3-derestricted",
     "openrouter:cognitivecomputations/dolphin-mistral-24b-venice-edition",
 ]

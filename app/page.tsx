@@ -6645,9 +6645,10 @@ function FreyaApp() {
           )}
           <div className="profile-name-row">
             <h2>FREYA, 20</h2>
-            {/* <span className={`profile-state ${offline ? "is-offline" : ""}`}> */}
+            <span className={`profile-state ${offline ? "is-offline" : ""}`}>
               {/* {offline ? "OFFLINE" : `ONLINE · ${heartLabel(mood).toUpperCase()}`} */}
-            {/* </span> */}
+              {offline ? "OFFLINE" : "ONLINE"}
+            </span>
           </div>
           <p className="profile-description">
             Hey, I&apos;m Freya. I read too much, stay up too late, and have
