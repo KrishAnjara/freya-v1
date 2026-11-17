@@ -150,7 +150,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .composer-wrap { z-index: 2; width: 100%; max-width: 910px; flex: 0 0 auto; align-self: center; padding: 10px clamp(16px, 4vw, 54px) 17px; background: linear-gradient(180deg, transparent, rgba(9, 9, 13, .74) 20%); }
 .composer { display: flex; align-items: flex-end; gap: 12px; padding: 11px 11px 11px 16px; border: 1px solid #35313f; border-radius: 11px; background: rgba(18, 17, 24, .95); box-shadow: 0 15px 42px rgba(0, 0, 0, .3), inset 0 1px rgba(255, 255, 255, .025); transition: border-color .18s ease, box-shadow .18s ease; }
 .composer:focus-within { border-color: rgba(184, 161, 232, .62); box-shadow: 0 0 0 3px rgba(164, 134, 211, .08), 0 15px 42px rgba(0, 0, 0, .3); }
-.composer textarea { min-height: 27px; max-height: 180px; flex: 1; resize: vertical; padding: 4px 0; border: 0; outline: 0; background: transparent; color: var(--text); font-size: 13px; line-height: .6; }
+.composer textarea { min-height: 27px; max-height: 180px; flex: 1; resize: vertical; padding: 4px 0; border: 0; outline: 0; background: transparent; color: var(--text); font-size: 13px; }
 .composer textarea::placeholder { color: #797482; }
 .send-button { display: grid; width: 35px; height: 35px; flex: 0 0 35px; place-items: center; border: 1px solid rgba(197, 174, 235, .34); border-radius: 7px; background: rgba(174, 148, 217, .2); color: #e4d7fa; font-size: 21px; line-height: 1; transition: transform .16s ease, background .16s ease, opacity .16s ease; }
 .send-button:disabled { cursor: not-allowed; opacity: .35; }
@@ -685,7 +685,7 @@ input, textarea, select, [contenteditable="true"] {
 
 /* Composer: a shorter input bar ------------------------------------ */
 .composer { padding: 6px 7px 6px 12px; }
-.composer textarea { min-height: 19px; max-height: 140px; padding: 2px 0; line-height: .6; }
+.composer textarea { max-height: 140px; padding: 2px 0; }
 .send-button { width: 30px; height: 30px; flex-basis: 30px; font-size: 17px; }
 .composer-wrap { padding-top: 6px; padding-bottom: 6px; }
 
