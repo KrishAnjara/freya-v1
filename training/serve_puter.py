@@ -504,6 +504,31 @@ class PuterImages:
         raise RuntimeError("the picture took longer than 15 minutes")
 
     def fix_face(self, png, reference, expression, negative, seed):
+        """
+        SDXL's face pass, in its own process: loading SDXL takes ~10 GB of RAM, and in this server's
+        process running out of memory would take her voice and the tunnel down with it. As its own
+        (expendable) process, the worst case is a picture sent without the face pass.
+        """
+        import tempfile
+        with tempfile.TemporaryDirectory() as folder:
+            job = os.path.join(folder, "job.json")
+            with open(os.path.join(folder, "in.png"), "wb") as handle:
+                handle.write(png)
+            with open(job, "w", encoding="utf-8") as handle:
+                json.dump({"folder": folder, "reference": reference, "expression": expression, "negative": negative, "seed": seed,
+                           "steps": self.steps, "token": self.token or ""}, handle)
+            result = subprocess.run([sys.executable, os.path.abspath(__file__), "--face-pass", job], capture_output=True, text=True,
+                                    timeout=PICTURE_S, preexec_fn=expendable)
+            out = os.path.join(folder, "out.png")
+            if result.returncode != 0 or not os.path.exists(out):
+                killed = result.returncode in (-9, 137)
+                raise RuntimeError("ran out of memory" if killed else (result.stderr or result.stdout).strip()[-200:] or f"exit {result.returncode}")
+            if "no face" in result.stdout:
+                log("picture", "no face found for the face pass; kept as drawn")
+            with open(out, "rb") as handle:
+                return handle.read()
+
+    def fix_face_here(self, png, reference, expression, negative, seed):
         """SDXL redraws her face (only her face) from her real photo, and it's blended back in."""
         import torch
         from diffusers import StableDiffusionXLImg2ImgPipeline
@@ -511,7 +536,7 @@ class PuterImages:
         image = Image.open(BytesIO(png)).convert("RGB")
         faces = faces_in(image)
         if not faces:
-            log("picture", "no face found for the face pass; kept as drawn")
+            print("no face", flush=True)
             return png
         box = face_box(faces[0], image.size)
         crop = image.crop(box)
@@ -831,5 +856,21 @@ def main():
         print("\nStopped.", flush=True)
 
 
+def face_pass_main(job_path):
+    """The face pass's own process (fix_face): reads the job, writes out.png."""
+    with open(job_path, encoding="utf-8") as handle:
+        job = json.load(handle)
+    images = PuterImages(True, job["token"], steps=job["steps"])
+    images.face = base.FaceModel(images.token, max(20, images.steps), keep=False)
+    with open(os.path.join(job["folder"], "in.png"), "rb") as handle:
+        png = handle.read()
+    fixed = images.fix_face_here(png, job["reference"], job["expression"], job["negative"], job["seed"])
+    with open(os.path.join(job["folder"], "out.png"), "wb") as handle:
+        handle.write(fixed)
+
+
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) > 2 and sys.argv[1] == "--face-pass":
+        face_pass_main(sys.argv[2])
+    else:
+        main()

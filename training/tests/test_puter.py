@@ -128,3 +128,22 @@ def test_her_names_go_to_puter_and_never_wait_for_the_gpu_the_rest_to_ollama(mon
     assert seen[2][3] == 0, "helpers run on the CPU"
     for server in (bridge, ollama, gateway):
         server.shutdown()
+
+
+def test_the_face_pass_runs_in_its_own_process_so_running_out_of_memory_never_takes_the_server_down(monkeypatch):
+    calls = []
+
+    class Killed:
+        returncode, stdout, stderr = -9, "", ""
+
+    def run(command, **options):
+        calls.append((command, options))
+        return Killed()
+
+    monkeypatch.setattr(serve_puter.subprocess, "run", run)
+    images = serve_puter.PuterImages(True)
+    with pytest.raises(RuntimeError, match="ran out of memory"):
+        images.fix_face(b"png", "cmVm", "smile", "two faces", 1)
+    command, options = calls[0]
+    assert command[1].endswith("serve_puter.py") and command[2] == "--face-pass"
+    assert options["preexec_fn"] is serve_puter.expendable, "the system stops it first, never the server"
