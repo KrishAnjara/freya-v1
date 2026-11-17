@@ -12,7 +12,7 @@ const lines = (text) => text.split("\n").map((line, index, all) => (index < all.
 // One switch per provider, and only the model settings that matter. Keys come from Colab Secrets
 // (the key icon on the left), never from the notebook: PUTER_AUTH_TOKEN, and HF_TOKEN if needed.
 const settings = `#@title Start FREYA's Puter server
-#@markdown **Her voice through Puter** (Qwen3.8 27B abliterated, then uncensored fallbacks). Needs the \`PUTER_AUTH_TOKEN\` secret.
+#@markdown **Her voice through Puter** (Qwen3.8 27B Uncensored, then uncensored fallbacks). Needs the \`PUTER_AUTH_TOKEN\` secret.
 PUTER_VOICE = True  #@param {type:"boolean"}
 #@markdown Puter models for her voice, in order, comma-separated. Empty = the defaults.
 PUTER_MODELS = ""  #@param {type:"string"}
@@ -75,7 +75,7 @@ export const notebook = {
       metadata: {},
       source: lines(`# FREYA's Puter server on Colab
 
-Her voice runs through **Puter.js** (Qwen3.8 27B abliterated, then uncensored fallbacks), so it needs no GPU and she keeps talking while a picture draws. The GPU draws her pictures: **Qwen-Image 2.1 Turbo** (quantized; on MLX through MFLUX, or as GGUF in ComfyUI when MLX can't use the GPU), then **SDXL** redraws her face from her real photo. Her Puter voice plans each photo. On an L4 or A100 (or High-RAM) the picture models stay loaded between pictures, which is much faster than a standard T4. Every provider has its own switch in the form below. The GPU-only server (\`freya_server.ipynb\`) is separate and unchanged.
+Her voice runs through **Puter.js** (Qwen3.8 27B Uncensored, then uncensored fallbacks), so it needs no GPU and she keeps talking while a picture draws. The GPU draws her pictures: **Qwen-Image 2.1 Turbo** (quantized; on MLX through MFLUX, or as GGUF in ComfyUI when MLX can't use the GPU), then **SDXL** redraws her face from her real photo. Her Puter voice plans each photo. On an L4 or A100 (or High-RAM) the picture models stay loaded between pictures, which is much faster than a standard T4. Every provider has its own switch in the form below. The GPU-only server (\`freya_server.ipynb\`) is separate and unchanged.
 
 1. **Puter key**: sign in at puter.com, copy your auth token (Account), and add it in Colab's **Secrets** (key icon on the left) as \`PUTER_AUTH_TOKEN\`, with notebook access on.
 2. **Runtime > Change runtime type**: an L4 or A100 GPU for pictures. With pictures off, a CPU runtime is enough.

@@ -6,7 +6,7 @@ login, tunnel, picture jobs and logging, so the laptop connects to it the same w
 
     start.bat --remote https://<address>.trycloudflare.com --key <key>
 
-  - her voice: Puter.js (puter_bridge.mjs, on Node), Qwen3.8 27B abliterated first, then the
+  - her voice: Puter.js (puter_bridge.mjs, on Node), Qwen3.8 27B Uncensored first, then the
     fallback models in order; optionally a model on this machine's Ollama last. Chats go to
     Puter's cloud, never to this GPU, so she keeps talking while a picture draws.
   - her eyes (what they send): a Puter model that can see, then optionally Gemma 3 4B here.
