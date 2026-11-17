@@ -686,7 +686,7 @@ const PENDING_PICTURES_KEY = "freya.v1.pending-pictures";
 /** How long a picture is waited for: a queue of pictures on a small GPU can take this long. */
 const PICTURE_WAIT_MS = 60 * 60_000;
 /** How long to hold a message before its tools open. */
-const HOLD_TO_OPEN_MS = 2000;
+const HOLD_TO_OPEN_MS = 1000;
 /** When this browser's settings last changed, to know whether the account's copy is newer. */
 const SETTINGS_AT_KEY = "freya.v1.settingsAt";
 /** Messages on screen at once; older ones load a page at a time. */
@@ -4459,6 +4459,8 @@ function FreyaApp() {
    */
   /** Holding a message: its tools open after HOLD_TO_OPEN_MS, unless the pointer moves or lets go. */
   function startHold(event: ReactPointerEvent, message: Message) {
+    // Holding is for touch screens. With a mouse, holding selects text as usual; right-click opens the menu.
+    if (event.pointerType === "mouse") return;
     if (selecting || event.button > 0 || message.streaming || message.command || message.deleted) return;
     if ((event.target as HTMLElement).closest("button, a, input, textarea, select, .message-tools, .attachment-list")) return;
     cancelHold();
@@ -6151,9 +6153,6 @@ function FreyaApp() {
                           toggleSelected(message.id);
                         }}
                       >
-                        {selecting && !message.deleted && (
-                          <span className="select-mark" role="checkbox" aria-checked={selectedIds.includes(message.id)} aria-label="Selected">{selectedIds.includes(message.id) ? "✓" : ""}</span>
-                        )}
                         <div className="avatar" aria-hidden="true">
                           {message.role === "assistant" ? "F" : "Y"}
                         </div>
@@ -6169,6 +6168,9 @@ function FreyaApp() {
                             <div
                               className={`message-main ${message.reaction || message.herReaction ? "has-reaction" : ""}`}
                             >
+                              {selecting && !message.deleted && (
+                                <span className="select-mark" role="checkbox" aria-checked={selectedIds.includes(message.id)} aria-label="Selected">{selectedIds.includes(message.id) ? "✓" : ""}</span>
+                              )}
                               {message.attachments &&
                                 message.attachments.length > 0 &&
                                 !message.picture && (

@@ -1287,9 +1287,13 @@ button.attachment-face:hover { border-color: rgba(176, 188, 186, .5); background
 
 
 /* --- A message's tools: hold it (2 s) or right-click; they pop in, one after another ----------- */
-.message { -webkit-touch-callout: none; }
+/* Phones: holding a message opens its menu, so no text selection or long-press menu there.
+   Laptops keep normal text selection, and right-click opens the menu. */
+@media (hover: none) and (pointer: coarse) {
+  .message { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
+}
 .message.is-holding { -webkit-user-select: none; user-select: none; }
-.message.is-holding .message-main { animation: hold-press 2s cubic-bezier(.3, 0, .2, 1) forwards; }
+.message.is-holding .message-main { animation: hold-press 1s cubic-bezier(.3, 0, .2, 1) forwards; }
 @keyframes hold-press {
   from { transform: scale(1); box-shadow: 0 0 0 0 hsl(var(--heart-hue) var(--heart-sat) 60% / 0); }
   to { transform: scale(.985); box-shadow: 0 0 0 2px hsl(var(--heart-hue) var(--heart-sat) 62% / .45); }
@@ -1313,8 +1317,9 @@ button.attachment-face:hover { border-color: rgba(176, 188, 186, .5); background
 .message.is-selecting { position: relative; cursor: pointer; }
 .message.is-selecting .message-main { transition: background .15s ease, box-shadow .15s ease; }
 .message.is-selected .message-main { background: hsl(var(--heart-hue) var(--heart-sat) 50% / .1); box-shadow: 0 0 0 1px hsl(var(--heart-hue) var(--heart-sat) 60% / .4); }
-.select-mark { position: absolute; top: 50%; left: -26px; display: grid; width: 18px; height: 18px; place-items: center; transform: translateY(-50%); border: 1px solid var(--line); border-radius: 50%; color: #fff; font-size: 11px; animation: tool-pop .2s ease both; }
-.message.user .select-mark { right: -26px; left: auto; }
+/* The tick sits inside the bubble's corner, so it never spills out of the chat box. */
+.select-mark { position: absolute; z-index: 3; top: 6px; right: 6px; display: grid; width: 18px; height: 18px; place-items: center; border: 1px solid var(--line); border-radius: 50%; background: rgba(14, 14, 20, .85); color: #fff; font-size: 11px; pointer-events: none; animation: tool-pop .2s ease both; }
+.message.is-selecting .message-main { padding-right: 30px; }
 .message.is-selected .select-mark { border-color: transparent; background: hsl(var(--heart-hue) var(--heart-sat) 55%); }
 .selection-bar { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin: 0 0 12px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; background: rgba(14, 14, 20, .96); box-shadow: 0 8px 24px rgba(0, 0, 0, .35); animation: tools-in .2s ease both; font: 11px var(--mono); }
 .selection-bar span { margin-right: auto; color: var(--muted); letter-spacing: .06em; }

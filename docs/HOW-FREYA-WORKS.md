@@ -141,7 +141,7 @@ She **won't** text first:
 
 ## The chat screen
 
-- **Message actions**: hold a message for 2 seconds (it glows as you hold) or right-click it. The tools pop in one by one: select, delete, reply, react, copy, edit, "not her". Tap anywhere else or press Esc to close them.
+- **Message actions**: on a phone, hold a message for 1 second (it glows as you hold; text selection and the browser's long-press menu are off there). On a laptop, right-click it, and selecting text works as usual. The tools pop in one by one: select, delete, reply, react, copy, edit, "not her". Tap anywhere else or press Esc to close them.
 - **Select**: the ☐ button in the tools. Tap more messages to add them, then copy them all or delete them (for you, or for everyone if they're all yours).
 - On wide screens her canvas is on the **left** and the chat on the right.
 - The chat shows the latest 120 messages; "earlier messages" loads more.
