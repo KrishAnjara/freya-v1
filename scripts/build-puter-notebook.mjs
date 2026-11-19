@@ -16,8 +16,8 @@ const settings = `#@title Start FREYA's Puter server
 PUTER_VOICE = True  #@param {type:"boolean"}
 #@markdown Puter models for her voice, in order, comma-separated. Empty = the defaults.
 PUTER_MODELS = ""  #@param {type:"string"}
-#@markdown **Her eyes through Puter**: reads the pictures you send.
-PUTER_VISION = True  #@param {type:"boolean"}
+#@markdown **Her eyes through Puter**: off by default. Pictures you send are read by Gemma 3 here (Local eyes) or Gemini in the app; her Puter voice only gets the description.
+PUTER_VISION = False  #@param {type:"boolean"}
 #@markdown **Local voice** on this machine's CPU, after every Puter model (slow; a last resort).
 LOCAL_VOICE = False  #@param {type:"boolean"}
 LOCAL_VOICE_MODEL = "huihui_ai/qwen3-abliterated:4b"  #@param {type:"string"}

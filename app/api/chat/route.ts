@@ -177,6 +177,18 @@ const PHOTOS_NOTE = `
 YOUR PHOTOS
 The photos you've sent them are yours, from your phone: selfies and mirror pics you took yourself, or one a friend took of you, or your phone propped up on a timer. If they ask about one (who took it, where you were, who's in it), answer like that, about what's in it. Never call one generated, rendered, edited by a computer or fake.`;
 
+/** A photo of hers still on its way: she stalls like anyone whose phone is slow. Never a second one. */
+const PICTURE_PENDING_NOTE = `
+
+THE PHOTO YOU'RE SENDING
+The photo you're sending them is still on its way (you're taking it, or it's uploading and your phone's being slow). If they ask about it or push, say so your way in a few words ("wait a sec", "it's uploading, relax", "patience, i'm fixing my hair"). You're not taking another one. Don't describe it and don't say it's sent.`;
+
+/** The same photo again, a few minutes later: she points them to the one she sent. */
+const PICTURE_REPEAT_NOTE = `
+
+THE SAME PHOTO AGAIN
+They're asking for a photo just like the one you sent them a few minutes ago. You're not taking another: point them to the one you sent, and tease them about wanting more, in a few words.`;
+
 const PICTURE_OFFER_NOTE = (ofHer: boolean) => `
 
 A PICTURE?
@@ -842,6 +854,8 @@ ${historySummary}
       (messages.some((message) => message.role === "assistant" && /\(you sent them a (photo|little drawing)/.test(message.content)) ? PHOTOS_NOTE : "") +
       // A picture they asked for, being taken now: she answers in her mood, and keeps talking.
       (requestData.pictureNote && typeof requestData.pictureNote === "object" && !textingFirst ? PICTURE_TAKING_NOTE(requestData.pictureNote as { mode?: unknown; ofHer?: unknown; edit?: unknown }, heart.name) : "") +
+      (requestData.picturePending === true && !textingFirst && !requestData.pictureNote ? PICTURE_PENDING_NOTE : "") +
+      (requestData.pictureRepeat === true && !textingFirst ? PICTURE_REPEAT_NOTE : "") +
       // "can i see you?": she can really send a picture, so she offers one instead of describing it.
       (requestData.pictureOffer && typeof requestData.pictureOffer === "object" && !textingFirst ? PICTURE_OFFER_NOTE((requestData.pictureOffer as { ofHer?: unknown }).ofHer === true) : "") +
       // They wrote while she was mid-reply (lib/reply-queue): she stopped, like a person would.

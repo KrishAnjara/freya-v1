@@ -176,6 +176,24 @@ export const sexualEdit = (text: string) => UNDRESS.test(text);
 const YES = /^(?:y|ya|yah|yea|yeah|yep|yup|yes|yess+|sure|ok|okay|k|kk|pls|please|plz|go on|go for it|do it|send it|send|ofc|of course|absolutely|definitely|why not|i'?d love that|love to|yes please|please do|👍|🙏|😍|🥺)\b[\s\S]{0,40}$/i;
 const NO = /^(?:n|no|nah|nope|not now|later|never ?mind|nvm|it'?s fine|don'?t|no thanks|no thank you|maybe later)\b/i;
 
+/** Lowercase words of four letters or more, for comparing what two picture requests were for. */
+const pictureWords = (text: string) => new Set((text.toLowerCase().match(/[a-z]{4,}/g) ?? []).filter((word) => !["photo", "picture", "selfie", "send", "with", "your", "yourself", "casual", "like", "text", "friend", "quick", "please", "image"].includes(word)));
+
+/**
+ * Whether a new request is for the same picture as one just made: the same words, or nothing new
+ * at all ("send it", "send the pic quick"). Then no second picture is made.
+ */
+export function samePicture(a: string, b: string) {
+  const left = pictureWords(a);
+  const right = pictureWords(b);
+  // Nothing new asked for ("send it", "the pic, quick"): the same one. Otherwise, the same only when
+  // almost everything in the new request was in the last ("a red dress" is something new).
+  if (!right.size) return true;
+  let shared = 0;
+  for (const word of right) if (left.has(word)) shared += 1;
+  return shared / right.size >= 0.8;
+}
+
 /** Their answer to "want me to send one?". Null when it's neither. */
 export function answersOffer(text: string): "yes" | "no" | null {
   const clean = text.trim().toLowerCase();

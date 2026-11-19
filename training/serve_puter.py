@@ -67,7 +67,9 @@ log = base.log
 PUTER_MODELS = [
     "infron:qwen/qwen3.8-27b:free",                        # Qwen3.8 27B Uncensored (free), 256k context
 ]
-PUTER_VISION = ["alibaba:qwen/qwen3-vl-plus", "alibaba:qwen/qwen3.8-27b"]
+#: Pictures are never read through Puter: Gemma 3 here reads them (LOCAL_VISION), and the app falls back
+#: to Gemini. Her Puter voice only ever gets the description. A model named with --vision-models brings Puter back.
+PUTER_VISION = []
 LOCAL_VISION = "gemma3:4b"
 #: The prompt maker: her Puter voice, through the bridge. A model name here means a CPU model instead.
 ENHANCER = "puter"

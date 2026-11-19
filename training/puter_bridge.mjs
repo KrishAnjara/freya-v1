@@ -24,7 +24,7 @@ const PORT = Number(env.FREYA_BRIDGE_PORT || 11500);
 const OLLAMA = (env.OLLAMA_URL || "http://127.0.0.1:11434").replace(/\/+$/, "");
 const list = (value, fallback) => { try { const parsed = JSON.parse(value || ""); return Array.isArray(parsed) ? parsed.filter((item) => typeof item === "string" && item) : fallback; } catch { return fallback; } };
 const VOICES = list(env.FREYA_PUTER_MODELS, ["infron:qwen/qwen3.8-27b:free"]);
-const EYES = list(env.FREYA_PUTER_VISION, ["alibaba:qwen/qwen3-vl-plus"]);
+const EYES = list(env.FREYA_PUTER_VISION, []);
 /** This server's own Ollama, as the last voice and the last eyes: "" switches it off. */
 const LOCAL_VOICE = env.FREYA_LOCAL_VOICE || "";
 const LOCAL_EYES = env.FREYA_LOCAL_VISION || "";

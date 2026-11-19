@@ -197,7 +197,7 @@ import {
   type VisualizationInfo,
 } from "@/app/components/MediaCards";
 import { commandHints, parseCommand } from "@/lib/composer-commands";
-import { answersOffer, editIntent, pictureIntent, sexualEdit } from "@/lib/picture-intent";
+import { answersOffer, editIntent, pictureIntent, samePicture, sexualEdit } from "@/lib/picture-intent";
 import { planEnqueue, type QueueJob } from "@/lib/reply-queue";
 import { FORM_POINTS, validateSpec, type VisualSpec } from "@/lib/visualize";
 import { cloudForSpec } from "@/lib/visualize-client";
@@ -1213,6 +1213,15 @@ function FreyaApp() {
   const bondRef = useRef<Bond>(bond);
   /** A picture they asked for, and how she answers it (her mood decides), tied to their message. */
   const pictureAskRef = useRef<{ prompt: string; ofHer: boolean; mode: "send" | "negotiate"; from?: Message; messageId?: string; theirs?: AttachmentMeta } | null>(null);
+  /**
+   * Pictures being made right now (one per card) and ones she sent in the last few minutes. A request
+   * while one is on its way, or for the same picture again, doesn't start another: she tells them to
+   * wait, or points them to the one she sent.
+   */
+  const picturesInFlightRef = useRef(new Map<string, { conversationId: string; prompt: string }>());
+  const recentPicturesRef = useRef<{ conversationId: string; prompt: string; at: number }[]>([]);
+  /** This message asked for the same picture she just sent: tied to it, like the offer below. */
+  const pictureRepeatRef = useRef<{ messageId?: string } | null>(null);
   /** "can i see you?" was asked: she offers, and a yes makes the picture (lib/picture-intent). */
   const pictureOfferRef = useRef<{
     subject: string;
@@ -3674,6 +3683,12 @@ function FreyaApp() {
           ...(pictureAskRef.current && !initiative && pictureAskRef.current.messageId === target.id
             ? { pictureNote: { mode: pictureAskRef.current.mode, ofHer: pictureAskRef.current.ofHer, ...(pictureAskRef.current.theirs ? { edit: true } : {}) } }
             : {}),
+          // A picture of hers is still on its way: asked about it, she stalls in her own words.
+          ...(!initiative && [...picturesInFlightRef.current.values()].some((item) => item.conversationId === job.conversationId) && !(pictureAskRef.current?.messageId === target.id)
+            ? { picturePending: true }
+            : {}),
+          // The same picture she sent a few minutes ago: she points them to it instead of another.
+          ...(!initiative && pictureRepeatRef.current?.messageId === target.id ? { pictureRepeat: true } : {}),
           // They may be asking for a picture: she offers one rather than describing it.
           ...(pictureOfferRef.current &&
           !initiative &&
@@ -3954,12 +3969,20 @@ function FreyaApp() {
         // mood (happy, playful or horny, she's up for it; otherwise she makes them work for it a
         // little, then gives in), and the picture is made meanwhile and sent when it's ready.
         const willing = ["horny", "playful", "happy"].includes(moodRef.current.name);
-        pictureAskRef.current = {
-          prompt: intent.ofHer ? `a photo of you, ${intent.subject}` : intent.subject,
-          ofHer: intent.ofHer,
-          mode: willing ? "send" : "negotiate",
-          ...(intent.followUp && lastPicture ? { from: lastPicture } : {}),
-        };
+        const prompt = intent.ofHer ? `a photo of you, ${intent.subject}` : intent.subject;
+        const here = activeIdRef.current;
+        const waiting = [...picturesInFlightRef.current.values()].some((item) => item.conversationId === here);
+        const justSent = !intent.followUp && recentPicturesRef.current.some((item) => item.conversationId === here && Date.now() - item.at < 15 * 60_000 && samePicture(item.prompt, prompt));
+        // One already on its way: no second one (she tells them to wait, from picturePending below).
+        // The same picture she just sent: none either; she points them to it.
+        if (justSent) pictureRepeatRef.current = {};
+        else if (!waiting)
+          pictureAskRef.current = {
+            prompt,
+            ofHer: intent.ofHer,
+            mode: willing ? "send" : "negotiate",
+            ...(intent.followUp && lastPicture ? { from: lastPicture } : {}),
+          };
       }
       pictureOfferRef.current =
         intent?.kind === "unclear"
@@ -4001,6 +4024,8 @@ function FreyaApp() {
       : fileMessages.pop()!;
     if (pictureOfferRef.current && !pictureOfferRef.current.messageId)
       pictureOfferRef.current.messageId = message.id;
+    if (pictureRepeatRef.current && !pictureRepeatRef.current.messageId)
+      pictureRepeatRef.current.messageId = message.id;
     // The picture they asked for: tied to this message, and started in the background now.
     if (pictureAskRef.current && !pictureAskRef.current.messageId) {
       const ask = { ...pictureAskRef.current, messageId: message.id };
@@ -4291,6 +4316,7 @@ function FreyaApp() {
           },
         });
     const ticket: PendingPicture = { conversationId, cardId, quiet, ...(askedBy ? { askedBy } : {}), fullPrompt, at: Date.now() };
+    picturesInFlightRef.current.set(cardId, { conversationId, prompt: fullPrompt });
     await completePicture(ticket, async () => {
       // Started as a job on her image server (it can take minutes): checked on until it's done, and
       // remembered, so a refresh picks it up again (resumePictures).
@@ -4372,6 +4398,7 @@ function FreyaApp() {
         typeof payload.data === "string" &&
         typeof payload.mime === "string"
       ) {
+        recentPicturesRef.current = [{ conversationId: ticket.conversationId, prompt: ticket.fullPrompt, at: Date.now() }, ...recentPicturesRef.current].slice(0, 6);
         const mime = payload.mime;
         const bytes = Uint8Array.from(atob(payload.data), (character) =>
           character.charCodeAt(0),
@@ -4433,6 +4460,7 @@ function FreyaApp() {
       }
     } finally {
       if (ticket.job) forgetPendingPicture(ticket.job);
+      picturesInFlightRef.current.delete(ticket.cardId);
       if (askedBy && pictureAskRef.current?.messageId === askedBy) pictureAskRef.current = null;
     }
   }

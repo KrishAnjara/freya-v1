@@ -6,6 +6,7 @@
 //   freya server URL KEY     her model runs on a server, this machine runs none; starts the app
 //   freya local              her model runs on this machine; starts the app
 //   freya start              starts the app
+//   freya long               a 70-message test conversation, checking every behaviour
 //   freya check              tests her server, chat speed, pictures and behaviour (freya check --quick: no pictures)
 //
 // On Windows that's freya.bat (double-click for the menu, or .\freya in PowerShell).
@@ -90,6 +91,10 @@ if (command === "on" || command === "off") {
   start("--local", ...[first, second, ...rest].filter(Boolean));
 } else if (command === "start") {
   start(...[first, second, ...rest].filter(Boolean));
+} else if (command === "long") {
+  // A 70-message conversation through her real chat route, checking each behaviour (scripts/check-long.mjs).
+  const tsx = join(root, "node_modules", "tsx", "dist", "cli.mjs");
+  process.exit(spawnSync(process.execPath, [tsx, join(root, "scripts", "check-long.mjs"), ...[first, second, ...rest].filter(Boolean)], { cwd: root, stdio: "inherit" }).status ?? 1);
 } else if (command === "check") {
   // The live check runs TypeScript (her chat route), so it goes through tsx.
   const tsx = join(root, "node_modules", "tsx", "dist", "cli.mjs");

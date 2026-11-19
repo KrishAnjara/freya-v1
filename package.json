@@ -19,7 +19,8 @@
     "train:corpus": "tsx scripts/make-corpus.mjs",
     "setup": "node scripts/setup.mjs",
     "doctor": "node scripts/setup.mjs --check",
-    "check:live": "tsx scripts/check-live.mjs"
+    "check:live": "tsx scripts/check-live.mjs",
+    "check:long": "tsx scripts/check-long.mjs"
   },
   "dependencies": {
     "@mediapipe/tasks-vision": "1.1.1",
