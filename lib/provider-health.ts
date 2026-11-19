@@ -45,10 +45,14 @@ export function markFailure(key: string, status?: number, retryAfterSeconds?: nu
 /**
  * Records any failure: the cooldown (a rejected key counts as 401 whatever status it came with;
  * xAI answers a bad key with 400) and the reason, for logs and later "cooling down" messages.
+ * `onlyWhenDown`: no cooldown unless it's really gone. For her own server, where a model error on
+ * one message says nothing about the next and there's nothing else to go to: a cooldown there turned
+ * one failed reply into every reply failing for the next 45 seconds.
  */
-export function recordFailure(key: string, error: unknown, now = Date.now()) {
+export function recordFailure(key: string, error: unknown, now = Date.now(), { onlyWhenDown = false } = {}) {
   reasons.set(key, describeFailure(error));
   if (isDown(error)) gone.add(key); else gone.delete(key);
+  if (onlyWhenDown && !isDown(error)) { cooldowns.delete(key); return; }
   if (error instanceof ProviderHttpError) markFailure(key, error.auth ? 401 : error.status, error.retryAfterSeconds, now);
   else markFailure(key, undefined, undefined, now);
 }

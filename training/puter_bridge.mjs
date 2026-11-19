@@ -9,8 +9,11 @@
 //   GET  /bridge     state: signed in to Puter, which models answer (no secrets)
 //
 // The models and switches come from serve_puter.py through the environment. Each one is tried in
-// turn until one answers; once she has started answering, a failure ends the reply instead of
-// splicing in another model's. Logs say which model answered or failed, never what was said.
+// turn until one answers (a Puter model that fails, or answers with nothing but "error", gets one
+// more go first: the free models drop the odd request); once she has started answering, a failure
+// ends the reply instead of splicing in another model's. When none answers, it says 503 (up, but
+// failing), never 502, which the app reads as the server being gone. Logs say which model answered
+// or failed, never what was said.
 // Needs Node 24+ and @heyputer/puter.js (serve_puter.py installs both) and PUTER_AUTH_TOKEN.
 import http from "node:http";
 import { createRequire } from "node:module";
@@ -32,6 +35,14 @@ const LOCAL_EYES = env.FREYA_LOCAL_VISION || "";
 // A model that hasn't said a word in this long is stuck: the next one takes over. Her usual first word
 // comes in 1-3 s, so this is generous; 90 s made a stuck model hold a reply for a minute and a half.
 const FIRST_WORD_MS = Number(env.FREYA_FIRST_WORD_MS || 30_000);
+/** All the tries for one reply fit in this, inside the minute the app waits for a first word. */
+const CHAIN_MS = Number(env.FREYA_CHAIN_MS || 55_000);
+/** Before a second go: a moment, or longer when Puter said it was rate-limited or busy. */
+const RETRY_PAUSE_MS = 1200;
+const BUSY_PAUSE_MS = 4000;
+const BUSY = /rate.?limit|too many|429|busy|overloaded|capacity/i;
+/** A whole reply that's only this is Puter failing, not her talking. */
+const JUNK = /^\W*(error|null|undefined|\[object object\])\W*$/i;
 
 const log = (area, message) => console.log(`[${new Date().toTimeString().slice(0, 8)}] ${area.padEnd(8)} ${message}`);
 const puter = init(env.PUTER_AUTH_TOKEN || "");
@@ -144,40 +155,85 @@ function chainFor(name, body) {
     return options;
   }
   const voices = name === "freya-fallback" ? state.voices.slice(1) : state.voices;
-  for (const model of voices) options.push({ label: model, run: (signal) => fromPuter(model, body, signal, "inline") });
+  for (const model of voices) options.push({ label: model, retry: true, run: (signal) => fromPuter(model, body, signal, "inline") });
   if (LOCAL_VOICE) options.push({ label: `local ${LOCAL_VOICE}`, run: (signal) => fromOllama(LOCAL_VOICE, body, signal) });
   return options;
 }
 
+const pause = (ms, signal) => new Promise((resolve) => {
+  const timer = setTimeout(resolve, ms);
+  signal.addEventListener("abort", () => { clearTimeout(timer); resolve(); }, { once: true });
+});
+
+/**
+ * One go at one model. The opening is held back until it's clearly more than a failure word, so a
+ * reply of just "error" (or nothing) is a failure that can be tried again, not something she says.
+ * `progress.emitted` counts what has gone out: after that, it can't be tried again.
+ */
+async function* attempt(option, windowMs, clientSignal, progress) {
+  const controller = new AbortController();
+  let timedOut = false;
+  const stop = () => controller.abort();
+  clientSignal.addEventListener("abort", stop, { once: true });
+  const timer = setTimeout(() => { timedOut = true; controller.abort(); }, windowMs);
+  let held = [];
+  let opening = "";
+  try {
+    for await (const piece of option.run(controller.signal)) {
+      clearTimeout(timer);
+      if (held) {
+        held.push(piece);
+        opening += piece.content || "";
+        if (opening.replace(/\s/g, "").length < 12) continue;
+        const release = held;
+        held = null;
+        for (const item of release) { progress.emitted += (item.content || "").length; yield item; }
+        continue;
+      }
+      progress.emitted += (piece.content || "").length;
+      yield piece;
+    }
+    if (timedOut) throw new Error(`no answer in ${Math.round(windowMs / 1000)} s`);
+    if (held) {
+      if (!opening.trim()) throw new Error("an empty reply");
+      if (JUNK.test(opening)) throw new Error(`a reply of just "${opening.trim().slice(0, 24)}"`);
+      for (const item of held) { progress.emitted += (item.content || "").length; yield item; }
+    }
+  } catch (error) {
+    if (timedOut && !clientSignal.aborted) throw new Error(`no answer in ${Math.round(windowMs / 1000)} s`);
+    throw error;
+  } finally {
+    clearTimeout(timer);
+    clientSignal.removeEventListener("abort", stop);
+  }
+}
+
 /** Walks the chain: the first model that answers carries the whole reply. */
 async function* answer(name, body, clientSignal) {
+  const started = Date.now();
   let lastError = new Error("no model is set up to answer");
   for (const option of chainFor(name, body)) {
-    const controller = new AbortController();
-    const stop = () => controller.abort();
-    clientSignal.addEventListener("abort", stop, { once: true });
-    const timer = setTimeout(stop, FIRST_WORD_MS);
-    const started = Date.now();
-    let emitted = 0;
-    try {
-      for await (const piece of option.run(controller.signal)) {
-        if (!emitted) clearTimeout(timer);
-        emitted += (piece.content || "").length;
-        yield piece;
+    for (let go = 0; go < (option.retry ? 2 : 1); go += 1) {
+      if (go) {
+        await pause(BUSY.test(reason(lastError)) ? BUSY_PAUSE_MS : RETRY_PAUSE_MS, clientSignal);
+        if (clientSignal.aborted) throw lastError;
       }
-      if (!emitted) throw new Error("an empty reply");
-      state.lastAnswer = option.label;
-      log("chat", `${name}: ${option.label} answered in ${((Date.now() - started) / 1000).toFixed(1)} s (${emitted} chars)`);
-      return;
-    } catch (error) {
-      if (clientSignal.aborted) throw error;
-      if (emitted) { log("chat", `${name}: ${option.label} broke off mid-reply: ${reason(error)}`); throw error; }
-      lastError = controller.signal.aborted ? new Error(`no answer in ${FIRST_WORD_MS / 1000} s`) : error;
-      state.lastFailure = `${option.label}: ${reason(lastError)}`;
-      log("chat", `${name}: ${option.label} failed (${reason(lastError)}); trying the next`);
-    } finally {
-      clearTimeout(timer);
-      clientSignal.removeEventListener("abort", stop);
+      const left = CHAIN_MS - (Date.now() - started);
+      if (left < 5000) throw lastError;
+      const progress = { emitted: 0 };
+      const begun = Date.now();
+      try {
+        yield* attempt(option, Math.min(FIRST_WORD_MS, left), clientSignal, progress);
+        state.lastAnswer = option.label;
+        log("chat", `${name}: ${option.label}${go ? " (second go)" : ""} answered in ${((Date.now() - begun) / 1000).toFixed(1)} s (${progress.emitted} chars)`);
+        return;
+      } catch (error) {
+        if (clientSignal.aborted) throw error;
+        if (progress.emitted) { log("chat", `${name}: ${option.label} broke off mid-reply: ${reason(error)}`); throw error; }
+        lastError = error;
+        state.lastFailure = `${option.label}: ${reason(error)}`;
+        log("chat", `${name}: ${option.label} failed (${reason(error)}); ${option.retry && !go ? "one more go" : "trying the next"}`);
+      }
     }
   }
   throw lastError;
@@ -212,7 +268,7 @@ async function chat(request, response, body) {
       for await (const piece of answer(name, body, client.signal)) { content += piece.content || ""; thinking += piece.thinking || ""; }
       return json(response, 200, JSON.parse(line({ content, ...(thinking ? { thinking } : {}) }, true, { done_reason: "stop", total_duration: (Date.now() - started) * 1e6 })));
     } catch (error) {
-      return json(response, 502, { error: `every voice on this server failed: ${reason(error)}` });
+      return json(response, 503, { error: `every voice on this server failed: ${reason(error)}` });
     }
   }
   const pieces = answer(name, body, client.signal);
@@ -220,7 +276,8 @@ async function chat(request, response, body) {
   try {
     first = await pieces.next();
   } catch (error) {
-    return json(response, 502, { error: `every voice on this server failed: ${reason(error)}` });
+    // 503: the server is up and her model failed. (502 tells the app the server is gone.)
+    return json(response, 503, { error: `every voice on this server failed: ${reason(error)}` });
   }
   response.writeHead(200, { "Content-Type": "application/x-ndjson" });
   try {

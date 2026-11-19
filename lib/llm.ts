@@ -100,10 +100,13 @@ function ollamaHeadersFor(target: OllamaTarget): Record<string, string> {
   return { "Content-Type": "application/json", ...(target.key ? { Authorization: `Bearer ${target.key}` } : {}) };
 }
 
-/** A remote model that just failed is skipped for a while instead of being waited on again. */
+/**
+ * A model that just failed. The laptop standing in is skipped for a while instead of being waited on
+ * again; her server only when it's really gone (a model error there: the next message tries it again).
+ */
 function noteOllamaFailure(target: OllamaTarget, error: unknown, signal?: AbortSignal) {
   if (!target.health || signal?.aborted) return;
-  recordFailure(target.health, error);
+  recordFailure(target.health, error, Date.now(), { onlyWhenDown: !target.local });
   noteFailure(target.health, error);
 }
 
@@ -374,7 +377,7 @@ async function voiceChat(system: string, messages: ChatMessage[], signal?: Abort
     markSuccess(VOICE_SERVER_HEALTH);
     return text.trim();
   } catch (error) {
-    if (!signal?.aborted) { recordFailure(VOICE_SERVER_HEALTH, error); noteFailure(VOICE_SERVER_HEALTH, error); }
+    if (!signal?.aborted) { recordFailure(VOICE_SERVER_HEALTH, error, Date.now(), { onlyWhenDown: true }); noteFailure(VOICE_SERVER_HEALTH, error); }
     throw error;
   }
 }
@@ -400,7 +403,7 @@ async function* voiceStream(system: string, messages: ChatMessage[], signal?: Ab
     }
     markSuccess(VOICE_SERVER_HEALTH);
   } catch (error) {
-    if (!signal?.aborted) { recordFailure(VOICE_SERVER_HEALTH, error); noteFailure(VOICE_SERVER_HEALTH, error); }
+    if (!signal?.aborted) { recordFailure(VOICE_SERVER_HEALTH, error, Date.now(), { onlyWhenDown: true }); noteFailure(VOICE_SERVER_HEALTH, error); }
     throw error;
   }
 }

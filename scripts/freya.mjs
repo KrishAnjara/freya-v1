@@ -102,7 +102,7 @@ if (command === "on" || command === "off") {
 } else if (command === "status" || !process.stdin.isTTY) {
   list();
 } else if (command) {
-  console.log("  Try: freya, freya on swearing, freya off swearing, freya status, freya server URL KEY, freya local, freya start, freya check");
+  console.log("  Try: freya, freya on swearing, freya off swearing, freya status, freya server URL KEY, freya local, freya start, freya check, freya long");
   process.exit(1);
 } else {
   const prompt = createInterface({ input: process.stdin, output: process.stdout });

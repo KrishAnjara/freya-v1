@@ -4,7 +4,9 @@
  *   Feelings.  Fourteen of them, each 0..1, all at once: she can be amused and a bit stung, glad
  *              for them and a little jealous. Each fades at its own pace back to where she rests
  *              (amusement in minutes, hurt over hours), and some build on their own: missing them
- *              grows while they're away.
+ *              grows while they're away. A fast chat doesn't pile them up: each new message lets
+ *              the last one's stir settle a little, more of the same lands softer, and she only
+ *              holds so much at once (the strongest crowd out the rest).
  *   Body.      Energy, from her day (asleep, a lecture, a late shift), the day's temper and how
  *              long they've been talking. Low energy means shorter, lazier replies.
  *   Mood.      A slow average of how good or bad (valence) and how lively (arousal) she's felt over
@@ -107,6 +109,17 @@ const MAX_RESIDUE = 4;
 const MAX_THOUGHTS = 3;
 /** A new sitting starts after this long. */
 const CHAT_ENDS_AFTER_MS = 30 * MINUTE;
+/**
+ * Each new message is a beat of its own: what the last one stirred up gives way a little as her
+ * attention moves on, even when it came seconds later. A message counts as at least this much time
+ * for that (amusement fades a fifth of the way, hurt hardly at all).
+ */
+const BEAT_MS = 4 * MINUTE;
+/**
+ * How much feeling she holds at once, above where she rests, all feelings together. Past it, the
+ * strongest crowd out the rest: nobody is at once as curious, amused, happy and excited as they can be.
+ */
+const HEART_ROOM = 1.5;
 /** Gone this long: back to rest, nothing left from before but what's on her mind and missing them. */
 export const MOOD_RESET_AFTER_MS = 5 * 24 * HOUR;
 
@@ -221,6 +234,26 @@ function longingFor(silentMs: number, attachment: number) {
 export type TimeContext = { /** 0..1 how much she likes them (the relationship's affection). */ attachment?: number };
 
 /**
+ * Each feeling `elapsed` closer to where she'd rest right now: her day pulls on that, what's still
+ * on her mind keeps its feeling simmering, and missing them grows the longer they're quiet.
+ */
+function settle(state: HeartState, residue: Residue[], elapsed: number, now: number, attachment = 0.5): Feelings {
+  const silent = now - state.lastUserAt;
+  const pull = dayPull(now);
+  const simmer: Partial<Feelings> = {};
+  for (const item of residue) simmer[item.feeling] = Math.max(simmer[item.feeling] ?? 0, 0.3 * item.weight);
+  const feelings = blank();
+  for (const name of FEELINGS) {
+    let target = clamp(TEMPERAMENT.rest[name] + (pull[name] ?? 0) + (simmer[name] ?? 0));
+    if (name === "longing" && state.talked > 0) target = Math.max(target, longingFor(silent, attachment));
+    if (name === "desire") target = 0;
+    const keep = Math.pow(0.5, elapsed / (TEMPERAMENT.halfLife[name] * MINUTE));
+    feelings[name] = clamp(target + (state.feelings[name] - target) * keep);
+  }
+  return feelings;
+}
+
+/**
  * Everything time does between messages: each feeling fades toward where she'd rest right now (her
  * day pulls on that, and what's still on her mind keeps its feeling simmering), missing them grows,
  * what's on her mind fades, her body follows her day, and her slow mood drifts. A small thing that
@@ -234,21 +267,11 @@ export function passTime(input: HeartState, now = Date.now(), context: TimeConte
     state = { ...state, feelings: { ...TEMPERAMENT.rest }, residue: state.residue.filter((item) => item.weight > 0.3).slice(0, 1), thoughts: [] };
   }
   const silent = now - state.lastUserAt;
-  const pull = dayPull(now);
   // What's on her mind fades over a day or so (her own day's things faster).
   const residue = state.residue
     .map((item) => ({ ...item, weight: item.weight * Math.pow(0.5, elapsed / ((item.own ? 6 : 18) * HOUR)) }))
     .filter((item) => item.weight >= 0.12);
-  const simmer: Partial<Feelings> = {};
-  for (const item of residue) simmer[item.feeling] = Math.max(simmer[item.feeling] ?? 0, 0.3 * item.weight);
-  const feelings = blank();
-  for (const name of FEELINGS) {
-    let target = clamp(TEMPERAMENT.rest[name] + (pull[name] ?? 0) + (simmer[name] ?? 0));
-    if (name === "longing" && state.talked > 0) target = Math.max(target, longingFor(silent, context.attachment ?? 0.5));
-    if (name === "desire") target = 0;
-    const keep = Math.pow(0.5, elapsed / (TEMPERAMENT.halfLife[name] * MINUTE));
-    feelings[name] = clamp(target + (state.feelings[name] - target) * keep);
-  }
+  const feelings = settle(state, residue, elapsed, now, context.attachment);
   const body = bodyAt(state, now);
   // The slow mood follows how she's felt, over about three hours.
   const present = core(feelings);
@@ -272,14 +295,20 @@ export function passTime(input: HeartState, now = Date.now(), context: TimeConte
   return label(next, now);
 }
 
-/** A message has just arrived from them. Coming back after a while, she's glad; woken, groggy. Idempotent within a few seconds. */
+/**
+ * A message has just arrived from them. Coming back after a while, she's glad; woken, groggy. Moments
+ * after the last one, what that stirred up still gives way a little (BEAT_MS): her attention has moved
+ * on to this one. Idempotent within a few seconds.
+ */
 export function arrive(state: HeartState, now = Date.now()): HeartState {
   if (now - state.lastUserAt < 3000 && state.talked > 0) return state;
   const gap = now - state.lastUserAt;
   const newChat = gap >= CHAT_ENDS_AFTER_MS || state.chatMessages === 0;
+  const beat = state.talked > 0 ? Math.max(0, BEAT_MS - gap) : 0;
   let next: HeartState = {
     ...state, lastUserAt: now, unprompted: 0, talked: state.talked + 1,
     chatStart: newChat ? now : state.chatStart, chatMessages: newChat ? 1 : state.chatMessages + 1,
+    ...(beat ? { feelings: settle(state, state.residue, beat, now) } : {}),
   };
   if (state.talked > 0 && gap >= 20 * MINUTE) {
     const asleep = herMoment(new Date(now)).asleep;
@@ -293,17 +322,43 @@ export function arrive(state: HeartState, now = Date.now()): HeartState {
 // --- feeling something ----------------------------------------------------------------------------
 
 /**
- * Feelings change: each amount (-1..1) hits by her temperament's gain, with room left at the top
- * (a feeling near 1 can't double), and falls in proportion. Desire only with the 18+ switch on.
+ * Past HEART_ROOM above rest in all, what was already there gives way to what this moment just
+ * stirred (`raised`), in proportion: an insult in the middle of laughing lands in full and the
+ * laughing fades. If what's new fills the room by itself, it's scaled to fit and the rest is gone.
+ */
+function makeRoom(feelings: Feelings, raised: Feeling[]): Feelings {
+  const above = (name: Feeling) => Math.max(0, feelings[name] - TEMPERAMENT.rest[name]);
+  const fresh = new Set(raised);
+  let now = 0;
+  let before = 0;
+  for (const name of FEELINGS) if (fresh.has(name)) now += above(name); else before += above(name);
+  if (now + before <= HEART_ROOM) return feelings;
+  const freshScale = now > HEART_ROOM ? HEART_ROOM / now : 1;
+  const oldScale = before ? Math.max(0, HEART_ROOM - now * freshScale) / before : 1;
+  const room = { ...feelings };
+  for (const name of FEELINGS) {
+    if (above(name) > 0) room[name] = TEMPERAMENT.rest[name] + above(name) * (fresh.has(name) ? freshScale : oldScale);
+  }
+  return room;
+}
+
+/**
+ * Feelings change: each amount (-1..1) hits by her temperament's gain, and falls in proportion. A
+ * rise lands softer the fuller the feeling already is (the tenth joke in a row isn't the first), so
+ * only something really new takes it near the top; and there's only so much room (makeRoom). Desire
+ * only with the 18+ switch on.
  */
 function feel(state: HeartState, change: Partial<Feelings>, now: number, intimate: boolean, onMind?: { text: string; feeling: Feeling; own?: boolean }): HeartState {
-  const feelings = { ...state.feelings };
+  let feelings = { ...state.feelings };
+  const raised: Feeling[] = [];
   for (const [name, raw] of Object.entries(change) as [Feeling, number][]) {
     if (!isFeeling(name) || !Number.isFinite(raw) || raw === 0) continue;
     if (name === "desire" && !intimate) continue;
     const amount = clamp(raw, -1, 1) * TEMPERAMENT.gain[name];
-    feelings[name] = clamp(amount > 0 ? feelings[name] + amount * (1 - feelings[name]) : feelings[name] * (1 + Math.max(-1, amount)));
+    feelings[name] = clamp(amount > 0 ? feelings[name] + amount * (1 - feelings[name]) ** 2 : feelings[name] * (1 + Math.max(-1, amount)));
+    if (amount > 0) raised.push(name);
   }
+  feelings = makeRoom(feelings, raised);
   let residue = state.residue;
   if (onMind?.text) {
     const text = cleanText(onMind.text, 100);

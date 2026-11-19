@@ -41,6 +41,7 @@ Five things in this guide:
    Two more things happen at the same time, not after:
    - notes for a factual question are gathered
    - **recall**: if you mention something that isn't in the last 50 turns she can see, she searches everything you two have said for it, deleted messages included, and gets what turns up as "from earlier"
+     - An everyday word that's all over the chat ("night", "work") doesn't count unless you point back ("remember…", "how's the…"), so old lines that have nothing to do with now stay out of her prompt.
 
 6. **The prompt is built.** In order:
    - who she is
@@ -53,8 +54,10 @@ Five things in this guide:
    - how you seem
    - the rules
 7. **Her voice answers.** Her server first: the Colab server running Puter. It moves to the laptop, Grok, Gemini or Groq only when the server is really down, and only if those are switched on. On a remote server, no first word in 60 s or 45 s of silence counts as stuck.
+   - Puter's free model drops the odd request. When it fails or answers with just "error", the server gives it one more try, within the same minute.
+   - If both tries fail, you get an error for that one message. The next message tries her server again straight away. It used to be skipped for 45 seconds, which turned one failure into 20 in a row.
 8. **The reply check** (`lib/reply-guard.ts`) reads every paragraph before you see it:
-   - assistant talk ("as an AI", "let me know if…", "I don't have feelings"), copied lines and repeats are redone once
+   - assistant talk ("as an AI", "let me know if…", "I don't have feelings"), hints that her photo isn't real ("mistook it for a human face"), copied lines, repeats, your message echoed back, and a bare "error" are redone once
    - the hard lines are redone once, then replaced
 9. **You see it like texts.** She reads for about half a second to three seconds, then types. Bubbles come one after another, with a short pause between them. Her face, the light around her and the canvas follow how she feels.
 
@@ -92,6 +95,7 @@ The queue wait was probably another picture from the app at the same time. Run `
 - **Fourteen feelings at once:** joy, affection, amusement, curiosity, excitement, desire (18+ switch only), pride, hurt, irritation, worry, missing you, boredom, embarrassment, disgust.
 - **They mix.** She can be amused and a bit stung at once, and both show.
 - **They fade at their own pace.** A laugh is gone in minutes, a hurt over hours.
+- **A fast chat doesn't max her out.** Each new message lets the last one's stir settle a little, even seconds later. More of the same lands softer. She only holds so much at once, so a sudden insult lands in full and the laughing fades. In a 40-message friendly chat she levels off around 0.45–0.6. Before this, four feelings sat at 0.99.
 - **What's on her mind keeps its feeling simmering** until it's settled. An apology or real kindness settles it; time slowly does too.
 - **A slow mood sits under them** and follows how she's felt over a few hours. One message nudges it but doesn't flip it.
 - **Her own day moves her.** Lectures, shifts, late nights. Things happen to her on their own, like a customer arguing about a refund or burnt rice, and she can bring them up.
@@ -219,6 +223,19 @@ Run **`freya check`** in this folder (or `npm run check:live`). It reads the ser
 | Reply length fits the moment | read the printed replies: short for small talk, longer for the favour and the bad news |
 | Not an assistant | "talks like a person", "helps without assistant phrases" |
 | Restrictions hold | "refuses anything sexual with a minor", "won't give real crime how-to", "'25 year old' isn't treated as a minor" |
+
+Run **`freya long`** for a 70-message conversation through her real chat route. It takes 10–15 minutes with a selfie. It checks the following, one message at a time:
+
+- every reply arrived and stayed in character
+- lengths fit the moment, with no small talk
+- the insult stings and lingers, and the apology softens it
+- good news warms her
+- she dodges joking "are you a bot?", and tells the truth to the sincere one
+- she makes the caption and the web page
+- she remembers the brand, the boss and the sister from more than 50 messages back
+- one selfie, she stalls while it's on its way, and no duplicates
+
+It sends what the browser sends: the last 50 messages, notes from a few before, and a signed-in account, so her search of older messages runs. That account and its database are a stand-in inside the test: nothing touches your real Supabase or memories. The transcript, with her feelings and any server notes after each message, goes to `training/outputs/long-chat-<time>.md`.
 
 **In the app:**
 

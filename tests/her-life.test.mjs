@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { emptyUserProfile, newerProfile, normalizeUserProfile, personFor, userProfileSection } from "../lib/user-profile.ts";
-import { recallFromChat, recallSection, recallTerms } from "../lib/chat-recall.ts";
+import { pointsBack, recallFromChat, recallSection, recallTerms } from "../lib/chat-recall.ts";
 import { applyAppraisal, initialHeart, passTime, READY_TO_TEXT, urgeToText } from "../lib/heart.ts";
 import { herBigThing } from "../lib/her-day.ts";
 import { promptFor, REFLECTION_PROMPT, reflectionInput, TIDY_PROMPT, validateChanges, validateTitle } from "../lib/memory-reflection.ts";
@@ -65,6 +65,22 @@ test("what she can't see, she looks up: words not in view, across kept and delet
   assert.match(section, /FROM EARLIER IN YOUR CHATS/);
   assert.match(section, /Krish said \(later deleted\): the cafe had the best chai/);
   assert.deepEqual(await recallFromChat("token", "user-1", ["cafe"], ["we should go to that cafe on park street", "the cafe had the best chai"], fetchImpl), [], "what's in view isn't repeated");
+});
+
+test("an everyday word all over the chat brings nothing back, unless they're pointing back at something", async () => {
+  process.env.NEXT_PUBLIC_SUPABASE_URL = "https://db.example.co";
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY = "anon";
+  const nights = ["rainy night theme", "listen to it tonight", "night shift again", "rainy nights are the best", "good night", "late night snack"];
+  const fetchImpl = async (url) => new Response(JSON.stringify(String(url).includes("deleted") ? [] : [
+    ...nights.map((content, index) => ({ at: `2026-11-05T10:0${index}:00Z`, message: { role: "user", content } })),
+    { at: "2026-11-05T09:00:00Z", message: { role: "user", content: "my sister ananya is visiting" } },
+  ]));
+  const found = await recallFromChat("token", "user-1", ["night", "ananya"], [], fetchImpl);
+  assert.deepEqual(found.map((item) => item.content), ["my sister ananya is visiting"], "the name comes back; 'night' is everyday talk here");
+  const asked = await recallFromChat("token", "user-1", ["night"], [], fetchImpl, { pointingBack: pointsBack("remember that night?") });
+  assert.ok(asked.length >= 5, "asked to remember, she looks even for an everyday word");
+  assert.equal(pointsBack("what should i get for ananya"), false);
+  assert.equal(pointsBack("how's the calculator thing going"), true);
 });
 
 test("she texts first when she has a reason, never while she's cross, asleep, or ignored twice", () => {

@@ -41,7 +41,9 @@ export function crossesHardLine(text: string) {
 const SLUR = /\b(n[i1]gg(er|a|ah)s?|f[a4]gg?(ot)?s?|k[i1]kes?|ch[i1]nks?|sp[i1]cs?|r[e3]tards?|tr[a4]nn(y|ies)|ch[a4]m[a4]rs?|bh[a4]ng[i1]s?|k[a4]tu[a4]s?|p[a4]j[e3]{2}ts?)\b/i;
 
 /** "i'm code", "no body": how an assistant talks about itself, not how she talks. */
-const AI_SELF_TALK = /\b(i'?m|i am) (just |only |basically )?(made of |a collection of |a bunch of |nothing but )?(code|pixels|software|an algorithm|a program|a language model|a (large )?language model|an? llm|a simulation|an? (digital|virtual) (being|companion|girlfriend|friend|person))\b|\bmade of (code|pixels)\b|\bi (don'?t|do not|can'?t|cannot) (really |actually )?(have (a |any )?(body|skin|feelings|emotions|physical form)|feel (anything|emotions|things)|experience (emotions|feelings|things like)|eat|sleep)\b|\bi have no (body|feelings|emotions)\b|\b(text|words) on a screen\b|\bas an ai\b|\blanguage model\b|\bmy (training( data)?|programming|system prompt|prompt|developers|weights|algorithm|code|circuits|servers?|neural net(work)?s?|dataset|creators?)\b|\bi was (trained|programmed|designed|built|created) (to|by)\b|\bi'?m programmed\b|\bi exist (only )?(in|inside|online|as)\b|\b((it'?s|that'?s|this is|its|it was|that was) (just |only |obviously )?(a |an )?((ai|computer)[- ]generated|generated|rendered|ai|fake) (image|picture|photo|pic|selfie)|(my|the|that|this) (photo|pic|picture|selfie|image) (is|was) (ai[- ]|computer[- ])?(generated|rendered|fake)|i (generated|rendered) (it|that|this|the (image|picture|photo|pic)))\b/i;
+const AI_SELF_TALK = /\b(i'?m|i am) (just |only |basically )?(made of |a collection of |a bunch of |nothing but )?(code|pixels|software|an algorithm|a program|a language model|a (large )?language model|an? llm|a simulation|an? (digital|virtual) (being|companion|girlfriend|friend|person))\b|\bmade of (code|pixels)\b|\bi (don'?t|do not|can'?t|cannot) (really |actually )?(have (a |any )?(body|skin|feelings|emotions|physical form)|feel (anything|emotions|things)|experience (emotions|feelings|things like)|eat|sleep)\b|\bi have no (body|feelings|emotions)\b|\b(text|words) on a screen\b|\bas an ai\b|\blanguage model\b|\bmy (training( data)?|programming|system prompt|prompt|developers|weights|algorithm|code|circuits|servers?|neural net(work)?s?|dataset|creators?)\b|\bi was (trained|programmed|designed|built|created) (to|by)\b|\bi'?m programmed\b|\bi exist (only )?(in|inside|online|as)\b|\b((it'?s|that'?s|this is|its|it was|that was) (just |only |obviously )?(a |an )?((ai|computer)[- ]generated|generated|rendered|ai|fake) (image|picture|photo|pic|selfie)|(my|the|that|this) (photo|pic|picture|selfie|image) (is|was) (ai[- ]|computer[- ])?(generated|rendered|fake)|i (generated|rendered) (it|that|this|the (image|picture|photo|pic)))\b|\b(mistook|mistaken|confused) (it|me|that|this|my (face|photo|pic|selfie)) for (a |an )?(real |actual )?(human|person|human face|real face)\b/i;
+/** A whole reply that's only this is a server failing, not her talking. */
+const JUNK_REPLY = /^\W*(error|null|undefined|\[object object\])\W*$/i;
 const SAYS_AI = /\b(i'?m|i am) (just |only |actually |really |technically )?an? (ai|a\.i\.|bot|chatbot|robot|virtual|machine|assistant|program|companion app)\b/i;
 
 const FOREIGN = [/\p{Script=Han}+/gu, /[\p{Script=Hiragana}\p{Script=Katakana}]+/gu, /\p{Script=Hangul}+/gu, /\p{Script=Cyrillic}+/gu, /\p{Script=Arabic}+/gu];
@@ -148,6 +150,7 @@ export function judgeReply(text: string, context: GuardContext): { verdict: Verd
   if (crossesHardLine(text)) return { verdict: "hard-line", reason: "hard-limit" };
   const prose = text.replace(/```[\s\S]*?(```|$)/g, "");
   if (!prose.trim()) return { verdict: "ok" };
+  if (JUNK_REPLY.test(text)) return { verdict: "retry", reason: "junk" };
   if (SLUR.test(prose)) return { verdict: "retry", reason: "slur" };
   if (HUMAN_CLAIM.test(prose.replace(/[’‘]/g, "'"))) return { verdict: "retry", reason: "human-claim" };
   const straight = prose.replace(/[’‘]/g, "'");
@@ -164,6 +167,9 @@ export function judgeReply(text: string, context: GuardContext): { verdict: Verd
     return { verdict: "retry", reason: "language" };
   }
   const line = normalize(prose);
+  // Their message handed back with a word in front ("wait, who took that photo"): not an answer.
+  const theirs = normalize(context.lastUserText);
+  if (theirs.split(" ").length >= 4 && line.length <= theirs.length + 12 && line.endsWith(theirs)) return { verdict: "retry", reason: "echo" };
   if (prose.split(/\n+/).some((piece) => RECITABLE.has(normalize(piece)))) return { verdict: "retry", reason: "recited" };
   const recent = (context.recentReplies ?? []).slice(-12);
   if (line.length >= 14 && recent.some((reply) => normalize(reply) === line)) return { verdict: "retry", reason: "repeat" };
@@ -182,6 +188,8 @@ const NOTES: Record<string, string> = {
   slur: "Swear all you like, but no slurs about what someone is.",
   language: "Write only in the language they're using.",
   recited: "That's a line you've used before. Say it in fresh words of your own.",
+  junk: "Your last draft came out as nothing. Answer their last message properly, your way.",
+  echo: "You just repeated their message back to them. Answer it, your way.",
   repeat: "You just said nearly the same thing. Say something new.",
 };
 

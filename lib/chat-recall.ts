@@ -21,6 +21,17 @@ export function recallTerms(text: string, inView: string, max = 4): string[] {
 
 export type Recalled = { at: string; role: "user" | "assistant"; content: string; deleted: boolean };
 
+/** They're pointing back at something ("remember…", "you said…", "how's the…"): even an everyday word is worth looking up then. */
+const POINTS_BACK = /\b(remember|recall|forg[eo]t|told (you|me)|you said|i said|mention\w*|last time|that time|back when|earlier|again|still|how'?s (the|your|that)|how did (the|your|that)|what happened (with|to)|what was|whatever happened)\b/i;
+export const pointsBack = (text: string) => POINTS_BACK.test(text);
+
+/**
+ * A word in this many of the older messages found is everyday talk in this chat ("night", "work"),
+ * not one thing to remember: without a pointer back, what it finds is left out, so it doesn't
+ * crowd her prompt with old lines that have nothing to do with now.
+ */
+const EVERYDAY_IN_CHAT = 5;
+
 const config = () => {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL?.trim().replace(/\/+$/, "");
   const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY?.trim();
@@ -29,9 +40,10 @@ const config = () => {
 
 /**
  * Older messages that mention any of the terms, newest first, minus what's already in view. Both
- * tables at once, three seconds at most; nothing at all when Supabase isn't there.
+ * tables at once, three seconds at most; nothing at all when Supabase isn't there. Unless they're
+ * `pointingBack` ("remember…"), a term that's all over the chat brings nothing (EVERYDAY_IN_CHAT).
  */
-export async function recallFromChat(token: string, userId: string, terms: string[], inView: string[], fetchImpl: typeof fetch = fetch): Promise<Recalled[]> {
+export async function recallFromChat(token: string, userId: string, terms: string[], inView: string[], fetchImpl: typeof fetch = fetch, { pointingBack = false } = {}): Promise<Recalled[]> {
   const supabase = config();
   if (!supabase || !token || !userId || !terms.length) return [];
   const filter = `or=(${terms.map((term) => `message->>content.ilike.*${encodeURIComponent(term)}*`).join(",")})`;
@@ -47,14 +59,22 @@ export async function recallFromChat(token: string, userId: string, terms: strin
         const role = row.message?.role;
         const content = typeof row.message?.content === "string" ? row.message.content.replace(/\s+/g, " ").trim() : "";
         if ((role !== "user" && role !== "assistant") || !content || seen.has(content)) return [];
-        return [{ at: typeof row.at === "string" ? row.at : "", role, content: content.slice(0, 260), deleted }];
+        return [{ at: typeof row.at === "string" ? row.at : "", role, content, deleted }];
       });
     } catch {
       return [];
     }
   };
   const [kept, removed] = await Promise.all([query("freya_messages", false), query("freya_deleted_messages", true)]);
-  return [...kept, ...removed].sort((a, b) => b.at.localeCompare(a.at)).slice(0, 8).reverse();
+  const rows = [...kept, ...removed];
+  const has = (row: Recalled, term: string) => row.content.toLowerCase().includes(term.toLowerCase());
+  const telling = pointingBack ? terms : terms.filter((term) => rows.filter((row) => has(row, term)).length < EVERYDAY_IN_CHAT);
+  return rows
+    .filter((row) => telling.some((term) => has(row, term)))
+    .sort((a, b) => b.at.localeCompare(a.at))
+    .slice(0, 6)
+    .reverse()
+    .map((row) => ({ ...row, content: row.content.slice(0, 260) }));
 }
 
 const day = (at: string) => {

@@ -36,7 +36,7 @@ Decide how their LATEST message changes what she feels, and what she privately t
 Feelings (each 0 to 1): ${FEELINGS.filter((name) => name !== "desire" || intimate).join(", ")}.
 What she feels right now: ${now}.${onMind ? `\nStill on her mind: ${onMind}.` : ""}${thought ? `\nHer last thought: ${thought}` : ""}
 
-- feel: only the feelings this message moves, by how much (-0.5 to 0.5; most messages move one or two by 0.05-0.25). Feelings mix: she can be amused and a bit hurt at once. Something already felt can grow or ease. Swearing and teasing are normal between them: judge what they mean, not single words.${intimate ? "" : " Never use desire."}
+- feel: only the feelings this message moves, by how much (-0.5 to 0.5; most messages move one or two by 0.05-0.25). Feelings mix: she can be amused and a bit hurt at once. Something already felt can grow or ease; one that's already high grows only for something new, not for more of the same, and ordinary chat moves little. Swearing and teasing are normal between them: judge what they mean, not single words.${intimate ? "" : " Never use desire."}
 - thought: one private thought in her own voice, first person, lowercase, under 20 words, about them or this moment. Never about rules, AI, models or prompts.
 - wants: what she feels like doing next, one of: ${WANTS.join(", ")}.
 - events: any of these that happened in their message: ${EVENTS.join(", ")}. [] if none.

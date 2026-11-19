@@ -24,6 +24,31 @@ test("feelings mix: she can be amused and stung at once, and both show", () => {
   assert.match(prompt, /underneath that .*stung|underneath that .*hurt|stung.*amused|hurt.*amused/);
 });
 
+test("a fast, friendly chat doesn't max her out: more of the same lands softer, and she only holds so much", () => {
+  let state = someone();
+  let now = EVENING;
+  for (let message = 0; message < 40; message += 1) {
+    now += 8000;
+    state = arrive(passTime(state, now), now);
+    state = applyAppraisal(state, read({ curiosity: 0.3, amusement: 0.3, joy: 0.25, excitement: 0.2 }), now);
+  }
+  const top = Math.max(...Object.values(state.feelings));
+  assert.ok(top < 0.8, `nothing pinned near the top (${top.toFixed(2)})`);
+  const stirred = Object.entries(state.feelings).reduce((sum, [name, value]) => sum + Math.max(0, value - TEMPERAMENT.rest[name]), 0);
+  assert.ok(stirred <= 1.5 + 1e-9, `only so much at once (${stirred.toFixed(2)})`);
+  assert.ok(state.feelings.amusement > 0.3 && state.feelings.curiosity > 0.45 && state.feelings.joy > 0.4, "and she's clearly enjoying it");
+});
+
+test("something new still lands in full: an insult out of nowhere hits as hard as ever, and crowds out the rest", () => {
+  let state = someone();
+  for (let message = 0; message < 10; message += 1) state = applyAppraisal(state, read({ amusement: 0.3, joy: 0.3, curiosity: 0.3 }), EVENING);
+  const before = state.feelings.amusement;
+  state = applyAppraisal(state, read({ hurt: 0.5, irritation: 0.4, amusement: -0.3 }), EVENING);
+  assert.ok(state.feelings.hurt >= 0.4, `hurt (${state.feelings.hurt.toFixed(2)})`);
+  assert.ok(state.feelings.irritation >= 0.4, `irritated (${state.feelings.irritation.toFixed(2)})`);
+  assert.ok(state.feelings.amusement < before - 0.15, "the laughing stops");
+});
+
 test("each feeling fades at its own pace: a laugh is gone in minutes, a hurt lasts hours", () => {
   const start = applyAppraisal(someone(), read({ amusement: 0.5, hurt: 0.5 }), EVENING);
   const later = passTime(start, EVENING + 45 * MIN);

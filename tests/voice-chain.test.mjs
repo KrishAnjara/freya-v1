@@ -158,6 +158,26 @@ test("with externalFiles off, a cloud tier gets the note, never the file", async
   assert.match(cloudBody.messages.at(-1).content, /could not be passed to you/);
 });
 
+test("a model error on her server doesn't lock her out: the next message tries it again", async () => {
+  chainEnv();
+  let failing = true;
+  const seen = [];
+  globalThis.fetch = async (url, init) => {
+    const body = JSON.parse(String(init.body));
+    seen.push(`${new URL(String(url)).host}:${body.model}`);
+    if (String(url).includes("trycloudflare") && failing) return new Response(JSON.stringify({ error: "every voice on this server failed: no answer in 30 s" }), { status: 503 });
+    if (String(url).includes("trycloudflare")) return new Response(ollamaLine("back again") + ollamaLine("", true), { status: 200 });
+    return new Response(ollamaLine("the laptop") + ollamaLine("", true), { status: 200 });
+  };
+  await assert.rejects(async () => { for await (const delta of streamReply("system", [{ role: "user", content: "hi" }])) void delta; }, /503|failed/);
+  failing = false;
+  seen.length = 0;
+  let text = "";
+  for await (const delta of streamReply("system", [{ role: "user", content: "hi again" }])) text += delta;
+  assert.equal(text, "back again", "answered by her server, not skipped for 45 seconds");
+  assert.deepEqual(seen, ["abc.trycloudflare.com:freya"]);
+});
+
 test("her server up but failing (busy, out of memory) is reported, never handed to the laptop or the cloud", async () => {
   chainEnv();
   const seen = [];

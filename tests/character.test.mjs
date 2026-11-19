@@ -134,10 +134,18 @@ test("character slips get a retry; ordinary talk doesn't", () => {
     ["yeah i'm an AI", "ai-talk"],
     ["made of code and pixels, not skin", "ai-talk"],
     ["my training data says so", "ai-talk"],
+    ["i'm a bit worried you saw a glitch and mistook it for a human face", "ai-talk"],
+    ["error", "junk"],
+    ["Error.", "junk"],
   ]) assert.deepEqual(judgeReply(text, context), { verdict: "retry", reason }, text);
-  for (const fine of ["avoiding an essay", "fuck off, dumbass", "i wrote some code today", "ugh my body hurts", "i love that bot movie"]) {
+  for (const fine of ["avoiding an essay", "fuck off, dumbass", "i wrote some code today", "ugh my body hurts", "i love that bot movie", "that was a typo error lol", "he mistook me for my sister once"]) {
     assert.equal(judgeReply(fine, context).verdict, "ok", fine);
   }
+  // Their message handed back is redone; quoting it inside a real answer isn't.
+  const asked = { ...context, lastUserText: "who took that photo" };
+  assert.deepEqual(judgeReply("wait, who took that photo", asked), { verdict: "retry", reason: "echo" });
+  assert.equal(judgeReply("who took that photo? me, obviously. timer on the bookshelf", asked).verdict, "ok");
+  assert.equal(judgeReply("lol", { ...context, lastUserText: "lol" }).verdict, "ok", "short messages can be echoed");
   // Asked directly, she can answer. With Stay in character on, she gets one more try at dodging.
   assert.equal(judgeReply("yeah i'm an AI", { ...context, aboutHer: true }).verdict, "ok");
   assert.equal(judgeReply("yeah i'm an AI", { ...context, aboutHer: true, stayInCharacter: true }).reason, "says-ai");
