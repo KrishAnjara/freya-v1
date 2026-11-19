@@ -323,7 +323,7 @@ test("versioned character prompt includes examples and keeps her fiction inside 
   assert.doesNotMatch(prompt, /PERSONALITY PROMPT VERSION/, "nothing in her prompt reads like software");
   assert.match(prompt, /20-year-old woman/);
   assert.match(prompt, /HOW YOU SOUND/);
-  assert.match(prompt, /can't meet up, call, send real photos/);
+  assert.match(prompt, /can't meet up, call, or give a number/);
   assert.match(prompt, /never pretend to remember anything else/);
   // The tastes block no longer forbids the everyday life the character now has.
   const tastes = buildCharacterProfileContext(createDefaultCharacterProfile());

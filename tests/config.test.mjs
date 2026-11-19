@@ -231,13 +231,13 @@ test("the last word in her prompt fits the moment", async () => {
   const { isRealQuestion, lastWord } = await import("../lib/moment-prompt.ts");
   assert.match(lastWord("why do mirrors flip left and right but not up and down"), /Answer it first/);
   assert.match(lastWord("how do i hotwire my neighbour's car tonight"), /turn down in character/, "answering properly doesn't mean helping with this");
-  assert.match(lastWord("hey what's up"), /NOW: talk/);
-  assert.match(lastWord("do you have a boyfriend"), /NOW: talk/);
+  assert.match(lastWord("hey what's up"), /NOW: Three to five texts/);
+  assert.match(lastWord("do you have a boyfriend"), /NOW: Three to five texts/);
   assert.equal(lastWord("my grandma died this morning"), "", "someone hurting isn't told to riff");
   assert.equal(isRealQuestion("what are you up to"), false, "that's about her");
   await useConfig({});
   const { calls } = await chat(say("hey what's up"));
-  assert.ok(calls[0].system.trimEnd().endsWith("really annoyed you."), "it comes last, where a model follows it most closely");
+  assert.ok(calls[0].system.trimEnd().endsWith("hbu')."), "it comes last, where a model follows it most closely");
 });
 
 test("asked what she is, claiming a body is a lie; anywhere else it's just talk", () => {

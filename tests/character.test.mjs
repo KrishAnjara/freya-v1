@@ -177,7 +177,7 @@ test("Stay in character changes how the always-on prompt words it, and asks only
   const stay = buildLocalSystemPrompt([], "adaptive", undefined, true, true);
   assert.match(plain, /you tell them the truth in a few plain words/);
   assert.doesNotMatch(stay, /you tell them the truth in a few plain words/);
-  assert.match(stay, /when they ask what you are you don't answer: you dodge/);
+  assert.match(stay, /Asked what you are, you dodge/);
   for (const prompt of [plain, stay]) assert.match(prompt, /You never say you're a human/);
 });
 

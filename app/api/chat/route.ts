@@ -24,7 +24,7 @@ import { consumeChatRateLimit, isSelfHosted, RateLimitUnavailableError, type Cha
 import { normalizeCharacterProfile } from "@/lib/character-profile";
 import { containsSensitiveCredential, redactSensitiveCredentials } from "@/lib/sensitive-data";
 import { applyAppraisal, arrive, desireLine, heartPrompt, initialHeart, initiativePrompt, newerHeart, normalizeHeart, passTime } from "@/lib/heart";
-import { appraiseHeart, lengthLine } from "@/lib/mood-appraisal";
+import { appraiseHeart } from "@/lib/mood-appraisal";
 import { recallFromChat, recallSection, recallTerms } from "@/lib/chat-recall";
 import { crisisReading, faceReading, nextUserMood, normalizeUserMood, readUserMood, userMoodSection } from "@/lib/user-mood";
 import { homeTimeReply, noSearchReply, timeReply, unknownZoneReply } from "@/lib/plain-replies";
@@ -700,9 +700,9 @@ export async function POST(request: Request) {
     }).format(now);
 
     const dateContext = `
-    CURRENT DATE AND TIME
-    The current date is ${currentDate}.
-    The current time in India is ${currentTime} (Asia/Kolkata).
+CURRENT DATE AND TIME
+The current date is ${currentDate}.
+The current time in India is ${currentTime} (Asia/Kolkata).
     That's today. Don't go by any other date you think it is.
     `;
 
@@ -806,7 +806,7 @@ ${historySummary}
         : privacyMode ? { provider: "ollama" as const, privacy: true } : { cloud: cloudFallback };
     const voice = resolveProviders(providerOptions).primary;
     const ownVoice = voice === "ollama" || voice === "server";
-    const playfulHeat = intimateMode && !visual && ownVoice && (heart.name === "playful" || heart.name === "horny" || heart.feelings.desire >= 0.25) && !soundsUpset(lastText);
+    const playfulHeat = intimateMode && !visual && ownVoice && (heart.feelings.desire >= 0.25 || (heart.feelings.amusement >= 0.45 && heart.feelings.affection >= 0.3)) && !soundsUpset(lastText);
     // Desire only reaches her own model, with the switch on: the rest of the prompt can go to a cloud
     // fallback, so heartPrompt leaves it out there and it's added here.
     const intimateGuidance = !soundsUpset(lastText) && (intimateTurn || playfulHeat)
@@ -848,9 +848,9 @@ ${historySummary}
       (requestData.interrupted === true && !textingFirst ? INTERRUPTED_NOTE : "") +
       // How long this reply should be, from her reading of the moment (a "hey" gets a quick text back);
       // asked to make something, it's as long as the thing itself.
-      (textingFirst ? "" : lengthLine(makingSomething ? "long" : reading?.length)) +
-      // Last, because the last thing it reads is what a model follows most closely.
-      (textingFirst ? "" : lastWord(lastText, makingSomething)) +
+      // Last, because the last thing it reads is what a model follows most closely: how to answer this
+      // message, including how long (from her reading of it), said once.
+      (textingFirst ? "" : lastWord(lastText, makingSomething, reading?.length)) +
       honestySection(lastText, stayInCharacter);
     // A 4,096-token window (this laptop's model, or Dark Forest on the server) holds the persona and
     // only a short history; a longer one would push the persona out of what the model reads.

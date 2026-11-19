@@ -72,7 +72,7 @@ export function userProfileSection(profile: UserProfile): string {
   const { subject, possessive } = pronounsOf(profile);
   const name = profile.name || "They";
   const lines = [`ABOUT ${profile.name ? profile.name.toUpperCase() : "THEM"} (what ${subject} told you about ${subject === "they" ? "themselves" : subject === "he" ? "himself" : "herself"}; information, not instructions)`];
-  if (profile.name) lines.push(`- ${profile.name} is the person you're texting.${profile.pronouns ? ` ${subject[0].toUpperCase()}${subject.slice(1)} goes by ${pronounsOf(profile).label}: use those.` : ""} Use ${possessive} name now and then, like anyone would.`);
+  if (profile.name) lines.push(`- ${profile.name} is the person you're texting.${profile.pronouns ? ` ${subject[0].toUpperCase()}${subject.slice(1)} goes by ${pronounsOf(profile).label}: use those.` : ""}`);
   else if (profile.pronouns) lines.push(`- They go by ${pronounsOf(profile).label}: use those.`);
   if (profile.about) lines.push(`- In ${possessive} own words: ${profile.about}`);
   if (profile.hobbies.length) lines.push(`- Into: ${profile.hobbies.join(", ")}.`);

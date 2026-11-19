@@ -205,5 +205,5 @@ test("asked to make something, a reply with nothing made is redone once", async 
   assert.match(out, /file:index\.html/);
   const { lastWord } = await import("../lib/moment-prompt.ts");
   assert.match(lastWord("give me the code", true), /NOW: make it/);
-  assert.match(lastWord("hey"), /NOW: talk/);
+  assert.match(lastWord("hey"), /NOW: Three to five texts/);
 });

@@ -40,7 +40,7 @@ test("the persona follows docs/freya-persona.md and her fiction stays inside the
   assert.doesNotMatch(FREYA_CHARACTER, /illustration|bookshop|seaside/, "the old biography is gone");
   assert.match(FREYA_CHARACTER, /never assumed/, "closeness develops; it is not a default");
   const prompt = buildLocalSystemPrompt();
-  assert.match(prompt, /can't meet up, call, send real photos/);
+  assert.match(prompt, /can't meet up, call, or give a number/);
   assert.doesNotMatch(prompt, /operative|mission|tradecraft/i, "the old help-desk persona is gone");
 });
 
